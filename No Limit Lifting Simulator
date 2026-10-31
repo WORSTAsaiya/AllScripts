@@ -1099,7 +1099,7 @@ local Extras = (function()
 			Status.set("afk", nil)
 		end
 		E.antiAfk = {
-			type = "toggle", name = "Anti AFK", icon = "Z",
+			type = "toggle", name = "Anti AFK", icon = "Z", default = true,
 			desc = "You will not be kicked after 20 minutes of inactivity.",
 			callback = function(on)
 				stop()
@@ -1499,7 +1499,7 @@ local Extras = (function()
 	end
 
 	E.autoRejoin = {
-		type = "toggle", name = "Auto Rejoin", icon = "🔄", default = false,
+		type = "toggle", name = "Auto Rejoin", icon = "🔄", default = true,
 		desc = "Rejoins the SAME server when you get kicked or disconnected (Reborn kicks you too).",
 		callback = function(on)
 			env.AutoRejoin = on == true
@@ -1541,6 +1541,10 @@ local Extras = (function()
 	}
 	return E
 end)()
+
+-- Anti AFK + Auto Rejoin run as soon as the script is executed, before the UI has even been built (their switches show ON later)
+pcall(Extras.antiAfk.callback, true)
+pcall(Extras.autoRejoin.callback, true)
 
 -- Home is drawn by hand further down. Settings is a list of pages, each page a list of rows.
 -- Row types: toggle (callback(on)), dropdown (callback(option)), slider, input, button (run()), keybind, configsave, configlist.
@@ -5733,6 +5737,9 @@ do
 		for _, e in ipairs(rec) do if e.obj.Parent then put(e, 1) end end   -- exactly the original look
 		pcall(function() blocker:Destroy() end)
 		Config.autoLoad()
+		-- the saved config may have them OFF (older saves): they always run, so switch them back on
+		pcall(function() Extras.antiAfk._setUI(true) end)
+		pcall(function() Extras.autoRejoin._setUI(true) end)
 	end)
 end
 ------------------------------------------------------------------ UNLOAD CONFIRMATION (X button)
