@@ -304,7 +304,13 @@ local window = new("Frame", {
 	AnchorPoint = Vector2.new(0, 0), Position = UDim2.fromOffset(0, 0),
 	Size = UDim2.fromOffset(WINDOW_W, WINDOW_H), BackgroundColor3 = C.window,
 	BorderSizePixel = 0, ClipsDescendants = true,
+	Visible = false,   -- hidden until the opening animation has made everything transparent (no flash before the intro)
 }, gui)
+record.introPending = true
+-- failsafe: if the script ever breaks before the opening animation starts, still show the window after a while
+task.delay(25, function()
+	if alive and record.introPending then record.introPending = false window.Visible = true end
+end)
 corner(window, UDim.new(0, 28))
 new("UIGradient", {
 	Name = "ShimmerGradient",
@@ -5502,6 +5508,8 @@ do
 	for _, d in ipairs(window:GetDescendants()) do add(d) end
 	local addConn = window.DescendantAdded:Connect(function(d) if alive then add(d) end end)
 	for _, e in ipairs(rec) do put(e, 0) end   -- completely invisible
+	record.introPending = false
+	window.Visible = true   -- now it is safe to show the (fully transparent) window: the animation fades it in from nothing
 
 	------------------------------------------------ the pen: a wipe mask (left -> right) used for strokes and for writing text
 	-- p = 0 nothing shows, p = 1 everything shows; the edge in between is where the "pen" is
