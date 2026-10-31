@@ -10607,17 +10607,9 @@ local Utility = (function()
 		huOn = on
 		huRun = huRun + 1
 		if not on then huRestore() return end
-		local my = huRun
 		task.spawn(function()
-			local lastWorld = 0
-			while alive and huOn and huRun == my do
-				pcall(huScanCharacter)
-				if os.clock() - lastWorld > 8 then
-					lastWorld = os.clock()
-					pcall(huScanWorkspace)
-				end
-				task.wait(1)
-			end
+			pcall(huScanCharacter)
+			pcall(huScanWorkspace)
 		end)
 	end
 	table.insert(cleanupHooks, function() huOn = false huRun = huRun + 1 huRestore() end)
