@@ -1099,7 +1099,7 @@ local Extras = (function()
 			Status.set("afk", nil)
 		end
 		E.antiAfk = {
-			type = "toggle", name = "Anti AFK", icon = "Z",
+			type = "toggle", name = "Anti AFK", icon = "Z", default = true,
 			desc = "You will not be kicked after 20 minutes of inactivity.",
 			callback = function(on)
 				stop()
@@ -1499,7 +1499,7 @@ local Extras = (function()
 	end
 
 	E.autoRejoin = {
-		type = "toggle", name = "Auto Rejoin", icon = "🔄", default = false,
+		type = "toggle", name = "Auto Rejoin", icon = "🔄", default = true,
 		desc = "Rejoins the SAME server when you get kicked or disconnected (Reborn kicks you too).",
 		callback = function(on)
 			env.AutoRejoin = on == true
@@ -1541,6 +1541,10 @@ local Extras = (function()
 	}
 	return E
 end)()
+
+-- Anti AFK + Auto Rejoin run as soon as the script is executed, before the UI has even been built (their switches show ON later)
+pcall(Extras.antiAfk.callback, true)
+pcall(Extras.autoRejoin.callback, true)
 
 -- Home is drawn by hand further down. Settings is a list of pages, each page a list of rows.
 -- Row types: toggle (callback(on)), dropdown (callback(option)), slider, input, button (run()), keybind, configsave, configlist.
@@ -1873,11 +1877,26 @@ TAB_SCRIPTS.Farming = (function()
 
 	-- the ONE weight to buy next, as { idx, price, name }: the first one in the shop you don't own (VIP / unavailable ones skipped).
 	-- returns nil plus "done" (everything is owned) or "unknown" (can't tell yet)
+	-- SKIPPING WEIGHTS: the best weight is the most expensive one you can afford, so the cheaper ones in between are not worth buying.
+	-- skipBad / skipFails / skipBroken keep it safe: a weight the server refuses to sell out of order is remembered, and after 3 refusals
+	-- everything goes back to buying one by one in order.
+	local skipBroken, skipBad, skipFails = false, {}, 0
+	local function resetSkip() skipBroken, skipBad, skipFails = false, {}, 0 end
+	-- the highest weight the shop shows as owned (VIP ones don't count, they are handed out for free)
+	local function topOwnedIdx(shop)
+		local top = 1
+		for _, w in ipairs(shop) do
+			if w.has and not SKIP_WEIGHT[w.idx] and w.idx > top then top = w.idx end
+		end
+		return top
+	end
+
 	local function nextWeight()
 		local shop = readWeightShop()
 		if #shop > 0 then
+			local top = skipBroken and 1 or topOwnedIdx(shop)   -- weights cheaper than the best one you own are never worth buying
 			for _, w in ipairs(shop) do
-				if w.idx >= 2 and not SKIP_WEIGHT[w.idx] and not w.has then return w end
+				if w.idx >= 2 and w.idx > top and not SKIP_WEIGHT[w.idx] and not w.has then return w end
 			end
 			return nil, "done"
 		end
@@ -1896,6 +1915,35 @@ TAB_SCRIPTS.Farming = (function()
 		return { idx = i, price = nil, has = false, name = "weight #" .. i }
 	end
 
+	-- the most expensive weight you can afford RIGHT NOW (not above `cap`, if given); nil when there is none / skipping is off
+	local function bestAffordableWeight(cap)
+		if skipBroken then return nil end
+		local cash = readCash()
+		if not cash then return nil end
+		local shop = readWeightShop()
+		if #shop == 0 then return nil end
+		local top = topOwnedIdx(shop)
+		local best
+		for _, w in ipairs(shop) do
+			if w.idx >= 2 and w.idx > top and not SKIP_WEIGHT[w.idx] and not skipBad[w.idx] and not w.has
+				and w.price and (not cap or w.idx <= cap) and cash >= w.price
+				and (not best or w.price > best.price) then
+				best = w
+			end
+		end
+		return best
+	end
+
+	-- what to buy now. Returns weight, next-in-order weight  |  nil, "done" / "cap" (next weight is above `cap`) / "unknown"
+	local function pickWeight(cap)
+		local nxt, why = nextWeight()
+		if not nxt then return nil, why end
+		if cap and nxt.idx > cap then return nil, "cap" end
+		local best = bestAffordableWeight(cap)
+		if best and best.idx > nxt.idx then return best, nxt end
+		return nxt, nxt
+	end
+
 	-- compatibility for the Sell page: name and price of the next weight
 	local function readNextWeight()
 		local w = nextWeight()
@@ -1911,15 +1959,27 @@ TAB_SCRIPTS.Farming = (function()
 			task.wait(0.25)
 			return "coins"
 		end
+		local n0 = nextWeight()
+		local jumped = n0 ~= nil and n0.idx < w.idx   -- this buy skips cheaper weights
 		fire("BuyItem", "Income_Item", "Weight", w.idx)
 		-- check every 0.05s and return the moment the shop shows it as owned (up to 1s, same as the old fixed wait)
 		local t0 = os.clock()
 		while os.clock() - t0 < 1 do
 			task.wait(0.05)
 			local after, why = nextWeight()
-			if (after and after.idx > w.idx) or (not after and why == "done") then return "bought" end
+			if (after and after.idx > w.idx) or (not after and why == "done") then
+				if jumped then skipFails = 0 end
+				return "bought"
+			end
 		end
 		local cash = readCash()
+		if jumped and w.price and cash and cash >= w.price * 1.05 then
+			-- clearly enough cash but refused: this weight can't be jumped to. Try the next best one; after 3 refusals buy in order.
+			skipBad[w.idx] = true
+			skipFails = skipFails + 1
+			if skipFails >= 3 then skipBroken = true warn("[WORST Hub] The server doesn't sell weights out of order - buying them in order.") end
+			return "coins"
+		end
 		if w.price and cash and cash >= w.price then return "stuck" end
 		return "coins"
 	end
@@ -2138,10 +2198,11 @@ TAB_SCRIPTS.Farming = (function()
 	local rest = {
 		{
 			type = "toggle", name = "Auto Buy Weight", icon = "🏋", default = false,
-			desc = "Buys the next weight you don't have yet, in order.",
+			desc = "Buys the most expensive weight you can afford and skips the cheaper ones in between (it goes back to buying in order if the server refuses skipping).",
 			callback = function(on)
 				env.BuyWeight = on == true
 				if not on then Status.set("weight", nil) return end
+				resetSkip()
 				local my = newGen("buyweight")
 				Status.set("weight", "Checking your weights...")
 				task.spawn(function()
@@ -2151,9 +2212,9 @@ TAB_SCRIPTS.Farming = (function()
 							task.wait(1)
 							continue
 						end
-						local w, why = nextWeight()
+						local w, second = pickWeight(nil)   -- the most expensive weight you can afford (skips the cheaper ones)
 						if not w then
-							if why == "done" then
+							if second == "done" then
 								Status.set("weight", "Waiting - all weights owned")
 							else
 								Status.set("weight", "Can't read the weight shop yet - waiting")
@@ -2161,7 +2222,7 @@ TAB_SCRIPTS.Farming = (function()
 							task.wait(2)
 						else
 							print("Attempting to buy weight index: ", w.idx)
-							Status.set("weight", "Buying " .. w.name)
+							Status.set("weight", ((second and second.idx < w.idx) and "Jumping to " or "Buying ") .. w.name)
 							local r = tryBuyWeight(w)
 							if not env.BuyWeight or gens.buyweight ~= my then break end
 							if r == "bought" then
@@ -2209,10 +2270,11 @@ TAB_SCRIPTS.Farming = (function()
 		},
 		{
 			type = "toggle", name = "Smart Weight", icon = "🧠", default = false,
-			desc = "Only buys the weights you need to reach the next stage (saves coins).",
+			desc = "Buys the most expensive weight you can afford, but never above what this stage needs. Skips the cheaper ones (saves coins and time).",
 			callback = function(on)
 				env.SmartWeight = on == true
 				if not on then Status.set("sweight", nil) return end
+				resetSkip()
 				local my = newGen("smartweight")
 				task.spawn(function()
 					while env.SmartWeight and gens.smartweight == my do
@@ -2223,19 +2285,19 @@ TAB_SCRIPTS.Farming = (function()
 							return
 						end
 						local maxWeight = maxFor(WEIGHT_BY_STAGE, 21, 144, stage)
-						local w, why = nextWeight()
+						local w, second = pickWeight(maxWeight)   -- the most expensive weight you can afford, but never above this stage's limit
 						local pause = 1
 						if not w then
-							if why == "done" then
+							if second == "done" then
 								Status.set("sweight", "Waiting - all weights owned")
+							elseif second == "cap" then
+								Status.set("sweight", ("Waiting for the next stage (weights up to #%d owned)"):format(maxWeight))
 							else
 								Status.set("sweight", "Can't read the weight shop yet - waiting")
 							end
-						elseif w.idx > maxWeight then
-							Status.set("sweight", ("Waiting for the next stage (weights up to #%d owned)"):format(maxWeight))
 						else
-							Status.set("sweight", "Buying " .. w.name)
-							local r = tryBuyWeight(w)   -- only the next one, nothing else
+							Status.set("sweight", ((second and second.idx < w.idx) and "Jumping to " or "Buying ") .. w.name)
+							local r = tryBuyWeight(w)
 							if not env.SmartWeight or gens.smartweight ~= my then break end
 							if r == "bought" then
 								pause = 0.05   -- go straight on to the next weight
@@ -2902,11 +2964,13 @@ TAB_SCRIPTS.Miscellaneous = (function()
 	local INFO = {
 		{ "Auto Lift",                    "Gains muscle at the speed chosen in Choose Gain Muscle Method (Fast Lifter gamepass speed or normal).",   "ℹ" },
 		{ "Gamepass TIPS",                "If you use this script 24/7, you only need to get 2x COINS and 2x MUSCLE gamepasses.",              "💡" },
-		{ "Auto Sell",                    "Sells your muscle even without going to the sell circle. Pick how in Choose Sell Muscle Method: every few seconds, Sell If Full, or Sell If Enough (only when it covers the next weight).",          "ℹ" },
-		{ "Smart Weight",                 "Will ONLY buy the weights needed to reach the next stage, in order to save coins.",                 "ℹ" },
-		{ "Smart DNA",                    "Will ONLY buy the DNA needed to reach the next stage, in order to save coins.",                     "ℹ" },
+		{ "Safe Zone Teleport", "As soon as you execute the script you are teleported to the safe zone, so you can AFK there (use a public server).", "ℹ" },
+		{ "Auto Sell", "Sells your muscle even without going to the sell circle. Pick how in Choose Sell Muscle Method: every few seconds, Sell If Full, or Sell If Enough (only when it covers the next weight). Works with Conceal mode (your real muscle is read from the HUD). With Infinite storage, Sell If Full can never trigger - use Sell If Enough or a timed option.", "ℹ" },
+		{ "Auto Buy Weight", "Buys the most expensive weight you can afford and skips the cheaper ones in between, so after a new stage you climb back fast: lift, sell, buy the best one you can afford, repeat. Smart Weight has priority if both are on.", "ℹ" },
+		{ "Smart Weight", "Same skipping as Auto Buy Weight, but never buys above what the current stage needs (saves coins). Pauses Auto Buy Weight while it is on.", "ℹ" },
+		{ "Smart DNA", "Will ONLY buy the DNA needed to reach the next stage, in order to save coins. It never buys weights.", "ℹ" },
 		{ "Auto Body Alter",              "Auto buys the new Body Alter (Stage).",                                                             "ℹ" },
-		{ "Auto Rejoin",                  "Rejoins the same server after a kick / disconnect. Fill in Rejoin Loader so the hub starts again by itself.", "ℹ" },
+		{ "Auto Rejoin", "Starts by itself when the script is executed. Rejoins the same server after a kick / disconnect (it can't get back in if that server is closed or full). Fill in Rejoin Loader so the hub starts again by itself.", "ℹ" },
 		{ "Reborn Macro: Gain + Sell",    "Fast no-rollback lifting plus Sell If Enough, in one place.",                                       "ℹ" },
 		{ "Reborn Macro: Auto Reborn",    "Reborns at stage 30 once you have 1 Sxtg coins. Reborning resets your progress.",                   "ℹ" },
 		{ "Reborn Macro: Auto Enable Sell", "The game switches Sell off after a reborn. This switches it back on, so the macro keeps working after you rejoin.", "ℹ" },
@@ -2914,7 +2978,8 @@ TAB_SCRIPTS.Miscellaneous = (function()
 		{ "Auto Attack & Teleport",       "Teleports to players whose stage is lower than yours, on the opposite team. Equip Fist/Foot first.", "ℹ" },
 		{ "Teleport to Player",           "Literally teleports you to the player chosen in the Players dropdown.",                             "ℹ" },
 		{ "Spectate Player",              "Watches the player chosen in the Players dropdown through their camera.",                           "ℹ" },
-		{ "Anti AFK",                     "You will not be kicked after 20 minutes of inactivity.",                                            "ℹ" },
+		{ "Enable Webhook Logger", "Sends your username, muscle, stage and cash to your Discord webhook every 10 minutes. Shows your real muscle even in Conceal mode.", "ℹ" },
+		{ "Anti AFK", "Starts by itself when the script is executed. You will not be kicked after 20 minutes of inactivity.", "ℹ" },
 		{ "Auto Equip/Unequip Weight",    "Automatically equips your weight so you don't get reported for suspicious actions.",                "ℹ" },
 		{ "Auto Clicker Bloodline",       "Auto clicks your screen every 12 seconds.",                                                         "ℹ" },
 		{ "Auto Clicker Killstreak",      "Auto clicks your screen every 5 seconds.",                                                          "ℹ" },
@@ -4692,7 +4757,7 @@ end
 -- Home tab: welcome card, Discord button, 4 cards on the right
 do
 	local page = pages["Home"]
-	local DISCORD_LINK = "https://discord.gg/Hk7QN5un5k "   -- put your Discord invite here
+	local DISCORD_LINK = "https://discord.gg/w0rst"   -- put your Discord invite here
 
 	-- HOME IMAGES: put an image in the big center card (hero) and the four right cards (box1 - box4).
 	-- Each value can be:  a Roblox image id ("rbxassetid://123456789" or just 123456789)
@@ -5733,6 +5798,9 @@ do
 		for _, e in ipairs(rec) do if e.obj.Parent then put(e, 1) end end   -- exactly the original look
 		pcall(function() blocker:Destroy() end)
 		Config.autoLoad()
+		-- the saved config may have them OFF (older saves): they always run, so switch them back on
+		pcall(function() Extras.antiAfk._setUI(true) end)
+		pcall(function() Extras.autoRejoin._setUI(true) end)
 	end)
 end
 ------------------------------------------------------------------ UNLOAD CONFIRMATION (X button)
