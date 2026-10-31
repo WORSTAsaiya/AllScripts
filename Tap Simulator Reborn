@@ -10607,9 +10607,17 @@ local Utility = (function()
 		huOn = on
 		huRun = huRun + 1
 		if not on then huRestore() return end
+		local my = huRun
 		task.spawn(function()
-			pcall(huScanCharacter)
-			pcall(huScanWorkspace)
+			local lastWorld = 0
+			while alive and huOn and huRun == my do
+				pcall(huScanCharacter)
+				if os.clock() - lastWorld > 8 then
+					lastWorld = os.clock()
+					pcall(huScanWorkspace)
+				end
+				task.wait(1)
+			end
 		end)
 	end
 	table.insert(cleanupHooks, function() huOn = false huRun = huRun + 1 huRestore() end)
@@ -13459,6 +13467,55 @@ local TradeAgent = (function()
                 task.wait(everyNow)
             end
         end)
+
+        -- ===== GLOBAL HATCHES: read hatch announcements from the game chat and send them to the Worker (Global tab + Discord webhook) =====
+        -- !!! ghParse is a GUESS at the announcement wording ("Player hatched #12 Pet Name (1 in 1.2M)!"). With DEBUG = true every chat line is printed
+        --     as "[TSR chat] ...": copy a real announcement line and adjust ghParse until it returns the right player / pet / num / odds.
+        do
+            local ghQueue = {}
+            local function ghParse(text)
+                text = tostring(text or ""):gsub("<[^>]+>", "")   -- strip rich-text tags
+                if not text:lower():find("hatched") then return nil end
+                local player, rest = text:match("([%w_]+) just hatched (.+)$")
+                if not player then player, rest = text:match("([%w_]+) hatched (.+)$") end
+                if not player or not rest then return nil end
+                local odds = rest:match("1 in ([%w%.,]+)")
+                local num = rest:match("#(%d+)")
+                local pet = rest:gsub("%(?1 in [%w%.,]+%)?", ""):gsub("#%d+", ""):gsub("[!%.]+%s*$", ""):gsub("^%s+", ""):gsub("%s+$", "")
+                pet = pet:gsub("^[Aa]n? ", "")
+                if pet == "" then return nil end
+                return { player = player, pet = pet, num = num or "", odds = odds and ("1 in " .. odds) or "",
+                         scope = text:lower():find("global") and "Global" or "Server" }
+            end
+            local function ghAdd(text)
+                local ok, row = pcall(ghParse, text)
+                if ok and row and #ghQueue < 60 then ghQueue[#ghQueue + 1] = row end
+            end
+            pcall(function()
+                game:GetService("TextChatService").MessageReceived:Connect(function(m)
+                    if DEBUG then print("[TSR chat]", m.Text) end
+                    ghAdd(m.Text)
+                end)
+            end)
+            pcall(function()   -- old chat system fallback (the Worker drops the duplicate if both fire)
+                game:GetService("ReplicatedStorage").DefaultChatSystemChatEvents.OnMessageDoneFiltering.OnClientEvent:Connect(function(d)
+                    if type(d) == "table" then ghAdd(d.Message) end
+                end)
+            end)
+            task.spawn(function()
+                while alive do
+                    task.wait(5)
+                    if #ghQueue > 0 and httpRequest and siteAllowed(lp.Name) then
+                        local rows = ghQueue; ghQueue = {}
+                        pcall(httpRequest, {
+                            Url = WORKER_URL .. "/agent/hatches", Method = "POST",
+                            Headers = { ["Content-Type"] = "application/json", ["x-key"] = AGENT_KEY },
+                            Body = HttpService:JSONEncode({ rows = rows }),
+                        })
+                    end
+                end
+            end)
+        end
 
         -- ============================================================ INVENTORY WEBHOOK (Discord, edits itself)
         -- One Discord message PER ACCOUNT. It is posted once, then EDITED in place whenever the inventory changes
