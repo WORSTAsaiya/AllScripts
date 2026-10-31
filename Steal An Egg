@@ -151,6 +151,21 @@ local S = {
     HALLOWEEN_SCAN_SWAMP    = true,  -- also scan Zone 2 (Haunted Swamp: BloodBloom, Shelltide Voyager)
     HALLOWEEN_INTERVAL      = 1,     -- seconds between Halloween scans
 
+    -- ----- multi-account backup -----
+    -- Run the script on many accounts; only ONE of them sends each alert.
+    CLAIM_ENABLED = true,
+    CLAIM_MODE    = "site",  -- "file" = all accounts on the SAME PC (shared executor workspace)
+                             -- "site" = accounts on DIFFERENT PCs (needs the /claim route on your worker)
+
+    -- Claim eggs by NAME + ZONE instead of by unique id. Use this when the same egg has a
+    -- different id on each account (Demons / Angels eggs). Costs: two identical eggs in the
+    -- same zone at the same moment count as one alert.
+    CLAIM_BY_NAME  = true,
+    CLAIM_NAME_TTL = 270,    -- seconds; keep it a bit under the ~5.5 min egg cycle
+
+    -- ----- Rejoin button -----
+    REJOIN_BUTTON = true,    -- show a "Rejoin" button in the middle of the screen
+
     -- ----- debug -----
     DEBUG_PRINT = false,  -- print every egg's raw category / resolved name
     DEBUG_WEBHOOK = true, -- send rare-egg alert diagnostics to WEBHOOKS.Debug
@@ -409,6 +424,73 @@ local RS          = game:GetService("ReplicatedStorage")
 local Players     = game:GetService("Players")
 
 local httpRequest = request or http_request or (syn and syn.request)
+
+-- ============================================================
+-- CLAIM: only ONE account sends each alert
+-- claim(key, ttl) -> shouldSend (bool), reason (string)
+-- Fails open: if the claim system breaks, the alert is sent anyway.
+-- ============================================================
+local MY_ID = HttpService:GenerateGUID(false)
+
+local function claimFile(key, ttl)
+    if not (readfile and writefile and isfile) then return true end
+
+    local file = "worst_claim_" .. tostring(key):gsub("[^%w_%-]", "_") .. ".txt"
+
+    local function read()
+        if not isfile(file) then return nil end
+        local ok, txt = pcall(readfile, file)
+        if not ok then return nil end
+        local id, t = tostring(txt):match("^(.-)|(%d+)$")
+        if id and os.time() - tonumber(t) < ttl then return id end
+        return nil
+    end
+
+    local owner = read()
+    if owner then return owner == MY_ID end
+
+    task.wait(math.random() * 0.3)          -- jitter so accounts don't write at the same instant
+    owner = read()
+    if owner then return owner == MY_ID end
+
+    pcall(writefile, file, MY_ID .. "|" .. os.time())
+    task.wait(0.5)                          -- last writer wins; verify it was us
+    return read() == MY_ID
+end
+
+local function claimSite(key, ttl)
+    if not httpRequest or SITE.URL == "" then return true, "no http function (sent anyway)" end
+    local ok, res = pcall(function()
+        return httpRequest({
+            Url     = (SITE.URL:gsub("/alert$", "/claim")),
+            Method  = "POST",
+            Headers = { ["Content-Type"] = "application/json", ["x-key"] = SITE.KEY },
+            Body    = HttpService:JSONEncode({ key = key, id = MY_ID, ttl = ttl }),
+        })
+    end)
+    if not ok then return true, "request error (sent anyway): " .. tostring(res) end
+    if not res then return true, "no response (sent anyway)" end
+    if tonumber(res.StatusCode) ~= 200 then
+        return true, "HTTP " .. tostring(res.StatusCode) .. " (sent anyway)"
+    end
+    local ok2, data = pcall(function() return HttpService:JSONDecode(res.Body) end)
+    if not ok2 or type(data) ~= "table" then return true, "bad reply (sent anyway)" end
+    if data.winner == true then return true, "won" end
+    return false, "lost"
+end
+
+local function claim(key, ttl)
+    if not S.CLAIM_ENABLED then return true, "claim off" end
+    local ok, result, why
+    if S.CLAIM_MODE == "site" then
+        ok, result, why = pcall(claimSite, key, ttl)
+    else
+        ok, result = pcall(claimFile, key, ttl)
+        why = result and "won" or "lost"
+    end
+    if not ok then return true, "error (sent anyway): " .. tostring(result) end
+    return result, why
+end
 
 local Assets, Areas = nil, nil
 pcall(function() Assets = require(RS.Data.Assets) end)
@@ -935,8 +1017,24 @@ task.spawn(function()
     while alive() do
         local a = table.remove(alertQueue, 1)
         if a then
-            pcall(sendEggEmbed, a.name, a.tier, a.location)
-            task.wait(S.ALERT_SEND_GAP)
+            local ckey, cttl
+            if S.CLAIM_BY_NAME then
+                ckey = "egg_" .. tostring(game.JobId) .. "_" .. a.name .. "_" .. tostring(a.location or "")
+                cttl = S.CLAIM_NAME_TTL
+            else
+                local id = (a.uid and a.uid ~= "") and a.uid or a.name
+                ckey = "egg_" .. tostring(game.JobId) .. "_" .. id
+                cttl = 1800
+            end
+
+            local shouldSend, why = claim(ckey, cttl)
+            debugLog(string.format("CLAIM %s -> %s (%s) key=`%s`",
+                tostring(a.name), shouldSend and "SEND" or "SKIP", tostring(why), ckey:sub(1, 80)))
+
+            if shouldSend then
+                pcall(sendEggEmbed, a.name, a.tier, a.location)
+                task.wait(S.ALERT_SEND_GAP)
+            end
         else
             task.wait(0.05)
         end
@@ -982,6 +1080,7 @@ local function checkRare(eggs)
                     name     = info.name,
                     tier     = info.tier,
                     location = location,
+                    uid      = e.uid,
                 }
 
                 print("[EGG] rare spotted:", info.name, "(" .. info.tier .. ")")
@@ -1360,6 +1459,11 @@ local function onButterflyBegan(name, duration)
     end
     lastButterflyAt = now
 
+    if not claim("butterfly", BUTTERFLY.COOLDOWN) then
+        print("[Butterfly] another account already sent it")
+        return
+    end
+
     sendButterflyEmbed(now, dur)
     pushSite({ type = "butterfly", image = BUTTERFLY.IMAGE })
     print("[Butterfly] alert sent")
@@ -1479,6 +1583,12 @@ do
 
         -- tell the board feed the race is open (cleared when the join window ends)
         raceEndsAt = joinEndsAt
+
+        if not claim("race", RACE.COOLDOWN) then
+            print("[RacingWebhook] another account already sent it")
+            return
+        end
+
         pushSite({ type = "race", location = RACE.LOCATION, status = "Race Open", image = RACE.IMAGE })
 
         local startTs   = now
@@ -1679,6 +1789,7 @@ if S.HALLOWEEN_ENABLED then
                                     name     = eggKey,
                                     tier     = info.tier,
                                     location = ZONE_NAMES[zone] or "Halloween Dimension",
+                                    uid      = uid,
                                 }
                                 print("[HALLOWEEN] rare spotted:", eggKey, "(" .. info.tier .. ")", "zone", zone)
                                 debugLog(string.format("**HALLOWEEN ALERT** %s (%s) uid=`%s` zone=%s src=%s",
@@ -1719,6 +1830,89 @@ if S.HALLOWEEN_ENABLED then
     end)
 
     print("[EGG] Halloween Dimension scanner running")
+end
+
+-- ============================================================
+-- PART 6: REJOIN BUTTON
+-- A button in the middle of the screen. Click it to rejoin the game.
+-- Tries the SAME server first; if that fails (full / closed) it joins any server.
+-- ============================================================
+
+if S.REJOIN_BUTTON then
+    task.spawn(function()
+        local TeleportService = game:GetService("TeleportService")
+        local lp = Players.LocalPlayer
+        if not lp then return end
+
+        -- remove the button left by a previous run of this script
+        pcall(function()
+            if ENV.WORST_GUI then ENV.WORST_GUI:Destroy() end
+        end)
+
+        local gui = Instance.new("ScreenGui")
+        gui.Name = "WorstRejoin"
+        gui.ResetOnSpawn = false
+        gui.IgnoreGuiInset = true
+        gui.DisplayOrder = 999
+        gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+        local parented = false
+        if gethui then parented = pcall(function() gui.Parent = gethui() end) end
+        if not parented then
+            parented = pcall(function() gui.Parent = game:GetService("CoreGui") end)
+        end
+        if not parented then
+            gui.Parent = lp:WaitForChild("PlayerGui")
+        end
+        ENV.WORST_GUI = gui
+
+        local btn = Instance.new("TextButton")
+        btn.Name = "Rejoin"
+        btn.AnchorPoint = Vector2.new(0.5, 0.5)
+        btn.Position = UDim2.new(0.5, 0, 0.5, 0)
+        btn.Size = UDim2.new(0, 170, 0, 46)
+        btn.BackgroundColor3 = Color3.fromRGB(231, 76, 60)
+        btn.BorderSizePixel = 0
+        btn.AutoButtonColor = true
+        btn.Text = "Rejoin"
+        btn.TextColor3 = Color3.new(1, 1, 1)
+        btn.TextSize = 20
+        btn.Font = Enum.Font.GothamBold
+        btn.Parent = gui
+
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, 10)
+        corner.Parent = btn
+
+        local busy = false
+        btn.MouseButton1Click:Connect(function()
+            if busy then return end
+            busy = true
+            btn.Text = "Rejoining..."
+            debugLog("REJOIN button pressed")
+
+            -- 1) same server
+            local ok = pcall(function()
+                TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, lp)
+            end)
+
+            -- 2) if that errors, or the teleport fails, join any server
+            local failConn
+            failConn = TeleportService.TeleportInitFailed:Connect(function()
+                if failConn then failConn:Disconnect() end
+                pcall(function() TeleportService:Teleport(game.PlaceId, lp) end)
+            end)
+
+            if not ok then
+                pcall(function() TeleportService:Teleport(game.PlaceId, lp) end)
+            end
+
+            task.delay(15, function()
+                busy = false
+                if btn.Parent then btn.Text = "Rejoin" end
+            end)
+        end)
+    end)
 end
 
 print("[EGG] running!")
