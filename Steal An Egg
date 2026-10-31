@@ -163,6 +163,11 @@ local S = {
     CLAIM_BY_NAME  = true,
     CLAIM_NAME_TTL = 270,    -- seconds; keep it a bit under the ~5.5 min egg cycle
 
+    -- false = accounts in DIFFERENT servers share one claim (use this: the egg rotation is the
+    --         same in every server, so one alert per egg is enough).
+    -- true  = each server gets its own claim (only if every server had its own different eggs).
+    CLAIM_PER_SERVER = false,
+
     -- ----- Rejoin button -----
     REJOIN_BUTTON = true,    -- show a "Rejoin" button in the middle of the screen
 
@@ -1018,12 +1023,13 @@ task.spawn(function()
         local a = table.remove(alertQueue, 1)
         if a then
             local ckey, cttl
+            local srv = S.CLAIM_PER_SERVER and (tostring(game.JobId) .. "_") or ""
             if S.CLAIM_BY_NAME then
-                ckey = "egg_" .. tostring(game.JobId) .. "_" .. a.name .. "_" .. tostring(a.location or "")
+                ckey = "egg_" .. srv .. a.name .. "_" .. tostring(a.location or "")
                 cttl = S.CLAIM_NAME_TTL
             else
                 local id = (a.uid and a.uid ~= "") and a.uid or a.name
-                ckey = "egg_" .. tostring(game.JobId) .. "_" .. id
+                ckey = "egg_" .. srv .. id
                 cttl = 1800
             end
 
