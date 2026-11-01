@@ -74,6 +74,17 @@
 --// 37. Kaitun: Kaitun Hatch now runs Auto Rebirth itself (moved from Kaitun Stats; Kaitun Stats keeps Auto Equip + enchanting) and switches on Auto Luck Potion, Auto Coins Potion
 --//     and Auto Claim Quests (new green check "boosts" on the Kaitun tab). Auto Rebirth no longer treats data.Upgrades.RebirthButtons as a lock; an amount the server refuses is skipped for 1 minute.
 --// 36. Miscellaneous: "Auto Claim Quests" claims every finished quest in the Quests list (QuestService.RF.ClaimQuest) for its potion rewards.
+--// 38. Auto Hatch now uses the standalone Hatch Test's system. Farming > Hatch has two new dropdowns: "Hatching Method" (Auto / Manual, Auto by default) and
+--//     "Hatch Amount" (moved here from Settings, where it was called "Eggs Per Hatch"; old saves still load via ID_ALIAS).
+--//     Auto = the script sends no hatch requests of its own: it keeps the GAME's Auto Open ON (reads the button: "Auto Open!" = off, "Stop" = on; switches it on with
+--//     F -> first hatch + F -> button signal -> mouse click, remembering what worked; reacts to the server's "TooFar" by teleporting back to the egg spot).
+--//     Stopping / pausing for a higher priority feature switches Auto Open off and fires StopOfflineHatch so the server session ends too.
+--//     Manual = Auto Open is kept OFF and the script's own hatch loop sends the requests (Auto = false) with the chosen Hatch Amount.
+--//     The old "press F once" hatch (startFHatch / stopFHatch / the F Octa check) is no longer used (HA.fMode = false).
+--// 39. Inventory + Debug reports are now sent by the BOT (2egg_relay.py), like the global hatch posts: the hub no longer contains INV_WEBHOOK / DBG_WEBHOOK.
+--//     Each account still has ONE message (the bot posts it once and edits it, keeping the message id per account). The hub sends the report to the EGG DEBUG
+--//     channel as TAPINV{...} / TAPDBG{...} (embed in the message's embeds) and only for accounts in SITE_ACCOUNTS.
+--//     Settings > General > "Debug Mode" ("DO NOT ENABLE!!"): the debug report is only sent while it is ON. It is OFF on every execute (never saved).
 --// =====================================================================================================
 --// WORST Hub - Auto Hatch (Hatch tab) + Auto Craft (Pets tab)
 --// Execute as a normal script. Executing again closes the previous instance first.
@@ -1242,7 +1253,7 @@ local function buildLogic()
 	local DO_HATCH     = true     -- false = teleport only, no hatching
 	local COUNT        = 3        -- eggs per hatch
 	local DELAY        = 2        -- seconds between hatches
-	local AUTO_FLAG    = true
+	local AUTO_FLAG    = false   -- v38: our own (Manual) hatch requests are plain hatches, not Auto Open ones
 	local SEQ_FALLBACK = 1
 	local SEQ_WAIT     = 10
 
@@ -1522,8 +1533,12 @@ local function buildLogic()
 	-- the game hatches 8 (Octa) or less. F stays on and our own hatch loop runs at the same time with that amount (F is pressed again
 	-- only to turn it off when Auto Hatch stops or pauses).
 	-- false = the old hatch-count test. (a field on HA because this function is close to Lua's 200-locals limit)
-	HA.fMode = true
+	HA.fMode = false   -- v38: the F Octa check is not used any more (Auto = the game's Auto Open, Manual = our own loop with the old hatch-count test)
 	HA.own = {}   -- sequence numbers of OUR hatch requests: results of anything else (the game's F) are counted into "Hatched" too
+	function HA.gameRolling()   -- true while the GAME's own auto hatch (F) is delivering results: some arrived in the last 6 s and not just as the tail of an F press of ours
+		local t = HA.lastGameRollAt
+		return t ~= nil and os.clock() - t < 6 and t > (HA.lastF or -1e9) + 2
+	end
 	print("[WORST Hub] build: auto8-probe + restore-hide + scroll-keep")
 	local AUTO = { count = 8, fails = 0, nextProbe = 0, ok8 = false, lastEvt = 0, lastData = nil, dumped = 0 }
 	HA_auto = AUTO
@@ -1574,18 +1589,20 @@ local function buildLogic()
 				connect(r.OnClientEvent, function(d)
 					AUTO.lastEvt, AUTO.lastData = os.clock(), d
 					if r.Name == "EggHatchResult" and type(d) == "table" then   -- the loop waits for these: next request only after the server answered
+						if HA.auto then pcall(HA.auto.onResult, d) end   -- v38: Auto Open state + TooFar reaction
 						if tonumber(d.Seq) then
 							HA.resSeq = math.max(HA.resSeq or 0, d.Seq)
 							if not seq or d.Seq > seq then seq = d.Seq end
 						end
 						if tonumber(d.Speed) then HA.speed = d.Speed end
-						if d.Success == false and tonumber(d.Seq) then HA.failSeq = math.max(HA.failSeq or 0, d.Seq) end   -- refused (e.g. too far from the egg)
+						if d.Success == false and tonumber(d.Seq) and HA.own[tonumber(d.Seq)] then HA.failSeq = math.max(HA.failSeq or 0, d.Seq) end   -- OUR request was refused (e.g. too far from the egg); refusals of the game's own F hatches are not ours
 					end
 					if r.Name == "EggHatchResult" and type(d) == "table" and tonumber(d.Rolls) then
 						local rolls = tonumber(d.Rolls)
 						AUTO.lastRollAt = os.clock()
 					HA.lastRolls = rolls
 					-- hatches that were not started by our own loop (the game's F) count into "Hatched" as well
+					if d.Success ~= false and not HA.own[tonumber(d.Seq) or -1] then HA.lastGameRollAt = os.clock() end   -- the game's own F hatch is delivering results
 					if hEnabled and d.Success ~= false and not HA.own[tonumber(d.Seq) or -1] then hatched = hatched + rolls end
 						if rolls >= 8 then AUTO.lastRoll8At = os.clock() end
 						-- Auto + we asked for 8: the server tells us right away what it gave
@@ -1831,7 +1848,7 @@ local function buildLogic()
 	local function hRunningStatus()
 		local s = string.format("%s | holding position (within %d studs)", hEgg.name, TP_RADIUS)
 		if DO_HATCH then
-			s = s .. string.format(" | Game auto hatch (F) | Hatched: %d", hatched)
+			s = s .. string.format(" | %s | Hatched: %d", HA.manual() and "Manual hatch" or ("Auto Open " .. tostring(HA.auto and HA.auto.cur() or "?"):upper()), hatched)
 		end
 		return s
 	end
@@ -1853,7 +1870,7 @@ local function buildLogic()
 		end
 		while hActive(id) do
 			-- only teleport when you're NOT already at the egg spot (outside TP_RADIUS); otherwise leave you alone
-			if not isNear(egg.cf) then teleportTo(egg.cf) end
+			if HA.needTP or not isNear(egg.cf) then HA.needTP = false teleportTo(egg.cf) end   -- (needTP = the server said TooFar)
 			hReady = true -- the hatch loop starts the moment we have arrived
 			if inventoryClosed() then
 				hSetStatus(hRunningStatus())
@@ -1886,6 +1903,7 @@ local function buildLogic()
 					wait_ = math.max(0.25, tonumber(HA.speed) or DELAY)
 					if hActive(id) and (HA.failSeq or 0) >= mySeq and hEgg and hEgg.cf then   -- (only while THIS hatch run is still the active one, so a feature with a higher priority is never pulled back) the server refused this hatch: probably too far away, go back to the egg spot
 						HA.refusals = (HA.refusals or 0) + 1
+						if os.clock() - (HA.lastGameRollAt or -1e9) < 8 then HA.refusals = 0 end   -- the game's own F hatch is working: this refusal is only the two hatches overlapping, never restart for it
 						if HA.refusals >= 3 and os.clock() - (HA.lastRestart or 0) > 30 then
 							-- FIX: the first run after loading can get refused over and over; restarting the run (same as toggling Auto Hatch off/on) clears it
 							HA.refusals, HA.lastRestart = 0, os.clock()
@@ -1961,7 +1979,7 @@ local function buildLogic()
 			while hActive(id) and os.clock() - t1 < F_DELAY do task.wait(0.1) end
 			while hActive(id) and not inventoryClosed() do task.wait(0.25) end   -- never while the inventory is open / being scanned
 			if not hActive(id) or fOn then return end
-			if F_CHECK_PANEL and sessionPanelOpen() then
+			if F_CHECK_PANEL and (sessionPanelOpen() or HA.gameRolling()) then
 				fOn = true   -- the game's auto hatch is already on: F not pressed now, but it is pressed (off) when Auto Hatch pauses / stops
 				print("[WORST Hub] Auto hatch: the game's auto hatch is already on - F not pressed")
 				return
@@ -1976,11 +1994,36 @@ local function buildLogic()
 				print("[WORST Hub] Auto hatch: the game's auto hatch did not start after F")
 			end
 		end)
+		-- WATCHDOG (F-only): the game's auto hatch can stop by itself (server change, inventory scan, a popup...). If neither the "This Session"
+		-- panel nor hatch results have been seen for 25 s while we are at the egg, press F again (never more often than every 25 s).
+		if HA.fOnly then
+			task.spawn(function()
+				local offSince
+				while hActive(id) do
+					task.wait(2)
+					if hReady and inventoryClosed() then
+						if sessionPanelOpen() or HA.gameRolling() then
+							offSince = nil
+						else
+							offSince = offSince or os.clock()
+							if os.clock() - offSince > 25 and os.clock() - (HA.lastF or -1e9) > 25 then
+								pressF()
+								fOn = true
+								offSince = os.clock()
+								print("[WORST Hub] Auto hatch: the game's auto hatch had stopped - pressed F to start it again")
+							end
+						end
+					else
+						offSince = nil
+					end
+				end
+			end)
+		end
 	end
 	-- Stops the F-only hatch.
 	local function stopFHatch()
 		-- the game's own panel decides (fOn alone can be wrong: F started late / was switched by hand), so pressing F never turns it ON by mistake
-		local open = sessionPanelOpen()
+		local open = sessionPanelOpen() or HA.gameRolling()
 		local recent = os.clock() - (HA.lastF or -1e9) < 5   -- just pressed: the panel may not be showing yet
 		local was = fOn
 		fOn = false
@@ -1993,13 +2036,14 @@ local function buildLogic()
 	-- F Octa check: press F (once), wait for the first hatch result of the GAME's auto hatch (EggHatchResult: Rolls 8 = Octa).
 	-- F stays ON afterwards: the game's auto hatch and our own hatch loop run at the same time. F is only pressed again to turn it off
 	-- when Auto Hatch stops / pauses (stopFHatch), and pressed to turn it on again the next time hatching starts or resumes.
+	HA.fOnly = true   -- true = hatch ONLY with the game's own auto hatch (F). Our own hatch requests are not sent, so nothing overlaps and the server never refuses. false = old behaviour (both)
 	HA.fCheckTimeout = 10   -- seconds to wait for the game's first result (a field: buildLogic is near the 200-locals limit)
 	-- Checks whether you own Octa (8x) by using the F key.
 	function HA.fOctaCheck(id)
 		while hActive(id) and not inventoryClosed() do task.wait(0.25) end   -- never while the inventory is open / being scanned
 		if not hActive(id) then return end
 		local t0 = os.clock()
-		local alreadyOn = fOn or (F_CHECK_PANEL and sessionPanelOpen())   -- the game's auto hatch is already running: do not press F again, just read its results
+		local alreadyOn = fOn or (F_CHECK_PANEL and (sessionPanelOpen() or HA.gameRolling()))   -- the game's auto hatch is already running: do not press F again, just read its results
 		if not alreadyOn then pressF() fOn = true end
 		while hActive(id) and (HA_auto.lastRollAt or 0) < t0 and os.clock() - t0 < HA.fCheckTimeout do task.wait(0.05) end
 		-- the run ended during the check (egg changed, paused for a priority feature, switched off): stopFHatch() already pressed F off
@@ -2022,6 +2066,261 @@ local function buildLogic()
 		end
 	end
 
+	-- ---- v38: the standalone Hatch Test's "Auto Open" system (Hatching Method = Auto) -------------------------------------------------
+	-- The script sends no hatch requests of its own in Auto. It makes sure the GAME's own "Auto Open" is ON: it reads the game's button
+	-- (label "Auto Open!" = OFF, label "Stop" = ON), and when it is OFF (never started / cancelled / the server said TooFar) it switches
+	-- it on (F key -> one first hatch + F -> button signal -> mouse click, the method that worked is tried first next time).
+	-- Stopping switches Auto Open OFF and fires StopOfflineHatch so the server session ends too.
+	-- (written as one closure with its own locals because buildLogic is close to Lua's 200-locals limit)
+	HA.auto = (function()
+		local M = { okT1 = -1e9, okT2 = -1e9, lastResultAt = 0, gen = 0, attempts = 0 }
+		local TAG = "[Hatch] "
+		local ENABLE_WAIT, RETRY_EVERY = 5, 3
+		local GS = game:GetService("GuiService")
+		local autoLabel, stopLabel, lastScan, goodMethod = nil, nil, -1e9, nil
+
+		local stopR
+		local function getStop()   -- looked up lazily and without waiting, so a missing remote never blocks the hub
+			if stopR and stopR.Parent then return stopR end
+			local n = RS
+			for _, nm in ipairs({ "RemoteServices", "EggService", "RE", "StopOfflineHatch" }) do n = n and n:FindFirstChild(nm) end
+			stopR = n
+			return stopR
+		end
+
+		-- called for every EggHatchResult the server sends (own requests and the game's own Auto Open)
+		function M.onResult(d)
+			M.lastResultAt = os.clock()
+			if d.Success == false then
+				if tostring(d.Error) == "TooFar" and hEnabled then HA.needTP = true end   -- teleport back to the egg spot
+			else
+				M.okT2, M.okT1 = M.okT1, os.clock()
+			end
+		end
+
+		local function clean(t)
+			return (tostring(t or ""):gsub("<[^>]+>", ""):gsub("^%s+", ""):gsub("%s+$", ""))
+		end
+		local function shown(o)
+			local root = pg()
+			while o and o ~= root do
+				if o:IsA("GuiObject") and not o.Visible then return false end
+				if o:IsA("LayerCollector") and not o.Enabled then return false end
+				o = o.Parent
+			end
+			return true
+		end
+		local function scanLabels()
+			lastScan = os.clock()
+			local root = pg()
+			if not root then return end
+			local foundA, foundS
+			for _, d in ipairs(root:GetDescendants()) do
+				if (d:IsA("TextLabel") or d:IsA("TextButton")) and not d:IsDescendantOf(gui) then
+					local t = clean(d.Text)
+					if t == "Auto Open!" and (not foundA or (shown(d) and not shown(foundA))) then foundA = d end
+					if t == "Stop" and (not foundS or (shown(d) and not shown(foundS))) then foundS = d end
+				end
+			end
+			if foundA and foundA ~= autoLabel then print(TAG .. "'Auto Open!' label: " .. foundA:GetFullName()) end
+			if foundS and foundS ~= stopLabel then print(TAG .. "'Stop' label: " .. foundS:GetFullName()) end
+			autoLabel, stopLabel = foundA or autoLabel, foundS or stopLabel
+		end
+		local function labelIs(l, txt) return l and l.Parent and clean(l.Text) == txt and shown(l) end
+		local function uiState()
+			if labelIs(stopLabel, "Stop") then return "on" end
+			if labelIs(autoLabel, "Auto Open!") then return "off" end
+			return nil
+		end
+		-- "on" / "off". The button only exists after the first hatch, so while it is hidden the state is judged by the hatch
+		-- results: two successful results in a row = the game's loop is running. (Manual: our own results say nothing about Auto Open.)
+		local function autoState()
+			local st = uiState()
+			if st then return st end
+			if os.clock() - lastScan > 2 then
+				scanLabels()
+				st = uiState()
+				if st then return st end
+			end
+			if HA.manual() then return "off" end
+			if os.clock() - M.okT1 < 6 and M.okT1 - M.okT2 < 8 then return "on" end
+			return "off"
+		end
+		function M.cur() return autoState() end
+		function M.uiState() return uiState() end
+
+		local function buttonOf(l)
+			if not l then return nil end
+			local root, o = pg(), l
+			while o and o ~= root do
+				if o:IsA("GuiButton") then return o end
+				o = o.Parent
+			end
+			local only
+			for _, c in ipairs((l.Parent or l):GetChildren()) do
+				if c:IsA("GuiButton") then if only then return nil end only = c end
+			end
+			return only
+		end
+		local function pressKeyF()
+			HA.lastF = os.clock()
+			pcall(function()
+				VIM:SendKeyEvent(true, Enum.KeyCode.F, false, game)
+				task.wait(0.05)
+				VIM:SendKeyEvent(false, Enum.KeyCode.F, false, game)
+			end)
+			return true
+		end
+		local function fireButton()
+			if not uiState() then return false end
+			local l = (labelIs(stopLabel, "Stop") and stopLabel) or autoLabel or stopLabel
+			local b = buttonOf(l)
+			if not b then return false end
+			local did = false
+			if type(firesignal) == "function" then
+				for _, sig in ipairs({ "MouseButton1Click", "Activated", "MouseButton1Down", "MouseButton1Up" }) do
+					if pcall(firesignal, b[sig]) then did = true end
+				end
+			end
+			if not did and type(getconnections) == "function" then
+				for _, sig in ipairs({ "MouseButton1Click", "Activated" }) do
+					local ok, cons = pcall(getconnections, b[sig])
+					if ok and type(cons) == "table" then
+						for _, c in ipairs(cons) do if pcall(function() c:Fire() end) then did = true end end
+					end
+				end
+			end
+			return did
+		end
+		local function clickButton()
+			if not uiState() then return false end   -- button not on screen yet: never click blindly
+			local l = (labelIs(stopLabel, "Stop") and stopLabel) or autoLabel or stopLabel
+			local b = buttonOf(l) or l
+			if not b then return false end
+			local p, s = b.AbsolutePosition, b.AbsoluteSize
+			local inset = GS:GetGuiInset()
+			local x, y = p.X + s.X / 2, p.Y + s.Y / 2 + inset.Y
+			return pcall(function()
+				VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
+				task.wait(0.05)
+				VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
+			end)
+		end
+		-- the button (and F's session panel) only appear after the first hatch: send ONE normal hatch request, then press F
+		local function primeThenF()
+			if not (hatchRemote and hEgg) then return false end
+			local fixed = tonumber(tostring(Config.hatchCount or "Auto"):match("^(%d+)$"))
+			local count = fixed or 3
+			for _, flag in ipairs({ false, true }) do
+				local t0 = os.clock()
+				HA.fireRaw(count, flag)
+				print(TAG .. "first hatch request (x" .. count .. ", Auto=" .. tostring(flag) .. ") to make the Auto Open button appear")
+				while os.clock() - t0 < 3 and M.okT1 < t0 do task.wait(0.1) end
+				if M.okT1 >= t0 then break end
+			end
+			task.wait(1.5)   -- let the Hatching GUI appear
+			return pressKeyF()
+		end
+		local METHODS = { { "F key", pressKeyF }, { "first hatch + F", primeThenF }, { "button signal", fireButton }, { "mouse click", clickButton } }
+
+		-- switch the game's Auto Open to `want` ("on" / "off"); returns true when it shows as that
+		local function setAuto(want, alive_)
+			local order = {}
+			if goodMethod then order[#order + 1] = goodMethod end
+			for _, m in ipairs(METHODS) do if m ~= goodMethod then order[#order + 1] = m end end
+			local waitFor = want == "off" and 8 or ENABLE_WAIT
+			for _, m in ipairs(order) do
+				if alive_ and not alive_() then return false end
+				if autoState() == want then return true end
+				if not (want == "off" and m[1] == "first hatch + F") then   -- never start a hatch just to stop one
+					M.attempts = M.attempts + 1
+					print(TAG .. "switching Auto Open " .. want:upper() .. " with: " .. m[1])
+					local did = m[2]()
+					if did == false then
+						print(TAG .. m[1] .. " is not available right now")
+					else
+						local t0 = os.clock()
+						while os.clock() - t0 < waitFor do
+							task.wait(0.15)
+							if autoState() == want then
+								goodMethod = m
+								print(TAG .. "worked: " .. m[1])
+								return true
+							end
+							if alive_ and not alive_() then return false end
+						end
+						print(TAG .. m[1] .. " did not change Auto Open")
+					end
+				end
+			end
+			return false
+		end
+
+		-- Hatching Method = Auto: keeps the game's Auto Open ON while this run is the active one
+		function M.start(id)
+			M.gen = M.gen + 1
+			M.okT1, M.okT2 = -1e9, -1e9
+			task.spawn(function()
+				while hActive(id) and not hReady do task.wait(0.1) end   -- at the island and at the egg
+				local lastTry = -1e9
+				while hActive(id) do
+					task.wait(0.4)
+					if not hActive(id) then break end
+					if inventoryClosed() and not HA.manual() then
+						local st = autoState()
+						if st == "off" and isNear(hEgg.cf) and os.clock() - lastTry > RETRY_EVERY then
+							lastTry = os.clock()
+							hSetStatus("Auto Open is OFF - switching it on...")
+							setAuto("on", function() return hActive(id) end)
+						end
+					end
+				end
+			end)
+		end
+		-- Hatching Method = Manual: the game's Auto Open must be OFF (our own requests do the hatching)
+		function M.ensureOff(id)
+			M.gen = M.gen + 1
+			task.spawn(function()
+				while hActive(id) and not hReady do task.wait(0.1) end
+				if not hActive(id) then return end
+				if uiState() == "on" then setAuto("off", function() return hActive(id) end) end
+				local r = getStop()
+				if r then pcall(function() r:FireServer() end) end
+			end)
+		end
+		-- run stopped / paused for a feature with a higher priority / hub closed: Auto Open OFF + StopOfflineHatch (again if results still arrive)
+		function M.stop()
+			local g = M.gen
+			task.spawn(function()
+				if autoState() == "on" then setAuto("off", function() return M.gen == g end) end
+				if M.gen ~= g then return end   -- a new run started meanwhile and took over
+				local r = getStop()
+				if not r then return end
+				for attempt = 1, 3 do
+					local t = os.clock()
+					pcall(function() r:FireServer() end)
+					if HA.manual() or M.gen ~= g then break end
+					task.wait(2.5)
+					if M.lastResultAt < t then break end
+					warn(TAG .. "results still arriving after StopOfflineHatch (try " .. attempt .. "), firing it again")
+				end
+			end)
+		end
+		return M
+	end)()
+	-- true when "Hatching Method" is Manual (our own hatch requests, no Auto Open). Anything else = Auto (the default).
+	function HA.manual() return Config.hatchMethod == "Manual" end
+	-- one plain hatch request with the next sequence number (used for the first hatch that makes the Auto Open button appear)
+	function HA.fireRaw(count, flag)
+		seq = (seq or (SEQ_FALLBACK - 1)) + 1
+		HA.own[seq] = true
+		HA.own[seq - 300] = nil
+		HA.lastFire = os.clock()
+		local ok, err = pcall(function() hatchRemote:FireServer({ Egg = hEgg.name, Count = count, Seq = seq, Auto = flag }) end)
+		if not ok then warn("[Hatch] fire failed: " .. tostring(err)) end
+		return ok
+	end
+
 	-- Switches Auto Hatch on or off (starts or stops its loops).
 	local function setHatchEnabled(on)
 		if on == hEnabled then return end
@@ -2034,12 +2333,16 @@ local function buildLogic()
 			hEgg = selectedEgg
 			task.spawn(hTeleportLoop, id)
 			if DO_HATCH then
-				task.spawn(hHatchLoop, id)   -- our own hatch requests (remote), after the Octa check
-				startFHatch(id)              -- and the game's own auto hatch (F), pressed once
+				if HA.manual() then
+					task.spawn(hHatchLoop, id)   -- Manual: our own hatch requests (Auto Open is kept off)
+					HA.auto.ensureOff(id)
+				else
+					HA.auto.start(id)            -- Auto: the game's own Auto Open is kept ON (the standalone Hatch Test's system)
+				end
 			end
 		else
 			hSetStatus(hatchEntry.desc)
-			stopFHatch()   -- press F again: the game's auto hatch off too
+			HA.auto.stop()   -- Auto Open off + StopOfflineHatch (the server session ends too)
 		end
 	end
 
@@ -2173,7 +2476,7 @@ local function buildLogic()
 	table.insert(cleanupHooks, function()
 		HG.want = false
 		hEnabled, enabled = false, false
-		stopFHatch()
+		HA.auto.stop()
 		hRunId = hRunId + 1
 		runId = runId + 1
 		pcall(function() resultConn:Disconnect() end)
@@ -10148,6 +10451,7 @@ local function buildLogic()
 		balloon = HG.balloon,
 		islands = islandTools,
 		priority = HG, kaitun = HG.kaitun,
+		hatchRestart = function() if HA.restart then HA.restart() end end,
 		egg = eggEntry, hatch = hatchEntry, scan = scanEntry, storage = storageEntry, drop = dropEntry, craft = craftEntry, craftAll = craftAllEntry,
 		dDrop = pet.dDrop, dAmount = pet.dAmount, dCraft = pet.dCraft, goldenAmount = goldenAmountEntry, rDrop = pet.rDrop, rAmount = pet.rAmount, rCraft = pet.rCraft, collect = pet.collect,
 		enchant = ench, autodel = autodel,
@@ -10607,17 +10911,9 @@ local Utility = (function()
 		huOn = on
 		huRun = huRun + 1
 		if not on then huRestore() return end
-		local my = huRun
 		task.spawn(function()
-			local lastWorld = 0
-			while alive and huOn and huRun == my do
-				pcall(huScanCharacter)
-				if os.clock() - lastWorld > 8 then
-					lastWorld = os.clock()
-					pcall(huScanWorkspace)
-				end
-				task.wait(1)
-			end
+			pcall(huScanCharacter)
+			pcall(huScanWorkspace)
 		end)
 	end
 	table.insert(cleanupHooks, function() huOn = false huRun = huRun + 1 huRestore() end)
@@ -13468,40 +13764,105 @@ local TradeAgent = (function()
             end
         end)
 
-        -- ===== GLOBAL HATCHES: read hatch announcements from the game chat and send them to the Worker (Global tab + Discord webhook) =====
-        -- !!! ghParse is a GUESS at the announcement wording ("Player hatched #12 Pet Name (1 in 1.2M)!"). With DEBUG = true every chat line is printed
+        -- ===== GLOBAL HATCHES: read hatch announcements from the game chat -> (1) the Worker (Global tab) and (2) your Discord BOT relay =====
+        -- !!! ghParse is still a GUESS at the announcement wording ("Player hatched #12 Pet Name (1 in 1.2M)!"). With DEBUG = true every chat line is printed
         --     as "[TSR chat] ...": copy a real announcement line and adjust ghParse until it returns the right player / pet / num / odds.
         do
-            local ghQueue = {}
-            local function ghParse(text)
+            local GH_REPORT = true   -- true = this account reads chat announcements. Every account sees the same chat, so you can set false on most accounts
+
+            -- ---- DISCORD RELAY (same system as Steal An Egg): the script posts "HOOKRELAY{...}" through the EGG DEBUG webhook,
+            --      the bot (2egg_relay.py) reads it, drops the duplicates (many accounts see one hatch) and posts ONE embed to the "taphatch" webhook.
+            local GH_RELAY_ON          = true    -- false = no Discord relay
+            local GH_RELAY_URL         = "https://discord.com/api/webhooks/1558747004627320882/Ul5HnfO9g7v0hxxCdZFfu6X_jrplGAe6kx64HvvK4K_W1xMccyMiGwmbt_jEGnBjeVbQ"   -- the EGG DEBUG webhook = the channel where you ran !eggrelay
+            record.relayUrl            = GH_RELAY_URL   -- v39: the inventory + debug reports use the same EGG DEBUG webhook
+            local GH_RELAY_HOOK        = "taphatch"   -- must exist in RELAY_HOOKS in 2egg_relay.py
+            local GH_RELAY_GLOBAL_ONLY = true    -- true = only "Global" announcements go to Discord. false = server hatches too
+            local GH_RELAY_BOTNAME     = "WORST \226\128\162 Tap Simulator"
+            local GH_RELAY_AVATAR      = "https://static.vecteezy.com/system/resources/previews/004/891/075/non_2x/the-initials-w-logo-is-simple-and-modern8868-free-vector.jpg"
+
+            local ghQueue, relayQueue, ghSeen = {}, {}, {}
+
+            -- Pet name -> variety (Shiny = Rainbow in this game, Golden = Gold)
+            local function ghVariety(pet)
+                local p = " " .. tostring(pet):lower():gsub("[_%-]", " ") .. " "
+                if p:find(" rainbow ", 1, true) then return "Rainbow" end
+                if p:find(" shiny ", 1, true) then return "Shiny" end
+                if p:find(" golden ", 1, true) or p:find(" gold ", 1, true) then return "Gold" end
+                if p:find(" diamond ", 1, true) then return "Diamond" end
+                return "Normal"
+            end
+
+            local function ghParse(text, prefix)
+                prefix = tostring(prefix or ""):gsub("<[^>]+>", "")   -- "[globe] Global:" / "Server:" is the chat PREFIX, not part of the text
                 text = tostring(text or ""):gsub("<[^>]+>", "")   -- strip rich-text tags
                 if not text:lower():find("hatched") then return nil end
                 local player, rest = text:match("([%w_]+) just hatched (.+)$")
                 if not player then player, rest = text:match("([%w_]+) hatched (.+)$") end
                 if not player or not rest then return nil end
-                local odds = rest:match("1 in ([%w%.,]+)")
+                local odds = rest:match("1%s*in%s*([%w%.,]+)") or rest:match("1%s*/%s*([%w%.,]+)")
                 local num = rest:match("#(%d+)")
-                local pet = rest:gsub("%(?1 in [%w%.,]+%)?", ""):gsub("#%d+", ""):gsub("[!%.]+%s*$", ""):gsub("^%s+", ""):gsub("%s+$", "")
-                pet = pet:gsub("^[Aa]n? ", "")
+                local pet = rest:gsub("%(?1%s*in%s*[%w%.,]+%)?", ""):gsub("%(?1%s*/%s*[%w%.,]+%)?", ""):gsub("#%d+", ""):gsub("[!%.]+%s*$", ""):gsub("^%s+", ""):gsub("%s+$", "")
+                pet = pet:gsub("^[Tt]he%s+", ""):gsub("^[Aa]n?%s+", ""):gsub("%s+", " ")   -- "hatched the #25 X" / "hatched a X"
                 if pet == "" then return nil end
+                local full = (prefix .. " " .. text):lower()
                 return { player = player, pet = pet, num = num or "", odds = odds and ("1 in " .. odds) or "",
-                         scope = text:lower():find("global") and "Global" or "Server" }
+                         scope = full:find("global", 1, true) and "Global" or "Server", variety = ghVariety(pet) }
             end
-            local function ghAdd(text)
-                local ok, row = pcall(ghParse, text)
-                if ok and row and #ghQueue < 60 then ghQueue[#ghQueue + 1] = row end
+
+            local VARIETY_COLOR = { Normal = 0x5865F2, Gold = 0xF1C40F, Diamond = 0x5DADE2, Shiny = 0xFF69B4, Rainbow = 0xFF69B4 }
+            local function relayPayload(row)
+                local link = "https://www.roblox.com/users/profile?username=" .. row.player
+                local fields = {
+                    { name = "\240\159\145\164 Hatcher", value = "[" .. row.player .. "](" .. link .. ")", inline = true },
+                    { name = "\240\159\165\154 Pet", value = (row.num ~= "" and ("#" .. row.num .. " ") or "") .. row.pet, inline = true },
+                    { name = "\226\173\144 Rarity", value = row.odds ~= "" and row.odds or "?", inline = true },
+                    { name = "\226\143\177\239\184\143 Hatched", value = "<t:" .. os.time() .. ":R>", inline = true },
+                    { name = "\226\156\168 Variety", value = row.variety, inline = true },
+                }
+                return {
+                    hook = GH_RELAY_HOOK,
+                    -- same hatch seen by many accounts = same key = the bot posts it once
+                    key = (row.player .. "|" .. row.pet .. "|" .. row.num .. "|" .. row.odds):lower(),
+                    username = GH_RELAY_BOTNAME, avatar_url = GH_RELAY_AVATAR,
+                    embed = {
+                        title = row.player .. " hatched " .. (row.num ~= "" and ("#" .. row.num .. " ") or "") .. row.pet .. "!",
+                        url = link, color = VARIETY_COLOR[row.variety] or 0x5865F2, fields = fields,
+                        footer = { text = "Tap Simulator: Reborn \226\128\162 " .. row.scope .. " hatch" },
+                        timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+                    },
+                }
+            end
+
+            local function ghAdd(text, prefix)
+                if not GH_REPORT then return end
+                local ok, row = pcall(ghParse, text, prefix)
+                if not (ok and row) then return end
+                -- both chat systems can fire for one line: ignore the same hatch for 2 minutes
+                local key = (row.player .. "|" .. row.pet .. "|" .. row.num .. "|" .. row.scope):lower()
+                local now = os.clock()
+                for k, t in pairs(ghSeen) do if now - t > 120 then ghSeen[k] = nil end end
+                if ghSeen[key] then return end
+                ghSeen[key] = now
+                if #ghQueue < 60 then ghQueue[#ghQueue + 1] = row end
+                if GH_RELAY_ON and (row.scope == "Global" or not GH_RELAY_GLOBAL_ONLY) then
+                    if #relayQueue < 30 then relayQueue[#relayQueue + 1] = row end
+                else
+                    print("[TSR relay] not sent to Discord (" .. row.scope .. " hatch): " .. row.player .. " " .. row.pet)
+                end
             end
             pcall(function()
                 game:GetService("TextChatService").MessageReceived:Connect(function(m)
-                    if DEBUG then print("[TSR chat]", m.Text) end
-                    ghAdd(m.Text)
+                    if DEBUG then print("[TSR chat]", m.PrefixText, m.Text) end
+                    ghAdd(m.Text, m.PrefixText)
                 end)
             end)
-            pcall(function()   -- old chat system fallback (the Worker drops the duplicate if both fire)
+            pcall(function()   -- old chat system fallback (the duplicate check above drops the second copy)
                 game:GetService("ReplicatedStorage").DefaultChatSystemChatEvents.OnMessageDoneFiltering.OnClientEvent:Connect(function(d)
                     if type(d) == "table" then ghAdd(d.Message) end
                 end)
             end)
+
+            -- Worker (site Global tab): unchanged
             task.spawn(function()
                 while alive do
                     task.wait(5)
@@ -13515,15 +13876,79 @@ local TradeAgent = (function()
                     end
                 end
             end)
+
+            -- Discord relay: does NOT need the site / Cloudflare, only the EGG DEBUG webhook + the bot
+            task.spawn(function()
+                if not GH_RELAY_ON then return end
+                if not httpRequest then warn("[TSR relay] this executor has no http request function: Discord relay is off") return end
+                if not tostring(GH_RELAY_URL):find("discord.com/api/webhooks/", 1, true) then warn("[TSR relay] GH_RELAY_URL is not a Discord webhook link: Discord relay is off") return end
+                while alive do
+                    task.wait(1)
+                    if #relayQueue > 0 then
+                        local row = table.remove(relayQueue, 1)
+                        task.wait(math.random() * 3)   -- spreads many accounts out so they do not hit the webhook at the same moment
+                        local okEnc, body = pcall(function()
+                            return HttpService:JSONEncode({ username = "EGG DEBUG", content = "HOOKRELAY" .. HttpService:JSONEncode(relayPayload(row)) })
+                        end)
+                        if okEnc and #body < 7000 then
+                            local tries = 0
+                            while tries < 3 do
+                                tries = tries + 1
+                                local ok, res = pcall(httpRequest, { Url = GH_RELAY_URL, Method = "POST", Headers = { ["Content-Type"] = "application/json" }, Body = body })
+                                local code = ok and type(res) == "table" and tonumber(res.StatusCode) or nil
+                                if code and code >= 200 and code < 300 then
+                                    print("[TSR relay] sent to bot: " .. row.player .. " hatched " .. row.pet .. " (" .. row.odds .. ")")
+                                    break
+                                elseif code == 429 then
+                                    local wait = 2
+                                    pcall(function() wait = tonumber(HttpService:JSONDecode(res.Body).retry_after) or 2 end)
+                                    task.wait(math.min(wait, 10) + 0.5)
+                                else
+                                    warn("[TSR relay] webhook failed (HTTP " .. tostring(code or res) .. ")")
+                                    break
+                                end
+                            end
+                        end
+                    end
+                end
+            end)
         end
 
-        -- ============================================================ INVENTORY WEBHOOK (Discord, edits itself)
-        -- One Discord message PER ACCOUNT. It is posted once, then EDITED in place whenever the inventory changes
+        -- ============================================================ INVENTORY REPORT (sent by the bot, one message per account)
+        -- v39: shared by the inventory + debug reports. Sends ONE report of THIS account to the bot (2egg_relay.py) through the EGG DEBUG webhook:
+        -- content = "TAPINV{...}" / "TAPDBG{...}" (who it is), the embed travels in the message's embeds (content is limited to 2000 characters).
+        -- The bot posts it once and edits it afterwards, so every account keeps ONE message. Returns true when Discord accepted it.
+        record.relaySend = function(kind, embed, botName, botAvatar)
+            local url = tostring(record.relayUrl or "")
+            if not httpRequest or not url:find("discord.com/api/webhooks/", 1, true) then return false end
+            if os.clock() < (record.relayBlocked or 0) then return false end
+            local okJ, body = pcall(function()
+                return HttpService:JSONEncode({
+                    username = "EGG DEBUG", allowed_mentions = { parse = {} }, embeds = { embed },
+                    content = (kind == "inv" and "TAPINV" or "TAPDBG") .. HttpService:JSONEncode({
+                        uid = lp.UserId, user = lp.Name, username = botName, avatar_url = botAvatar }),
+                })
+            end)
+            if not okJ then return false end
+            local ok, res = pcall(httpRequest, { Url = url, Method = "POST", Headers = { ["Content-Type"] = "application/json" }, Body = body })
+            local code = ok and type(res) == "table" and tonumber(res.StatusCode or res.status_code) or nil
+            if code and code >= 200 and code < 300 then return true end
+            if code == 429 then
+                local wait = 5
+                pcall(function() wait = tonumber(HttpService:JSONDecode(res.Body).retry_after) or 5 end)
+                record.relayBlocked = os.clock() + math.min(wait, 60) + 1
+            elseif code == 401 or code == 404 then
+                warn("[InvWebhook] the EGG DEBUG webhook was refused (HTTP " .. tostring(code) .. "). Trying again in 5 minutes.")
+                record.relayBlocked = os.clock() + 300
+            end
+            return false
+        end
+
+        -- One Discord message PER ACCOUNT. The BOT posts it once, then EDITS it whenever the inventory changes
         -- (hatched / crafted / deleted / traded). It never touches Cloudflare, so it keeps working when the site is rate limited.
-        -- The message id is saved in WORST/inv_msg_<userid>.txt, so rejoining edits the same message instead of posting a new one.
+        -- The bot keeps the message id per account, so rejoining edits the same message instead of posting a new one.
         do
             local INV_ON      = true    -- false = switch the whole inventory webhook off
-            local INV_WEBHOOK = "https://discord.com/api/webhooks/1565121533310013632/wjqwlDIJGdASkuwQvSSDx-UL35U7BIpkHQuFxdvUKJjhcPNYBXBhfqFfYVuzqkC1KYlf"   -- <- put your real webhook link here
             local INV_LOOK    = 2       -- seconds between cheap looks (pet count + eggs-opened). Discord is only contacted when something changed.
             local INV_GAP     = 15      -- an account edits its message at most once per this many seconds (15 accounts = about 1 request per second)
             local INV_FORCE   = 30      -- seconds between full re-reads even if the count did not move (catches equip / unequip)
@@ -13533,25 +13958,9 @@ local TradeAgent = (function()
             local INV_NAME    = "WORST • Inventory"
             local INV_AVATAR  = "https://static.vecteezy.com/system/resources/previews/004/891/075/non_2x/the-initials-w-logo-is-simple-and-modern8868-free-vector.jpg"   -- webhook profile picture
 
-            local base = (tostring(INV_WEBHOOK):gsub("%?.*$", ""):gsub("/+$", ""))
-            local urlOk = base:find("discord.com/api/webhooks/", 1, true) ~= nil or base:find("discordapp.com/api/webhooks/", 1, true) ~= nil
-            if not INV_ON or not urlOk then
-                if INV_ON then warn("[InvWebhook] INV_WEBHOOK is not a Discord webhook link: the inventory webhook is off") end
+            if not INV_ON or not siteAllowed(lp.Name) then
+                -- off (INV_ON = false) or this Roblox account is not in SITE_ACCOUNTS: it sends nothing
             else
-                local msgId = nil
-                local blockedUntil = 0          -- os.clock() until which we must not talk to Discord (rate limit / bad link)
-                local FILE = "inv_msg_" .. tostring(lp.UserId) .. ".txt"
-                local tail = base:sub(-12)      -- so a message id saved for another webhook is never reused
-
-                local function loadId()
-                    local ok, t = pcall(Store.read, FILE)
-                    if ok and type(t) == "string" then
-                        local tl, id = t:match("^(.-):(%d+)%s*$")
-                        if tl == tail and id then return id end
-                    end
-                end
-                local function saveId(id) pcall(Store.write, FILE, id and (tail .. ":" .. id) or "") end
-
                 local function num(n)
                     local s = tostring(math.floor(tonumber(n) or 0))
                     local r = s:reverse():gsub("(%d%d%d)", "%1,"):reverse()
@@ -13566,46 +13975,9 @@ local TradeAgent = (function()
                 end
                 local VRANK = { Normal = 1, Golden = 2, Gold = 2, Diamond = 3, Rainbow = 4 }
 
-                local function call(method, url, payload)
-                    if not httpRequest then return nil end
-                    local ok, res = pcall(httpRequest, {
-                        Url = url, Method = method, Headers = { ["Content-Type"] = "application/json" },
-                        Body = HttpService:JSONEncode(payload),
-                    })
-                    if not ok or type(res) ~= "table" then return nil end
-                    return tonumber(res.StatusCode or res.status_code), res.Body
-                end
-                local function backoff(body)
-                    local ok, d = pcall(function() return HttpService:JSONDecode(body) end)
-                    local wait = (ok and type(d) == "table" and tonumber(d.retry_after)) or 5
-                    blockedUntil = os.clock() + math.min(wait, 60) + 1
-                end
-
-                -- Posts the message the first time, edits it afterwards. Returns true when Discord accepted it.
+                -- Sends the report to the bot (it posts the message the first time and edits it afterwards). true when Discord accepted it.
                 local function push(embed)
-                    if os.clock() < blockedUntil then return false end
-                    local payload = { embeds = { embed }, allowed_mentions = { parse = {} } }
-                    if msgId then
-                        local code, body = call("PATCH", base .. "/messages/" .. msgId, payload)
-                        if code == 200 then return true end
-                        if code == 429 then backoff(body) return false end
-                        if code == 404 then msgId = nil saveId(nil)   -- somebody deleted the message: post a new one below
-                        else return false end
-                    end
-                    payload.username = INV_NAME
-                    payload.avatar_url = INV_AVATAR
-                    local code, body = call("POST", base .. "?wait=true", payload)
-                    if code == 200 then
-                        local ok, d = pcall(function() return HttpService:JSONDecode(body) end)
-                        if ok and type(d) == "table" and d.id then msgId = tostring(d.id) saveId(msgId) return true end
-                        return false
-                    end
-                    if code == 429 then backoff(body) return false end
-                    if code == 401 or code == 404 then
-                        warn("[InvWebhook] Discord refused the webhook (HTTP " .. tostring(code) .. "): check INV_WEBHOOK. Trying again in 5 minutes.")
-                        blockedUntil = os.clock() + 300
-                    end
-                    return false
+                    return record.relaySend("inv", embed, INV_NAME, INV_AVATAR) == true
                 end
 
                 -- who got added / removed between two reads
@@ -13713,7 +14085,6 @@ local TradeAgent = (function()
 
                 task.spawn(function()
                     task.wait(5 + math.random() * 10)   -- spreads 15 accounts out so they do not all talk to Discord at once
-                    msgId = loadId()
                     local prevIdx, latest, lastCount, lastHatches
                     local rarestHatch, hatchTotal = nil, nil   -- rarest pet hatched since the script started
                     local baseCount, stable = -1, 0
@@ -13804,12 +14175,11 @@ local TradeAgent = (function()
             end
         end
 
-        -- ============================================================ DEBUG WEBHOOK (Discord, edits itself)
-        -- One Discord message PER ACCOUNT, posted once and then EDITED in place (message id saved in WORST/dbg_msg_<userid>.txt).
+        -- ============================================================ DEBUG REPORT (sent by the bot, one message per account)
+        -- One Discord message PER ACCOUNT, posted once by the BOT and then EDITED in place. Only sent while Settings > Debug Mode is ON (it is OFF on every execute).
         -- Shows what each account is doing right now and flags what looks wrong (inventory full, craft blocked, machine lock held too long ...).
         do
             local DBG_ON      = true    -- false = switch the debug webhook off
-            local DBG_WEBHOOK = "https://discord.com/api/webhooks/1565315395672346635/7JbOJL2DAnIwTjoLriVd_mrCeWMivcXJ4YgSnaVe0iJQFBTJNuRtYZdkfbHpjUO5_ny4"   -- <- put your real debug webhook link here
             local DBG_LOOK    = 5       -- seconds between looks (Discord is only contacted when something changed)
             local DBG_GAP     = 20      -- an account edits its message at most once per this many seconds
             local DBG_REFRESH = 120     -- edit anyway every 2 minutes so uptime / ping / time stay fresh
@@ -13818,24 +14188,11 @@ local TradeAgent = (function()
             local DBG_AVATAR  = "https://static.vecteezy.com/system/resources/previews/004/891/075/non_2x/the-initials-w-logo-is-simple-and-modern8868-free-vector.jpg"
             local COLOR_OK, COLOR_BAD = 5763719, 15548997   -- green / red
 
-            local base = (tostring(DBG_WEBHOOK):gsub("%?.*$", ""):gsub("/+$", ""))
-            local urlOk = base:find("discord.com/api/webhooks/", 1, true) ~= nil or base:find("discordapp.com/api/webhooks/", 1, true) ~= nil
-            if not DBG_ON or not urlOk then
-                if DBG_ON then warn("[DebugWebhook] DBG_WEBHOOK is not a Discord webhook link: the debug webhook is off") end
+            if not DBG_ON or not siteAllowed(lp.Name) then
+                -- off (DBG_ON = false) or this Roblox account is not in SITE_ACCOUNTS: it sends nothing
             else
-                local msgId, blockedUntil = nil, 0
-                local FILE = "dbg_msg_" .. tostring(lp.UserId) .. ".txt"
-                local tail = base:sub(-12)
                 local startedAt = os.time()
 
-                local function loadId()
-                    local ok, t = pcall(Store.read, FILE)
-                    if ok and type(t) == "string" then
-                        local tl, id = t:match("^(.-):(%d+)%s*$")
-                        if tl == tail and id then return id end
-                    end
-                end
-                local function saveId(id) pcall(Store.write, FILE, id and (tail .. ":" .. id) or "") end
                 local function num(n)
                     local s2 = tostring(math.floor(tonumber(n) or 0))
                     local r = s2:reverse():gsub("(%d%d%d)", "%1,"):reverse()
@@ -13849,44 +14206,9 @@ local TradeAgent = (function()
                 end
                 local function cut(t, n) t = tostring(t or "-") if #t > n then t = t:sub(1, n - 2) .. ".." end return t end
 
-                local function call(method, url, payload)
-                    if not httpRequest then return nil end
-                    local ok, res = pcall(httpRequest, {
-                        Url = url, Method = method, Headers = { ["Content-Type"] = "application/json" },
-                        Body = HttpService:JSONEncode(payload),
-                    })
-                    if not ok or type(res) ~= "table" then return nil end
-                    return tonumber(res.StatusCode or res.status_code), res.Body
-                end
-                local function backoff(body)
-                    local ok, d = pcall(function() return HttpService:JSONDecode(body) end)
-                    local wait = (ok and type(d) == "table" and tonumber(d.retry_after)) or 5
-                    blockedUntil = os.clock() + math.min(wait, 60) + 1
-                end
-                -- posts the message the first time, edits it afterwards; true when Discord accepted it
+                -- Sends the report to the bot (it posts the message the first time and edits it afterwards). true when Discord accepted it.
                 local function push(embed)
-                    if os.clock() < blockedUntil then return false end
-                    local payload = { embeds = { embed }, allowed_mentions = { parse = {} } }
-                    if msgId then
-                        local code, body = call("PATCH", base .. "/messages/" .. msgId, payload)
-                        if code == 200 then return true end
-                        if code == 429 then backoff(body) return false end
-                        if code == 404 then msgId = nil saveId(nil) else return false end
-                    end
-                    payload.username = DBG_NAME
-                    payload.avatar_url = DBG_AVATAR
-                    local code, body = call("POST", base .. "?wait=true", payload)
-                    if code == 200 then
-                        local ok, d = pcall(function() return HttpService:JSONDecode(body) end)
-                        if ok and type(d) == "table" and d.id then msgId = tostring(d.id) saveId(msgId) return true end
-                        return false
-                    end
-                    if code == 429 then backoff(body) return false end
-                    if code == 401 or code == 404 then
-                        warn("[DebugWebhook] Discord refused the webhook (HTTP " .. tostring(code) .. "): check DBG_WEBHOOK. Trying again in 5 minutes.")
-                        blockedUntil = os.clock() + 300
-                    end
-                    return false
+                    return record.relaySend("dbg", embed, DBG_NAME, DBG_AVATAR) == true
                 end
 
                 -- recent warnings / errors (our own webhook lines are skipped so it can never feed itself)
@@ -14033,11 +14355,11 @@ local TradeAgent = (function()
 
                 task.spawn(function()
                     task.wait(8 + math.random() * 20)   -- spreads the accounts out so they do not all talk to Discord at once
-                    msgId = loadId()
                     local lastSent, lastSig, gap = -1e9, nil, DBG_GAP
                     while alive and ((type(getgenv) ~= "function") or getgenv().TSR_AGENT_RUN == myRun) do
                         task.wait(DBG_LOOK)
                         local okLoop, errLoop = pcall(function()
+                            if not record.debugMode then return end   -- Settings > Debug Mode is OFF: nothing is built or sent
                             local now = os.clock()
                             local embed, sig = build()
                             local due = (sig ~= lastSig and now - lastSent >= gap) or (now - lastSent >= DBG_REFRESH)
@@ -16281,7 +16603,26 @@ local TAB_SCRIPTS = {
 	Kaitun = Logic and Logic.kaitun and { Logic.kaitun.main, Logic.kaitun.second } or {},
 	-- the Farming tab (was "Hatch") has its own pages, like Pets: Hatch, Auto Rebirth, Auto Delete (eggs)
 	Farming = { pages = {
-		{ name = "Hatch", entries = Logic and { Logic.egg, Logic.hatch } or {} },
+		{ name = "Hatch", entries = Logic and { Logic.egg,
+			{
+				-- DROPDOWN "Hatching Method": Auto = the game's own Auto Open hatches for you (the script only keeps it ON); Manual = Auto Open stays off and the script hatches by itself
+				type = "dropdown", name = "Hatching Method", icon = "🥚", width = 300,
+				desc = "Auto = the game's own Auto Open does the hatching (the script only keeps it switched on and stands you at the egg). Manual = Auto Open is kept off and the script sends the hatch requests itself with the Hatch Amount below.",
+				options = { "Auto", "Manual" }, default = "Auto",
+				callback = function(option)
+					local old = Config.hatchMethod
+					Config.hatchMethod = option
+					if old ~= nil and old ~= option and Logic and Logic.hatchRestart then task.spawn(Logic.hatchRestart) end   -- changing it while hatching restarts the run with the new method
+				end,
+			},
+			{
+				-- DROPDOWN "Hatch Amount" (was "Eggs Per Hatch" in Settings): eggs per hatch request
+				type = "dropdown", name = "Hatch Amount", icon = "🥚", width = 300,
+				desc = "Eggs per hatch request. Manual: used for every request (Auto = tries 8, falls back to 3). Auto method: the game's Auto Open uses its own amount; this is only used for the first hatch that makes its button appear (Auto = 3).",
+				options = { "Auto (highest you own)", "1", "3", "8" }, default = "Auto (highest you own)",
+				callback = function(option) Config.hatchCount = option end,
+			},
+			Logic.hatch } or {} },
 		{ name = "Auto Rebirth", entries = AutoRebirth },
 		{
 			name = "Delete Hatches",
@@ -16431,10 +16772,10 @@ local TAB_SCRIPTS = {
 			callback = function(on) Utility.hideUser(on == true) end,
 		},
 		{
-			type = "dropdown", name = "Eggs Per Hatch", icon = "🥚", width = 300,
-			desc = "Auto = presses the game's F key to see if you own Octa (8x) - every time hatching starts or continues after another feature. If the game hatches 8 you hatch 8 at a time, if not 3. Or force 1, 3 or 8.",
-			options = { "Auto (highest you own)", "1", "3", "8" }, default = "Auto (highest you own)",
-			callback = function(option) Config.hatchCount = option end,
+			-- TOGGLE "Debug Mode": while ON this account sends its debug report (the bot posts / edits ONE message for it). OFF on every execute (noSave).
+			type = "toggle", name = "Debug Mode", icon = "🐞", default = false, noSave = true,
+			desc = "DO NOT ENABLE!!",
+			callback = function(on) record.debugMode = on == true end,
 		},
 		{
 			type = "button", name = "Mini Ui", icon = "📱", noSave = true,
@@ -20860,6 +21201,11 @@ for _, pg in ipairs(TAB_SCRIPTS.Settings.pages or {}) do
 			ID_ALIAS["Settings/Page 2/" .. e.name] = "Settings/" .. pg.name .. "/" .. e.name
 		end
 	end
+end
+
+-- v38: "Eggs Per Hatch" (Settings) became "Hatch Amount" (Farming > Hatch)
+for _, old in ipairs({ "Settings/Eggs Per Hatch", "Settings/Page 1/Eggs Per Hatch", "Settings/Page 2/Eggs Per Hatch", "Settings/General/Eggs Per Hatch", "Settings/Ui/Eggs Per Hatch" }) do
+	ID_ALIAS[old] = "Farming/Hatch/Hatch Amount"
 end
 
 -- Pets > Enchanting became the pet card grid; the old enchant controls moved to Pets > Auto Enchant (old saves still load)
