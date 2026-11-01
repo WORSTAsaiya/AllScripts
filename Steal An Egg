@@ -1884,6 +1884,19 @@ if S.HALLOWEEN_ENABLED then
             return nil
         end
 
+        -- Keep an egg counted for a few seconds after it was last seen, so one missed scan never flips it to "gone".
+        local HKEEP = 10
+        local hKeep = {}   -- uid -> { k = counts key, t = last seen }
+        local function syncLive(found)
+            local t = os.clock()
+            for uid, ck in pairs(found) do hKeep[uid] = { k = ck, t = t } end
+            for uid, e in pairs(hKeep) do
+                if t - e.t > HKEEP then hKeep[uid] = nil end
+            end
+            for uid in pairs(HALLOWEEN_LIVE) do HALLOWEEN_LIVE[uid] = nil end
+            for uid, e in pairs(hKeep) do HALLOWEEN_LIVE[uid] = e.k end
+        end
+
         local seenH, reportedH = ENV.WORST_SEEN_H, {}   -- uid -> last seen, unidentified-egg log guard
         local hPresent, hEver = {}, {}    -- debug
         local firstScan = true
@@ -1893,7 +1906,7 @@ if S.HALLOWEEN_ENABLED then
                 local dim    = workspace:FindFirstChild("HalloweenDimension")
                 local folder = dim and dim:FindFirstChild("WorldEggs")
                 if not folder then
-                    for k in pairs(HALLOWEEN_LIVE) do HALLOWEEN_LIVE[k] = nil end   -- event is not on the map
+                    syncLive({})   -- folder not loaded: eggs expire after HKEEP seconds instead of vanishing at once
                     return
                 end
 
@@ -1949,8 +1962,7 @@ if S.HALLOWEEN_ENABLED then
 
                 firstScan = false
 
-                for k in pairs(HALLOWEEN_LIVE) do HALLOWEEN_LIVE[k] = nil end
-                for uid, ck in pairs(hLive) do HALLOWEEN_LIVE[uid] = ck end
+                syncLive(hLive)
 
                 for uid, name in pairs(hPresent) do
                     if not hNow[uid] then debugLog("HALLOWEEN VANISHED " .. name .. " uid=`" .. uid .. "`") end
