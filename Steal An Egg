@@ -145,6 +145,7 @@ local S = {
     ALERT_FORGET_SECONDS    = 900,   -- forget an egg this long after it vanishes
     ALERT_SEND_GAP          = 0.3,   -- seconds between alerts (Discord rate limit)
     SHOW_LOCATION           = true,  -- show the zone in the alert
+    EGG_IMAGE               = true,  -- also show the egg form as a large image (stealanegg.tools: Name_Pet.png -> Name_Egg.png)
 
     -- ----- Halloween Dimension -----
     HALLOWEEN_ENABLED       = true,  -- scan Workspace.HalloweenDimension.WorldEggs
@@ -818,6 +819,22 @@ end
 -- PART 1: RARE EGG ALERT EMBED
 -- ============================================================
 
+-- Egg-form picture for an egg: the pet image with _Pet.png swapped for _Egg.png.
+-- Eggs whose image has no _Pet in the name get "_Egg" added before .png (a guess).
+-- Add  eggImage = "https://..."  to any RARE_EGGS entry to set it by hand.
+local function eggImageOf(data)
+    if not S.EGG_IMAGE then return nil end
+    if data.eggImage and data.eggImage ~= "" then return data.eggImage end
+
+    local img = data.image
+    if type(img) ~= "string" or not img:find("^https://stealanegg%.tools/") then return nil end
+
+    local out, n = img:gsub("_Pet%.png$", "_Egg.png")
+    if n == 0 then out, n = img:gsub("%.png$", "_Egg.png") end
+    if n == 0 then return nil end
+    return out
+end
+
 local function sendEggEmbed(eggName, tier, location)
     local style = STYLE[tier]
     local data  = RARE_EGGS[eggName] or {}
@@ -855,6 +872,12 @@ local function sendEggEmbed(eggName, tier, location)
     -- no image set = no thumbnail, the alert just sends without one
     if imageUrl and imageUrl ~= "" then
         embed.thumbnail = { url = imageUrl }
+    end
+
+    -- egg form as the big picture under the text
+    local eggImg = eggImageOf(data)
+    if eggImg then
+        embed.image = { url = eggImg }
     end
 
     pushSite({
@@ -898,6 +921,7 @@ local function relayEgg(eggName, tier, location, uid)
         loc   = location or "",
         value = (data.value and data.value ~= "") and data.value or "VALUE NOT SET",
         image = (data.image and data.image:find("^https://")) and data.image or "",
+        egg_image = eggImageOf(data) or "",
         role  = data.role,
         uid   = uid,
         user  = DEBUG_USER,
