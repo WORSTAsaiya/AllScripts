@@ -973,6 +973,11 @@ end
 -- Returns: counts, ids, ok, eggs
 --   eggs = one entry per egg that exists now: { uid, k, nameKey, catKey, areaId }
 
+-- Halloween Dimension eggs currently on the map: uid -> counts key (filled by the Halloween scanner in PART 5).
+-- They are added to the counts the bot receives so the Halloween board and the rare boards see them.
+-- They are NOT added to ids / eggs, so they never trigger the new-cycle detector or a second rare alert.
+local HALLOWEEN_LIVE = {}
+
 local function buildSnapshot()
     local counts, ids, eggs = {}, {}, {}
 
@@ -1068,6 +1073,10 @@ local function buildSnapshot()
                 areaId  = r.AreaId,
             }
         end
+    end
+
+    for _, hk in pairs(HALLOWEEN_LIVE) do
+        counts[hk] = (counts[hk] or 0) + 1
     end
 
     if S.DEBUG_PRINT then
@@ -1833,6 +1842,33 @@ if S.HALLOWEEN_ENABLED then
             return SOURCES[stripped]
         end
 
+        -- the common Halloween eggs (not in RARE_EGGS). cleaned name -> counts key (same as norm(display name))
+        local HCOMMON = {}
+        for _, display in ipairs({
+            "Whiskers", "Jesterpop", "Candlefang", "Spirit Knight",
+            "Hooded Gerbil", "Toadstool", "Patchwork Imp", "Haunted Scorpio",
+            "Mimic Chest", "Crowshade", "Hexed Pumpkin",
+        }) do
+            HCOMMON[cleanKey(display)] = norm(display)
+        end
+
+        local function commonKey(m)
+            local candidates = {
+                m:GetAttribute("PreparedSourceName"),
+                m:GetAttribute("SourceName"),
+                m:GetAttribute("Category"),
+                m.Name,
+            }
+            for i = 1, 4 do
+                local k = cleanKey(candidates[i])
+                if k ~= "" then
+                    local hit = HCOMMON[k] or HCOMMON[(k:gsub("egg$", ""))]
+                    if hit then return hit end
+                end
+            end
+            return nil
+        end
+
         -- returns the RARE_EGGS key for this egg model, or nil if it is not a rare one
         local function resolveEgg(m)
             local candidates = {
@@ -1856,7 +1892,12 @@ if S.HALLOWEEN_ENABLED then
             pcall(function()
                 local dim    = workspace:FindFirstChild("HalloweenDimension")
                 local folder = dim and dim:FindFirstChild("WorldEggs")
-                if not folder then return end
+                if not folder then
+                    for k in pairs(HALLOWEEN_LIVE) do HALLOWEEN_LIVE[k] = nil end   -- event is not on the map
+                    return
+                end
+
+                local hLive = {}   -- uid -> counts key, copied into HALLOWEEN_LIVE at the end of this scan
 
                 local now = os.clock()
                 local hNow = {}
@@ -1869,6 +1910,12 @@ if S.HALLOWEEN_ENABLED then
                     else
                         local eggKey = resolveEgg(m)
                         local info   = eggKey and RARE_EGGS[eggKey]
+
+                        -- every Halloween egg (rare or common) counts toward the board
+                        local countKey = eggKey and norm(eggKey) or commonKey(m)
+                        if countKey then
+                            hLive[tostring(m:GetAttribute("HalloweenEggUid") or m:GetFullName())] = countKey
+                        end
 
                         if info then
                             local uid = tostring(m:GetAttribute("HalloweenEggUid") or m:GetFullName())
@@ -1901,6 +1948,9 @@ if S.HALLOWEEN_ENABLED then
                 end
 
                 firstScan = false
+
+                for k in pairs(HALLOWEEN_LIVE) do HALLOWEEN_LIVE[k] = nil end
+                for uid, ck in pairs(hLive) do HALLOWEEN_LIVE[uid] = ck end
 
                 for uid, name in pairs(hPresent) do
                     if not hNow[uid] then debugLog("HALLOWEEN VANISHED " .. name .. " uid=`" .. uid .. "`") end
