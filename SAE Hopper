@@ -1,273 +1,1654 @@
--- Voysae
--- ============================================================
---  RARE EGG KG NOTIFIER + RARITY SERVER HOPPER  (relay version)
---  Standalone, made for auto execute.
---  1) Watches the field (and the Halloween Dimension) for the rarities in HOP_FOR.
---  2) When a rare egg is found it sends ONE message to the webhook below
---     (text starting with EGGKG + the egg data). Your Discord bot cog
---     "2worst_kg" reads it and posts the alert itself in the channels
---     where you ran !worst_on.
---  3) A found egg starts a hop window (RARITY_DURATION); the script hops
---     servers during the window, then waits for the next rare egg.
---  4) NOTHING is sent to Cloudflare. Only ONE webhook is used.
---  Stop hopping by hand: run   getgenv().EGGKG_STOP = true
--- ============================================================
+--[[
+	Steal An Egg - Eternal / Divine egg grabber (DELTA / MOBILE)
 
-if not game:IsLoaded() then game.Loaded:Wait() end
+	RELAY BUILD: the hopper, rarity matching and restart logic are the Delta
+	grabber's, but every alert is sent in the ORIGINAL notifier format: one
+	webhook message that starts with EGGKG + JSON, which your Discord bot cog
+	("2worst_kg") turns into the usual embed (kg, mutation, base -> final value,
+	kg / value role pings). There is no Roblox user-id lock; the only lock is the
+	place id below, so it runs on any account inside Steal An Egg.
+	NO WORKSPACE FILE NEEDED: host this file somewhere that serves raw text, set
+	the link in the loader, and run the same loader on every device:
+	    getgenv().EGG_SCRIPT_URL = "YOUR_RAW_LINK"
+	    loadstring(game:HttpGet("YOUR_RAW_LINK"))()
+	Each hop then re-downloads the script itself. (Without SCRIPT_URL it falls back
+	to a workspace file named "egg-grabber-delta.lua".)
 
--- ===================== WEBHOOKS =====================
--- ONE webhook used for everything. Change it here to change every alert.
-local DEFAULT_WEBHOOK = "https://discord.com/api/webhooks/1553898268226887855/fG9vg0e9vhb_dUCi0xWqNzYr5-2w8QwelJ282YrUZWI7KPrjdH3V8gqmG7JX7zqSPHEP"
+	This is the same grabber as egg-grabber.luau, rebuilt to run on Delta
+	Executor on Android and iOS. Same behaviour: land -> hunt for an
+	Eternal/Divine/Secret spawn -> POST to Discord -> hop -> repeat. A server
+	with no target egg is left straight away (CONFIG.HOP_ON_EMPTY), so the hunt
+	keeps moving instead of camping.
 
-local WEBHOOKS = {
-    Secret  = DEFAULT_WEBHOOK,
-    Eternal = DEFAULT_WEBHOOK,
-    Divine  = DEFAULT_WEBHOOK,
-    Custom  = DEFAULT_WEBHOOK,
+	WHAT CHANGED VS THE DESKTOP SCRIPT
+	  * Script-side anti-AFK was REMOVED. Steal An Egg's BAC anti-cheat kicks
+	    for VirtualUser input, so use Delta's own built-in anti-AFK instead.
+	  * clear_teleport_queue / queue_on_teleport are resolved by name, because
+	    Delta exposes them as "clearteleportqueue" / "queueonteleport" and
+	    calling the wrong name would abort every teleport.
+	  * request / http_request are both tried, and JSON goes through
+	    HttpService so no executor "json" global is required.
+	  * file helpers are wrapped, so a build without them still runs (it just
+	    cannot remember eggs between hops).
+	  * fixed the missing scalePayoutFactor() and the game:IsLStarted() typo
+	    that stopped the old delta attempt from ever starting.
+	  * hops are STRICTLY targeted: the matchmaker fallback is off
+	    (CONFIG.ALLOW_MATCHMAKER = false), because Teleport() drops us into
+	    crowded servers we cannot hop out of.
+	  * the server search reads up to CONFIG.LIST_PAGES pages of the quietest-
+	    first list and merges them, aiming DEEP (CONFIG.TARGET_DEPTH) at the 2/7
+	    servers most first-page bots never see. Pages are spaced by only
+	    CONFIG.LIST_PAGE_GAP seconds and 429s are retried, so the multi-page
+	    scrape stays fast instead of costing a 3s wait per page.
+	  * eggs are posted ONE MESSAGE PER EGG (full single-egg detail), instead of
+	    bundling two spawns into one "2 TARGET EGGS" card. If a spawn held two
+	    eggs and one is stolen, the leftover is reported as that one egg alone,
+	    never as part of a stale two-egg card.
+	  * Halloween Dimension world eggs (Eternal/Divine/Secret) are reported to
+	    CONFIG.WEBHOOK_HALLOWEEN with the VIP ping. They are (almost) always up,
+	    so this is purely additive - never a reason to hop, hold or scan for a
+	    boss.
+
+	HOW IT RESTARTS AFTER A HOP
+	  Every hop queues a tiny bootstrap that reloads this file after the new
+	  server loads. For that to work the file must live in Delta's workspace
+	  as "egg-grabber-delta.lua". If your Delta build cannot queue teleports,
+	  put this same file (or egg-grabber-delta-autoexec.lua) in Delta's
+	  AutoExec folder instead - it re-runs on every game join.
+
+	KILL SWITCH: getgenv().EGG_GRABBER_STOP = true
+	STOP FILE  : put a literal "1" in egg-grabber-delta-stop.txt
+	SET WEBHOOK below before running.
+]]
+
+local Players           = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TeleportService   = game:GetService("TeleportService")
+local HttpService       = game:GetService("HttpService")
+
+local CONFIG = {
+	-- Where to re-download this script after every hop (a raw-text link, e.g. a
+	-- GitHub raw URL). With this set, NOTHING has to be saved in the device's
+	-- workspace: the same one-line loader works on every cloud phone, and each hop
+	-- re-fetches the script from here. Leave "" to use the workspace file instead.
+	SCRIPT_URL = "",
+
+	-- The ONE webhook every egg alert goes to (your bot cog reads it and posts the embed).
+	RELAY_WEBHOOK = "https://discord.com/api/webhooks/1553898268226887855/fG9vg0e9vhb_dUCi0xWqNzYr5-2w8QwelJ282YrUZWI7KPrjdH3V8gqmG7JX7zqSPHEP",
+
+	-- The one game this script may run in (Steal An Egg). Anywhere else it exits
+	-- immediately, so it is safe to leave in Delta's AutoExec folder.
+	PLACE_ID = 107778070777162,
+
+	WEBHOOK = "https://discord.com/api/webhooks/1548176167545217036/4yKLRndl5YWYH-R553V_auhYY5mSuJH2ct3BqFKM2L2-8k8O0mxaKX2CnO7-T2k0v5Cd",
+
+	-- Second webhook: eggs earning at least BIG_VALUE_THRESHOLD per second also
+	-- get posted here (same payload, both channels - main stays the full feed).
+	WEBHOOK_BIG = "https://discord.com/api/webhooks/1557403684571324497/6sPnL3WaSVuq9AUdwm_b3od-LDyGfyxd4t6R5l7TwRTBxgXlBskSdplwOD1SCSMMRztG",
+
+	-- Base URL of the hosted redirect page (a plain https link that forwards the
+	-- browser to roblox:// so one click lands on the exact server). Leave "" to
+	-- fall back to Roblox's own web join link.
+	JOIN_BASE = "https://iridescent-wisp-1e0361.netlify.app/",
+
+	-- $1,000,000,000/s - a "1B money pet" alert
+	BIG_VALUE_THRESHOLD = 1e9,
+
+	-- 500,000 to 1,000,000 kg filter for this extra webhook
+	WEBHOOK_KG = "https://discord.com/api/webhooks/1557756218804674623/rnN1VbdB0ejThzxAkNYX8y7FRAFMozpE_20fqX1PpXSfoj4JXl2OPerGvq2FSDha7gFj",
+
+	-- role pinged on 1B+ webhook posts (the user's @vip role)
+	VIP_ROLE_ID = "1563483086107447296",
+
+	-- Bot tracker webhook (updates same message per bot)
+	WEBHOOK_TRACKER = "https://discord.com/api/webhooks/1565974323934793778/LbLg_sANVHwB2xoDY_BbXjfvue_S8avGbXmejgHmdQwDk5IYQ8TuwMrmd_O75f0dCzqZ",
+	TRACKER_MIN_INTERVAL = 15,
+
+	-- Halloween Dimension: its world eggs land on their own channel (with the
+	-- VIP ping) instead of the main/big/kg ones. They are (almost) always up,
+	-- so reporting them never influences a hop decision.
+	HALLOWEEN = true,
+	WEBHOOK_HALLOWEEN = "https://discord.com/api/webhooks/1561102494564753508/2YNNlV4q14KEqJ6gFe3EE5lYzdv8qYNoPRBN_2K-0Td2VwtkvXfyHcG1-QVwZFP0eVb3",
+	-- Separate webhook for big Halloween pets (visual scale >= 1.5 "large" and up)
+	WEBHOOK_HALLOWEEN_BIG = "https://discord.com/api/webhooks/1564094247974477956/YRjG-oP0zbjzItoex2qZl-l0dFnNiHJym5P7bB_9BH2th5eaFR2DQlMzdKLMTF6uqNST",
+	HALLOWEEN_BIG_MIN_SCALE = 1.5,
+
+	-- NOTE: no script-side anti-AFK here on purpose. Steal An Egg's BAC
+	-- anti-cheat flags VirtualUser input, so use Delta's own built-in
+	-- anti-AFK instead (Settings / Anti-AFK in the Delta menu).
+
+	-- rarities worth reporting
+	TARGET = { Eternal = true, Divine = true, Secret = true },   -- the tiers the bot cog knows how to render
+
+	-- players a full server holds; also the top of the landing-reject range
+	SERVER_CAPACITY = 7,
+
+	-- hop targeting + landing reject: prefer servers that land at 1/7, 2/7,
+	-- 3/7 and never above 4/7 (MAX_POP_ON_LAND).
+	MIN_POP_ON_LAND = 2,
+	MAX_POP_ON_LAND = 7,
+
+	-- side-by-side seconds a "wrong" landing (busy/empty) gets to prove it has
+	-- a target egg before the landing reject hops on
+	QUICK_SCAN_SECS = 6,
+
+	-- the short wait a rejected landing takes before re-hopping. Kept small:
+	-- the only thing it buys is one more beat for the player list to settle,
+	-- and every second here is a second spent not hunting.
+	REJECT_DELAY = 2,
+
+	-- LEGACY HOP: read exactly ONE page (50 servers) of the quietest-first
+	-- list. One request per fetch barely trips 429s, which is what makes
+	-- hopping reliable on slow mobile data.
+	LIST_PAGES = 1,
+	LIST_LIMIT = 75,
+
+	-- Seconds between the pages of one scrape (only used when LIST_PAGES > 1).
+	-- 0.5, matching the desktop: pages are spaced only enough to look like
+	-- separate requests, so a 2-page scrape stays fast.
+	LIST_PAGE_GAP = 0.5,
+
+	-- Rotate DEEP into the candidate list, like the desktop hunter. The list is
+	-- ordered quietest-first (0/7, 1/7, 2/7, ...), and every other bot grabs
+	-- the very top, so starting at slot 25 skips the contested head and spreads
+	-- load across accounts. The start index is additionally hash-rotated per
+	-- account (see rotateToStart) so two clients never probe the same slot.
+	TARGET_LIST_START = 15,
+
+	-- seconds between scans while waiting for a spawn
+	POLL = 2,
+
+	-- seconds to wait for egg data to populate after landing
+	LOAD_TIMEOUT = 30,
+
+	-- Separate, much shorter budget for the case where ReadFieldEggs ANSWERS
+	-- but the records are still empty. An empty-but-working read means the
+	-- module is fine, so there is no point sitting on LOAD_TIMEOUT: the main
+	-- loop rescans every POLL seconds and hops when it finds nothing anyway.
+	-- Only a read that keeps ERRORING gets the full LOAD_TIMEOUT above.
+	-- Raise this if you ever see "no target eggs" logged on a server that
+	-- clearly had eggs a moment later.
+	EGG_EMPTY_TIMEOUT = 8,
+
+	-- hold after posting so the join link stays alive
+	DWELL = 1.0,
+
+	-- Boss alert settings
+	BOSS_WEBHOOK = "https://discord.com/api/webhooks/1558391643793784895/wJys4QVSUOo6TpuXRHcGWWyEU0ah1eQKk9PuduhNBnAGsMwevjItOsucVOY-KT3-KrNA",
+	BOSS_ROLE_ID = "1365362827988041778",
+
+	-- seconds between post attempts when Discord rejects one
+	POST_COOLDOWN = 30,
+
+	-- post attempts per egg before giving up
+	MAX_POST_RETRIES = 3,
+
+	-- Servers with no target egg are always left straight away. This build
+	-- never camps: the only thing that stops the hop is the wave hold
+	-- (4:30-5:05 of every 5-minute cycle).
+	HOP_ON_EMPTY = true,
+
+	-- Kept for parity with the desktop config. Unused here - camping was
+	-- removed so the hunter always keeps hopping.
+	MAX_WAIT = 0,
+
+	-- false = never teleport, just report
+	HOP = true,
+
+	-- Ping gate (ms). The server list has no region/ping field, so a region
+	-- can't be picked upfront - instead each landing is measured with
+	-- LocalPlayer:GetNetworkPing() and rejected when worse than this.
+	-- Tuned for a Hong Kong client: Singapore lands ~30-55ms and Hong Kong
+	-- itself ~5-20ms, Tokyo ~50-80ms. 85 keeps SG/HK/Tokyo and drops farther
+	-- datacenters without rejecting on a transient mobile spike.
+	-- 0 = disabled.
+	MAX_PING_MS = 85,
+
+	-- Ping samples per landing (median is used). 2 = one extra read costs a
+	-- fraction of a second but stops a single transient spike on a cloud /
+	-- mobile connection from rejecting an otherwise good Singapore server.
+	-- Raise to 3 only if you still see false rejects; each extra sample costs
+	-- the gap below.
+	PING_SAMPLES = 2,
+
+	-- Keep every hop STRICTLY targeted at a low-population server. When true,
+	-- a hop that runs out of candidates falls back to TeleportService:Teleport
+	-- (the matchmaker), which drops us into crowded servers we then cannot hop
+	-- out of. Leave false so a hop with nowhere good to go simply stays put.
+	ALLOW_MATCHMAKER = false,
+
+	-- How many servers we are willing to be refused by before falling back to
+	-- the matchmaker. 10, matching the desktop hunter: a wider pool (200) means
+	-- more live candidates to grind through, and the in-hop deadIds memory stops
+	-- any server being retried twice, so extra attempts cost one request each
+	-- rather than hammering the same corpse.
+	MAX_TELEPORT_RETRIES = 10,
+
+	-- Gap after a refused join, in seconds. Flat 1s like the desktop hunter:
+	-- with a fresh 200-server list and deadIds, a short fixed pause is enough.
+	HOP_RETRY_WAIT = 1,
+
+	-- Floor between two hop() CALLS, in seconds, whichever server they start
+	-- from. This covers the two paths that used to hammer Roblox's join
+	-- endpoint: a refused hop retried from the top of the main loop after POLL,
+	-- and a landing we reject REJECT_DELAY after arriving. 0 = off.
+	-- Raised from 8: mobile joins take longer, and a tighter gap just burns
+	-- the budget on attempts that Roblox hasn't even processed yet.
+	MIN_HOP_GAP = 10,
+
+	-- When the matchmaker is disabled and the current candidate list is
+	-- exhausted, refetch a fresh list this many times before giving up.
+	MAX_LIST_REFETCHES = 3,
+
+	-- seconds to wait for Roblox to say yes or no to a targeted jump.
+	-- 3, matching the desktop hunter. The old 6 was chosen when mobile joins
+	-- were thought to be slower, but a longer verdict window just means one
+	-- dead candidate costs twice as long before we move to the next - and with
+	-- a 200-server pool there are plenty of nexts.
+	TARGET_VERDICT = 3,
+
+	-- Pre-join ping filter (ms): a listed server reporting more than this is
+	-- never teleported to, so we don't land, measure, then reject. Works only
+	-- when the list response actually carries a per-server `ping` field.
+	-- 110 = Hong Kong / Singapore / Tokyo only; drops anything farther.
+	-- If the field is missing this filter silently does nothing - the
+	-- MAX_PING_MS landing gate is the one that always enforces.
+	-- 0 = accept any ping regardless.
+	LIST_PING_SKIP = 110,
+
+	-- ------------------------------------------------ 3D rendering off
+	-- Stop drawing the world: parts hidden, shadows off, lowest render
+	-- quality and FPS capped. This is heat/battery relief for a phone - it
+	-- does NOT make loads faster, every wait in here is replication, not
+	-- pixels.
+	DISABLE_3D = true,
+	-- Flat panel over the screen as well. Off: the parts are already hidden, so
+	-- the panel only ever buys the odd part that streams in late - and on a
+	-- phone it is drawn over Delta's own menu too. false keeps the world hidden
+	-- with the screen left readable.
+	SHOW_COVER = false,
+	-- Colour of the cover panel (only used when SHOW_COVER is true).
+	RENDER_OFF_COLOR = Color3.new(1, 1, 1),
+	-- Lower this if Delta's own menu ends up hidden behind the panel.
+	RENDER_OFF_DISPLAY_ORDER = 9999,
+	-- FPS cap while the view is off (0 = leave Roblox's cap alone).
+	RENDER_OFF_FPS = 25,
+	-- Full re-hide of every tracked part, in seconds. The frequent pass below
+	-- only repairs your own character (the one thing Roblox itself un-hides);
+	-- anything else that comes back is caught by this one. Keep it large:
+	-- walking every tracked part is a burst of property reads in a single
+	-- frame, felt as a stutter on a phone if it runs on a short timer.
+	RENDER_OFF_FULL_SWEEP = 40,
+
+	-- ==== hop resilience (match desktop egg-hunter) ==========================
+	-- Seconds to wait between hop rounds when a full candidate list is exhausted.
+	-- A round that exhausts MAX_TELEPORT_RETRIES is transient - the list was
+	-- stale or Roblox was busy - so wait and start a fresh round rather than
+	-- letting the run end.
+	HOP_ROUND_PAUSE = 2,
+
+	-- Supervisor restart delay: if main() errors or returns without hopping,
+	-- wait this long and call it again. The run never ends on a transient
+	-- failure - it only stops when STOP_FILE appears or the process is killed.
+	MAIN_RESTART_WAIT = 20,
+
+	-- Seconds to wait and retry module loading in place before spending a hop.
+	-- After a teleport the DataModel is still coming up; ReplicatedStorage
+	-- often isn't ready yet. Waiting here avoids a wasted hop.
+	LOAD_RETRY_WAIT = 6,
 }
+
+local SELF       = "egg-grabber-delta.lua"
+local LOG        = "egg-grabber-delta.log"
+local STOP_FILE  = "egg-grabber-delta-stop.txt"
+
+local COLORS = { Divine = 0xAA00FF, Eternal = 0xFFD700, Secret = 0x00E5FF }
+
+-- Which account is reporting: shown in every webhook footer so multi-account
+-- posts can be told apart. Username (not display name) - it's stable.
+local function reporterName()
+	local lp = Players.LocalPlayer
+	if lp then
+		local ok, n = pcall(function() return lp.Name end)
+		if ok and type(n) == "string" and n ~= "" then
+			return n
+		end
+	end
+	return "unknown"
+end
+
+local ACCT_TAG   = reporterName()
+
+-- ------------------------------------------------------------------ environment
+
+local function genv()
+	local ok, g = pcall(getgenv)
+	if ok and type(g) == "table" then
+		return g
+	end
+	return nil
+end
+
+-- Stop it from anywhere with:  getgenv().EGG_GRABBER_STOP = true
+-- The webhook can also be set by the loader (getgenv().EGG_RELAY_WEBHOOK = "..."),
+-- so a publicly hosted copy of this file does not have to contain it.
+local function relayWebhook()
+	local g = genv()
+	local o = g and g.EGG_RELAY_WEBHOOK
+	if type(o) == "string" and o ~= "" then
+		return o
+	end
+	return CONFIG.RELAY_WEBHOOK or ""
+end
+
+-- Same idea for the download link: the loader can set getgenv().EGG_SCRIPT_URL, so
+-- the hosted file itself needs no edits.
+local function scriptUrl()
+	local g = genv()
+	local o = g and g.EGG_SCRIPT_URL
+	if type(o) == "string" and o ~= "" then
+		return o
+	end
+	return CONFIG.SCRIPT_URL or ""
+end
+
+local function stopped()
+	local g = genv()
+	return g ~= nil and g.EGG_GRABBER_STOP == true
+end
+
+-- ------------------------------------------------------------------ file helpers
+--
+-- Delta ships readfile/writefile/appendfile, but a limited build might not.
+-- Every file touch goes through these so a missing function never kills the run.
+
+local function safeRead(path)
+	if type(readfile) ~= "function" then return nil end
+	local ok, content = pcall(readfile, path)
+	if ok and type(content) == "string" then
+		return content
+	end
+	return nil
+end
+
+local function safeWrite(path, data)
+	if type(writefile) ~= "function" then return false end
+	return (pcall(writefile, path, data))
+end
+
+local function safeAppend(path, data)
+	if type(appendfile) ~= "function" then return false end
+	return (pcall(appendfile, path, data))
+end
+
+local function parseRoleIds(v)
+	local out = {}
+	if type(v) == "table" then
+		for _, x in ipairs(v) do
+			local s = tostring(x):match("(%d+)")
+			if s and s ~= "" then
+				out[#out + 1] = s
+			end
+		end
+		return out
+	end
+	if v == nil then
+		return out
+	end
+	local s = tostring(v)
+	for id in s:gmatch("(%d+)") do
+		out[#out + 1] = id
+	end
+	return out
+end
+
+local function roleMentionContent(ids)
+	local parts = {}
+	for i = 1, #ids do
+		parts[i] = "<@&" .. ids[i] .. ">"
+	end
+	return table.concat(parts, " ")
+end
+
+local function log(msg)
+	print("[egg-grabber] " .. msg)
+	safeAppend(LOG, os.date("!%H:%M:%S") .. "  " .. msg .. "\n")
+end
+
+local TRACKER_ID_FILE = nil
+local trackerMsgId = nil
+local lastEggSentAt = os.clock()
+local eggsSentThisRun = 0
+local lastTrackerPostAt = 0
+
+local function loadTrackerId()
+	pcall(function()
+		if not ACCT_TAG then return end
+		TRACKER_ID_FILE = ("egg-grabber-tracker-id-%s.txt"):format(ACCT_TAG)
+		local ok, c = pcall(readfile, TRACKER_ID_FILE)
+		if ok and type(c) == "string" then
+			c = c:gsub("%s+", "")
+			if c:match("^%d+$") then
+				trackerMsgId = c
+			end
+		end
+	end)
+end
+
+local function saveTrackerId(id)
+	pcall(function()
+		if not id or not TRACKER_ID_FILE then return end
+		trackerMsgId = tostring(id)
+		pcall(writefile, TRACKER_ID_FILE, trackerMsgId)
+	end)
+end
+
+loadTrackerId()
+
+local function sendBotTracker(force)
+	pcall(function()
+		if not CONFIG or not CONFIG.WEBHOOK_TRACKER then return end
+		if CONFIG.WEBHOOK_TRACKER == "" or CONFIG.WEBHOOK_TRACKER:find("PASTE_YOUR", 1, true) then
+			return
+		end
+		if not force and lastTrackerPostAt ~= 0 and os.clock() - lastTrackerPostAt < (CONFIG.TRACKER_MIN_INTERVAL or 15) then
+			return
+		end
+
+		local now = os.clock()
+		local ago = math.floor(now - lastEggSentAt)
+		local agoText
+		if ago < 60 then
+			agoText = ago .. "s ago"
+		elseif ago < 3600 then
+			agoText = math.floor(ago / 60) .. "m " .. (ago % 60) .. "s ago"
+		else
+			agoText = math.floor(ago / 3600) .. "h " .. math.floor((ago % 3600) / 60) .. "m ago"
+		end
+
+		local botName = reporterName()
+		local jobId = game.JobId
+		if type(jobId) == "string" and #jobId > 8 then
+			jobId = jobId:sub(1, 8) .. "..."
+		end
+
+		local payload = {
+			username = "Bot Tracker",
+			embeds = {
+				{
+					title = "Egg Hunter Status",
+					color = 0x2ECC71,
+					fields = {
+						{ name = "Bot", value = botName .. " (" .. tostring(ACCT_TAG or "unknown") .. ")", inline = true },
+						{ name = "Last Egg Sent", value = agoText, inline = true },
+						{ name = "Eggs This Run", value = tostring(eggsSentThisRun), inline = true },
+						{ name = "Server", value = "`" .. tostring(jobId) .. "`", inline = true },
+						{ name = "Time", value = os.date("!%H:%M:%S UTC"), inline = true },
+					},
+					footer = { text = "Live tracker • Updates on egg sends" },
+					timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+				}
+			},
+			allowed_mentions = { parse = {} }
+		}
+
+		local body = jsonEncode(payload)
+		if not body then return end
+
+		if trackerMsgId and trackerMsgId ~= "" then
+			local editUrl = CONFIG.WEBHOOK_TRACKER .. "/messages/" .. trackerMsgId
+			pcall(httpRequest, {
+				Url = editUrl,
+				Method = "PATCH",
+				Headers = { ["Content-Type"] = "application/json" },
+				Body = body,
+			})
+		else
+			local ok, res = pcall(httpRequest, {
+				Url = CONFIG.WEBHOOK_TRACKER,
+				Method = "POST",
+				Headers = { ["Content-Type"] = "application/json" },
+				Body = body,
+			})
+			if ok and type(res) == "table" and res.Body then
+				local ok2, data = pcall(jsonDecode, res.Body)
+				if ok2 and type(data) == "table" and data.id then
+					saveTrackerId(data.id)
+				end
+			end
+		end
+
+		lastTrackerPostAt = os.clock()
+	end)
+end
+
+-- In-game notifications (the Delta/cloud-phone console can stay blank, so
+-- key progress is also shown top-right). Rate-limited: extras inside the
+-- window are dropped, never queued.
+local lastNotifyAt = 0
+local NOTIFY_COOLDOWN = 5
+
+local function notify(text)
+	if os.clock() - lastNotifyAt < NOTIFY_COOLDOWN then
+		return
+	end
+	lastNotifyAt = os.clock()
+	pcall(function()
+		game:GetService("StarterGui"):SetCore("SendNotification", {
+			Title = "egg grabber",
+			Text = tostring(text):sub(1, 120),
+			Duration = 5,
+		})
+	end)
+end
+
+-- Bypasses the cooldown: one-shot diagnostics must never be dropped.
+local function notifyForce(text)
+	lastNotifyAt = os.clock()
+	pcall(function()
+		game:GetService("StarterGui"):SetCore("SendNotification", {
+			Title = "egg grabber",
+			Text = tostring(text):sub(1, 120),
+			Duration = 5,
+		})
+	end)
+end
+
+-- Staying-put reasons repeat every poll, so they get their own slower
+-- cooldown instead of the regular one. Still always surfaces eventually.
+local lastStayNotifyAt = 0
+local STAY_NOTIFY_COOLDOWN = 30
+
+local function notifyStay(reason)
+	if os.clock() - lastStayNotifyAt < STAY_NOTIFY_COOLDOWN then
+		return
+	end
+	lastStayNotifyAt = os.clock()
+	notifyForce("staying put: " .. tostring(reason):sub(1, 60))
+end
+
+-- ------------------------------------------------------------------ http / json
+
+local httpRequest = (syn and syn.request)
+	or (http and http.request)
+	or (fluxus and fluxus.request)
+	or http_request
+	or request
+
+local function jsonEncode(tbl)
+	local ok, s = pcall(function() return HttpService:JSONEncode(tbl) end)
+	if ok and type(s) == "string" then
+		return s
+	end
+	if type(json) == "table" and json.encode then
+		local ok2, s2 = pcall(json.encode, tbl)
+		if ok2 then return s2 end
+	end
+	return nil
+end
+
+local function jsonDecode(text)
+	local ok, t = pcall(function() return HttpService:JSONDecode(text) end)
+	if ok and type(t) == "table" then
+		return t
+	end
+	if type(json) == "table" and json.decode then
+		local ok2, t2 = pcall(json.decode, text)
+		if ok2 then return t2 end
+	end
+	return nil
+end
+
+-- ------------------------------------------------------------------ teleport queue
+
+local function queueOnTeleport(code)
+	local fn = queue_on_teleport or queueonteleport
+	if not fn and syn then
+		fn = syn.queue_on_teleport or syn.queueonteleport
+	end
+	if type(fn) == "function" then
+		return (pcall(fn, code))
+	end
+	return false
+end
+
+local function clearTeleportQueue()
+	local fn = clear_teleport_queue or clearteleportqueue
+	if not fn and syn then
+		fn = syn.clear_teleport_queue
+	end
+	if type(fn) == "function" then
+		pcall(fn)
+	end
+end
+
+-- Runs in the NEW game after a hop. Tries every reload path Delta offers so a
+-- hop never leaves you with a dead script. If none work, the AutoExec file is
+-- the only thing that can bring it back (see egg-grabber-delta-autoexec.lua).
+local BOOTSTRAP = ([==[
+local path = "__SELF__"
+local url  = "__URL__"
+local g = getgenv and getgenv() or _G
+if g.EGG_GRABBER_RUNNING ~= true then
+	local loaded = false
+
+	-- 1) re-download from the hosted link (needs nothing saved on this device)
+	if url ~= "" then
+		for _ = 1, 3 do
+			local src
+			local okG, body = pcall(function() return game:HttpGet(url) end)
+			if okG and type(body) == "string" and #body > 200 then
+				src = body
+			else
+				local rq = request or http_request or (syn and syn.request) or (http and http.request)
+				if rq then
+					local okR, res = pcall(rq, { Url = url, Method = "GET" })
+					if okR and type(res) == "table" and (res.StatusCode or res.status) == 200
+						and type(res.Body) == "string" and #res.Body > 200 then
+						src = res.Body
+					end
+				end
+			end
+			if src then
+				local loader = loadstring or load
+				local f = loader and loader(src)
+				if f then loaded = pcall(f) end
+			end
+			if loaded then break end
+			task.wait(2)
+		end
+	end
+
+	-- 2) fall back to the file in the workspace
+	if not loaded and type(loadfile) == "function" then
+		local ok, f = pcall(loadfile, path)
+		if ok and type(f) == "function" then
+			loaded = pcall(f)
+		end
+	end
+	if not loaded and type(readfile) == "function" then
+		local ok, src = pcall(readfile, path)
+		if ok and type(src) == "string" then
+			local loader = loadstring or load
+			if loader then
+				local f = loader(src)
+				if f then loaded = pcall(f) end
+			end
+		end
+	end
+	if not loaded and type(dofile) == "function" then
+		loaded = pcall(dofile, path)
+	end
+	if not loaded then
+		warn("[egg-grabber] teleport bootstrap could not reload the script - set CONFIG.SCRIPT_URL, save " .. path .. " in the workspace, or use AutoExec")
+	end
+end
+]==]):gsub("__SELF__", SELF):gsub("__URL__", function() return scriptUrl() end)
+
+-- The code queued for the next server: carries the relay webhook forward (getgenv
+-- is wiped on every teleport) and then reloads the script.
+local function bootstrapCode()
+	local prefix = ""
+	local hook = relayWebhook()
+	if hook ~= "" then
+		prefix = ("pcall(function() getgenv().EGG_RELAY_WEBHOOK = %q end)\n"):format(hook)
+	end
+	return prefix .. BOOTSTRAP
+end
+
+-- ------------------------------------------------------------------ persistent logs
+
+-- Every egg already reported, keyed by server + egg uid. Lives on disk so a hop
+-- (which reloads this whole script) does not re-report the same egg. If the file
+-- helpers are missing we keep an in-memory copy instead; that only forgets when
+-- the game reloads.
+local POSTED_LOG  = "egg-grabber-delta-posted.txt"
+local memoryPosted = {}
+
+local function readPosted()
+	local posted = {}
+	local content = safeRead(POSTED_LOG)
+	if content then
+		for key in content:gmatch("[^\r\n]+") do
+			posted[key] = true
+		end
+	end
+	for key in pairs(memoryPosted) do
+		posted[key] = true
+	end
+	return posted
+end
+
+local function postedKey(record)
+	-- Key must be unique PER SPAWN. Relying on Uid alone breaks when Uid is nil
+	-- or shared: the key collapses to "JobId:nil" and every extra egg on the
+	-- server is treated as already-reported (only the first ever posts).
+	local uid = tostring(record.Uid or "")
+	local cat = tostring(record.AssetCategory or "")
+	local scale = tostring(record.AssetScale or "")
+	local mut = ""
+	if type(record.Mutations) == "table" then
+		local parts = {}
+		for _, m in ipairs(record.Mutations) do
+			parts[#parts + 1] = tostring(m)
+		end
+		mut = table.concat(parts, ",")
+	end
+	return table.concat({ game.JobId, uid, cat, scale, mut }, ":")
+end
+
+local function rememberPosted(record)
+	local key = postedKey(record)
+	memoryPosted[key] = true
+	safeAppend(POSTED_LOG, key .. "\n")
+end
+
+-- The server we just teleported out of (rolling, one entry): the self-bounce
+-- guard that stops us aiming straight back at the instance we just left.
+local LEFT_LOG = "egg-grabber-delta-left.txt"
+
+local function writeLeft(jobId)
+	safeWrite(LEFT_LOG, jobId)
+end
+
+local function readLeft()
+	local content = safeRead(LEFT_LOG)
+	if content then
+		return content:match("[^%s]+")
+	end
+	return nil
+end
+
+-- Wall-clock stamp of the last join attempt. On disk on purpose: getgenv does
+-- not survive a teleport, and the whole point is to measure the gap ACROSS one
+-- (a landing we reject can re-hop seconds after arriving).
+local JOIN_LOG = "egg-grabber-delta-lastjoin.txt"
+
+local function stampJoin()
+	safeWrite(JOIN_LOG, tostring(os.time()))
+end
+
+local function readJoinStamp()
+	local content = safeRead(JOIN_LOG)
+	local n = content and tonumber(content:match("%d+"))
+	return n or 0
+end
+
+-- Per-account rolling memory of the last few servers we landed on.
+local VISITED_MAX = 10
+local memoryVisited = {}
+
+local function visitedFile()
+	local id = Players.LocalPlayer and Players.LocalPlayer.UserId or "unknown"
+	return ("egg-grabber-delta-visited-%s.txt"):format(id)
+end
+
+local function readVisited()
+	local list = {}
+	local content = safeRead(visitedFile())
+	if content then
+		for line in content:gmatch("[^\r\n]+") do
+			local id = line:match("^%s*([^%s]+)%s*$")
+			if id and id ~= "" and #list < VISITED_MAX then
+				list[#list + 1] = id
+			end
+		end
+	end
+	for _, id in ipairs(memoryVisited) do
+		if #list >= VISITED_MAX then break end
+		list[#list + 1] = id
+	end
+	return list
+end
+
+local function rememberVisit(jobId)
+	if not jobId then return end
+	local list = readVisited()
+	local out = {}
+	for _, id in ipairs(list) do
+		if id ~= jobId then out[#out + 1] = id end
+	end
+	out[#out + 1] = jobId
+	if #out > VISITED_MAX then
+		local trimmed = {}
+		for i = #out - VISITED_MAX + 1, #out do
+			trimmed[#trimmed + 1] = out[i]
+		end
+		out = trimmed
+	end
+	memoryVisited = out
+	safeWrite(visitedFile(), table.concat(out, "\n"))
+end
+
+-- Simple account identifier for per-account hash rotation.
+local function selfId()
+	local lp = Players.LocalPlayer
+	if lp then
+		return tostring(lp.UserId)
+	end
+	return nil
+end
+
+-- Per-account rolling memory of servers that refused us (279 / timed out / "failed").
+-- Survives hops so we don't keep re-trying dead servers across hours of running.
+local FAILED_TTL = 3600 -- 1 hour
+
+local function failedFile()
+	local id = selfId() or "unknown"
+	return ("egg-grabber-delta-failed-%s.txt"):format(id)
+end
+
+local function readFailed()
+	local list = {}
+	local content = safeRead(failedFile())
+	if content then
+		local now = os.time()
+		for line in content:gmatch("[^\r\n]+") do
+			local id, ts = line:match("^%s*([^%s]+)%s+(%d+)%s*$")
+			if id and id ~= "" and ts then
+				local age = now - tonumber(ts)
+				if age < FAILED_TTL then
+					list[#list + 1] = id
+				end
+			end
+		end
+	end
+	return list
+end
+
+local function rememberFailed(jobId)
+	if not jobId then return end
+	local list = readFailed()
+	local out = {}
+	for _, id in ipairs(list) do
+		if id ~= jobId then out[#out + 1] = id end
+	end
+	out[#out + 1] = jobId
+	if #out > VISITED_MAX then
+		local trimmed = {}
+		for i = #out - VISITED_MAX + 1, #out do
+			trimmed[#trimmed + 1] = out[i]
+		end
+		out = trimmed
+	end
+	local now = os.time()
+	local lines = {}
+	for _, id in ipairs(out) do
+		lines[#lines + 1] = id .. " " .. now
+	end
+	safeWrite(failedFile(), table.concat(lines, "\n"))
+end
+
+-- ------------------------------------------------------------------ modules
+
+local function waitLoaded(secs)
+	local t0 = os.clock()
+	while os.clock() - t0 < secs do
+		if game:IsLoaded() then
+			return true
+		end
+		-- Polled tight: a 1s sleep here adds up to a full second of dead air
+		-- right after the loading screen clears, before anything else runs.
+		task.wait(0.15)
+	end
+	return game:IsLoaded()
+end
+
+local function loadModules()
+	if not game:IsLoaded() and not waitLoaded(CONFIG.LOAD_TIMEOUT) then
+		return nil, "stuck on loading screen"
+	end
+
+	local data   = ReplicatedStorage:WaitForChild("Data", CONFIG.LOAD_TIMEOUT)
+	local client = ReplicatedStorage:WaitForChild("Client", CONFIG.LOAD_TIMEOUT)
+	if not data or not client then
+		return nil, "ReplicatedStorage not ready"
+	end
+	if not data:WaitForChild("Assets", CONFIG.LOAD_TIMEOUT) then
+		return nil, "Assets module missing"
+	end
+	if not client:WaitForChild("EggState", CONFIG.LOAD_TIMEOUT) then
+		return nil, "EggState module missing"
+	end
+
+	local okA, assets = pcall(require, ReplicatedStorage.Data.Assets)
+	local okE, eggState = pcall(require, ReplicatedStorage.Client.EggState)
+	if not okA or not okE then
+		return nil, "require failed: " .. tostring(assets) .. " / " .. tostring(eggState)
+	end
+
+	return assets, eggState
+end
+
+-- Wait until the field-egg records have arrived and stopped changing. Two
+-- things make this quick: it polls every 0.25s instead of 1s (so a stable
+-- count is confirmed in ~1.5s and a batch of records is noticed almost as
+-- soon as it lands), and the "records are simply empty" case gets its own
+-- much shorter budget - see CONFIG.EGG_EMPTY_TIMEOUT. A read that keeps
+-- ERRORING is different: that is the module genuinely not being ready, so
+-- it still gets the full timeout.
+local function waitForEggs(eggState, timeout)
+	local t0 = os.clock()
+	local deadline = t0 + timeout
+	local emptyDeadline = t0 + (CONFIG.EGG_EMPTY_TIMEOUT or 8)
+	local lastCount = nil
+	local stableFor = 0
+	while os.clock() < deadline do
+		local ok, data = pcall(eggState.ReadFieldEggs)
+		if ok and type(data) == "table" then
+			local count = (type(data.Records) == "table") and #data.Records or 0
+			if count > 0 then
+				if count == lastCount then
+					stableFor = stableFor + 1
+					if stableFor >= 6 then
+						return true
+					end
+				else
+					stableFor = 0
+					lastCount = count
+				end
+			else
+				stableFor = 0
+				lastCount = nil
+				if os.clock() >= emptyDeadline then
+					return false
+				end
+			end
+		end
+		task.wait(0.25)
+	end
+	return false
+end
+
+-- ----------------------------------------------------------------- scanning
+
+local function rarityOf(cfg)
+	local r = cfg and cfg.Rarity
+	if type(r) == "table" then
+		return r._id or r.id or r.Name
+	end
+	return r
+end
+
+-- The weight the game itself shows, taken from AssetItems.WeightKg.
+local function weightKg(cfg, rec)
+	local base = cfg and tonumber(cfg.ModelWeight)
+	if not base then
+		return nil
+	end
+	return base * math.max(tonumber(rec.AssetScale) or 0, 0) ^ 3
+end
+
+-- The per-second earnings of THIS specific spawn, mirroring the game's
+-- Shared.Util.AssetEarnings.RatePerSecond.
+local EARN_STEEP_POWER = 1.85
+local EARN_KNEE_SCALE  = 5
+local EARN_TAPER_POWER = 1.2
+local EARN_MIN_RATE    = 1
+
+local MUTATION_SCALAR = {
+	Silver = 1.2, Golden = 2.5, Rainbow = 3.5, Monstrous = 3,
+	Boss = 2.75, Scrambled = 2.75, Enchanted = 2.85, Sakura = 1.25,
+	GreatBloom = 2.5,
+	Nitro = 2.75, Spectral = 2.75, Parasite = 3, Fractured = 2.75,
+	Bloom = 1.25, SpiritBloom = 2.5,
+}
+
+local function scalePayoutFactor(scale)
+	if scale <= EARN_KNEE_SCALE then
+		return scale ^ EARN_STEEP_POWER
+	end
+	return EARN_KNEE_SCALE ^ EARN_STEEP_POWER * (scale / EARN_KNEE_SCALE) ^ EARN_TAPER_POWER
+end
+
+local function mutationMultiplier(mutations)
+	local m = 1
+	if type(mutations) == "table" then
+		for _, mid in ipairs(mutations) do
+			local scalar = MUTATION_SCALAR[tostring(mid)]
+			if scalar then
+				m = m + math.max(0, scalar - 1)
+			end
+		end
+	end
+	return math.max(1, m)
+end
+
+local function earningPerSec(cfg, rec)
+	local base = cfg and tonumber(cfg.EarningRate) or 0
+	if base <= 0 then
+		return 0, 0
+	end
+	local scale = tonumber(rec and rec.AssetScale) or 0
+	if scale <= 0 then
+		return base, base
+	end
+	local plain = base * scalePayoutFactor(scale)
+	local raw   = plain * mutationMultiplier(rec.Mutations)
+	return math.max(math.round(raw), EARN_MIN_RATE), math.max(math.round(plain), EARN_MIN_RATE)
+end
+
+local function scan(assets, eggState)
+	local hits = {}
+
+	local ok, data = pcall(eggState.ReadFieldEggs)
+	if not ok or type(data) ~= "table" or type(data.Records) ~= "table" then
+		return hits
+	end
+
+	local directory = assets.Directory
+	for _, rec in ipairs(data.Records) do
+		local cfg    = directory and directory[rec.AssetCategory]
+		local rarity = rarityOf(cfg)
+		if rarity and CONFIG.TARGET[tostring(rarity)] then
+			local earnFinal, earnBase = earningPerSec(cfg, rec)
+			hits[#hits + 1] = {
+				record = rec,
+				rarity = tostring(rarity),
+				name   = (cfg and (cfg.DisplayName or cfg._id)) or rec.AssetCategory,
+				weight = weightKg(cfg, rec),
+				earn   = earnFinal,
+				earnBase = earnBase,
+			}
+		end
+	end
+
+	return hits
+end
+
+local function censusText(assets, eggState)
+	local counts = {}
+	local ok, data = pcall(eggState.ReadFieldEggs)
+	if ok and type(data) == "table" and type(data.Records) == "table" then
+		local directory = assets.Directory
+		for _, rec in ipairs(data.Records) do
+			local cfg    = directory and directory[rec.AssetCategory]
+			local rarity = tostring(rarityOf(cfg) or "?")
+			counts[rarity] = (counts[rarity] or 0) + 1
+		end
+	end
+
+	local keys = {}
+	for k in pairs(counts) do
+		keys[#keys + 1] = k
+	end
+	table.sort(keys)
+
+	local parts = {}
+	for _, k in ipairs(keys) do
+		parts[#parts + 1] = k .. " " .. counts[k]
+	end
+	return table.concat(parts, ", ")
+end
+
+-- ===== Halloween Dimension ==================================================
+-- The halloween map holds a pile of world eggs that are (almost) always up, so
+-- their rarity is the only thing worth reacting to. Everything below is
+-- additive to the grabber: it reports and remembers, and never touches a hop
+-- decision. The spec table maps the egg's own name onto the pet it hatches
+-- into ("Rotshroom" -> Toadstool, "Dread Wolf" -> Werewolf), so index every
+-- alias.
+local hwPets      = nil
+local hwPetsWarnAt = 0
+local hwEggIndex  = nil
+local hwKgIndex   = nil
+local hwMath      = nil
+local hwBand      = nil
+
+local function halloweenPets()
+	if hwPets ~= nil then
+		return hwPets
+	end
+	-- Deliberately NOT a one-shot failure. On the phone the whole stay is over
+	-- in a few seconds, so caching a single miss would cost every halloween
+	-- egg on that server - and the first scan can land only ~2s after the map
+	-- replicates. The game caches require(), so retrying is nearly free.
+	local data = ReplicatedStorage:FindFirstChild("Data")
+	local mod  = data and data:FindFirstChild("HalloweenPets")
+	if not mod then
+		if os.clock() - hwPetsWarnAt > 30 then
+			hwPetsWarnAt = os.clock()
+			log("halloween: HalloweenPets module not replicated yet")
+		end
+		return nil
+	end
+	local ok, pets = pcall(require, mod)
+	if ok and type(pets) == "table" and type(pets.Specs) == "table" then
+		hwPets = pets
+		return hwPets
+	end
+	if os.clock() - hwPetsWarnAt > 30 then
+		hwPetsWarnAt = os.clock()
+		log("halloween: HalloweenPets module unusable (" .. tostring(pets) .. ")")
+	end
+	return nil
+end
+
+local function halloweenEggIndex(pets)
+	if hwEggIndex then
+		return hwEggIndex
+	end
+	local idx = {}
+	for key, spec in pairs(pets.Specs) do
+		if type(spec) == "table" then
+			idx[key] = spec
+			if type(spec.EggSource) == "string" then idx[spec.EggSource] = spec end
+			if type(spec.Source)    == "string" then idx[spec.Source]    = spec end
+			if type(spec.Id)        == "string" then idx[spec.Id]        = spec end
+		end
+	end
+	hwEggIndex = idx
+	return idx
+end
+
+-- Scale-1 midpoint kg for one halloween egg, plus the Assets.Directory key
+-- (`cat`) that the game's own WeightKg / RatePerSecond take as Category - that
+-- key is what lets halloweenRange() evaluate the band by hand.
+local function halloweenKgIndex(pets)
+	if hwKgIndex then
+		return hwKgIndex
+	end
+	local idx = {}
+	local ok, assets = pcall(require, ReplicatedStorage.Data.Assets)
+	if ok and type(assets) == "table" and type(assets.Directory) == "table" then
+		for key, spec in pairs(pets.Specs) do
+			if type(spec) == "table" then
+				local cfg, catName
+				for _, n in ipairs({ spec.Id, key, spec.DisplayName, spec.Source, spec.EggSource }) do
+					if type(n) == "string" and assets.Directory[n] then
+						cfg     = assets.Directory[n]
+						catName = n
+						break
+					end
+				end
+				local kg
+				if cfg then
+					kg = (cfg.Egg and tonumber(cfg.Egg.WeightKg)) or tonumber(cfg.ModelWeight)
+				end
+				if kg and catName then
+					local entry = { kg = kg, cat = catName }
+					idx[key] = entry
+					if type(spec.EggSource) == "string" then idx[spec.EggSource] = entry end
+					if type(spec.Source)    == "string" then idx[spec.Source]    = entry end
+					if type(spec.Id)        == "string" then idx[spec.Id]        = entry end
+				end
+			end
+		end
+	end
+	hwKgIndex = idx
+	return idx
+end
+
+-- Exact kg/value of one halloween egg needs its rolled AssetScale, and that roll
+-- is never replicated before the egg is stolen. What CAN be stated honestly is
+-- the band the roll lands in, so read the game's SCALE_BANDS, take the heaviest
+-- entry, and evaluate the game's own WeightKg / RatePerSecond at both edges.
+local function halloweenMath()
+	if hwMath == nil then
+		local okA, ai = pcall(require, ReplicatedStorage.Shared.Util.AssetItems)
+		local okE, ae = pcall(require, ReplicatedStorage.Shared.Util.AssetEarnings)
+		hwMath = (okA and okE) and { items = ai, earn = ae } or false
+	end
+	if hwMath == false then
+		return nil
+	end
+	return hwMath
+end
+
+local function halloweenBand()
+	if hwBand == false then
+		return nil
+	end
+	if hwBand then
+		return hwBand
+	end
+	hwBand = false
+	local ok, bal = pcall(require, ReplicatedStorage.Shared.Flags.GameplayBalance)
+	if ok and type(bal) == "table" and type(bal.Eggs) == "table"
+		and type(bal.Eggs.SCALE_BANDS) == "table" then
+		local best, total, above = nil, 0, 0
+		for _, b in ipairs(bal.Eggs.SCALE_BANDS) do
+			if type(b) == "table" and tonumber(b.min) and tonumber(b.max) and tonumber(b.weight) then
+				total = total + b.weight
+				if not best or b.weight > best.weight then
+					best = b
+				end
+			end
+		end
+		if best and total > 0 then
+			for _, b in ipairs(bal.Eggs.SCALE_BANDS) do
+				if type(b) == "table" and tonumber(b.min) and tonumber(b.weight) and b.min > best.max then
+					above = above + b.weight
+				end
+			end
+			hwBand = {
+				min    = best.min,
+				max    = best.max,
+				inside = best.weight / total * 100,
+				above  = above / total * 100,
+			}
+			hwBand.below = math.max(0, 100 - hwBand.inside - hwBand.above)
+		end
+	end
+	if hwBand == false then
+		return nil
+	end
+	return hwBand
+end
+
+local function halloweenRange(cat)
+	if type(cat) ~= "string" then
+		return nil
+	end
+	local band, math_ = halloweenBand(), halloweenMath()
+	if not band or not math_ then
+		return nil
+	end
+	local function at(s)
+		local rec = { Category = cat, Scale = s, Mutations = {} }
+		local okK, kg   = pcall(math_.items.WeightKg, rec)
+		local okR, rate = pcall(math_.earn.RatePerSecond, rec)
+		if okK and okR and type(kg) == "number" and type(rate) == "number" then
+			return kg, rate
+		end
+		return nil
+	end
+	local kLo, rLo = at(band.min)
+	if not kLo then
+		return nil
+	end
+	local kHi, rHi = at(band.max)
+	if not kHi then
+		return nil
+	end
+	return kLo, kHi, rLo, rHi
+end
+
+local function halloweenWorldEggs()
+	local dim = workspace:FindFirstChild("HalloweenDimension")
+	return dim and dim:FindFirstChild("WorldEggs")
+end
+
+-- A halloween egg is "available" only while it is still under WorldEggs.
+--
+-- The original test looked for a StealPrompt ProximityPrompt on the egg. That
+-- works for the shop's HalloweenEggHolder display, but the *world* eggs never
+-- carry one: a 15-egg sweep of Workspace.HalloweenDimension.WorldEggs found
+-- every model with children of just MeshParts and a Hitbox - no prompt at all.
+-- The server arms the steal interaction on demand, so the prompt is absent for
+-- the whole time the egg sits in the world, and the old test rejected 100% of
+-- eggs (Eternal spawns included) and no Halloween webhook ever fired.
+--
+-- The eggs DO replicate the server's own availability flag:
+--   HalloweenEggCanPickUp = true
+-- which is the honest client-side signal to gate on. The prompt test is kept as
+-- a second accept path in case a build arms it. Once stolen, the model leaves
+-- WorldEggs (or flips CanPickUp to false), so both cases still drop out.
+local function halloweenEggUp(egg)
+	if egg:GetAttribute("HalloweenEggCanPickUp") == true then
+		return true
+	end
+	if egg:GetAttribute("HalloweenEggCanPickUp") == false then
+		return false
+	end
+	local prompt = egg:FindFirstChild("StealPrompt", true)
+	return prompt ~= nil and prompt:IsA("ProximityPrompt") and prompt.Enabled == true
+end
+
+local function halloweenScan()
+	local hits = {}
+	if CONFIG.HALLOWEEN ~= true then
+		return hits
+	end
+	local pets  = halloweenPets()
+	local index = pets and halloweenEggIndex(pets)
+	local kgIdx = pets and halloweenKgIndex(pets)
+	local world = halloweenWorldEggs()
+	if not index or not world then
+		return hits
+	end
+
+	for _, egg in ipairs(world:GetChildren()) do
+		pcall(function()
+			if not egg:IsA("Model") then
+				return
+			end
+			local uid = egg:GetAttribute("HalloweenEggUid")
+			local src = egg:GetAttribute("PreparedSourceName")
+			if type(uid) ~= "string" or type(src) ~= "string" then
+				return
+			end
+			if not halloweenEggUp(egg) then
+				return
+			end
+			local spec   = index[src]
+			local rarity = spec and spec.Rarity
+			if not (rarity and CONFIG.TARGET[tostring(rarity)]) then
+				return
+			end
+			local entry = kgIdx and kgIdx[src]
+			local hit   = {
+				halloween = true,
+				uid       = uid,
+				-- The world model's visual scale is NOT the AssetScale. A live
+				-- sweep of 30 world eggs put 12 of them in 0.66x-0.85x, a region
+				-- no legal draw can reach (the only bands below the dominant
+				-- 0.85-1.05 are 0.3-0.45 and 0.1-0.2), and several more in the
+				-- gap between 1.05 and 1.45. So this number can never be read as
+				-- a weight scale - keep it as a diagnostic only.
+				scale     = egg:GetScale(),
+				zone      = egg:GetAttribute("Zone"),
+				rarity    = tostring(rarity),
+				name      = (spec.DisplayName or spec.Id or src),
+				-- Scale-1 midpoint, NOT the egg's weight. Never render this as an
+				-- exact figure; the embed shows the band from halloweenRange.
+				weight    = entry and entry.kg or nil,
+				earn      = tonumber(spec.EarningRate) or 0,
+				record    = { Uid = "hw:" .. uid, State = "World", AssetCategory = src },
+			}
+			local kLo, kHi, rLo, rHi = halloweenRange(entry and entry.cat)
+			if kLo then
+				hit.kgLo,   hit.kgHi   = kLo, kHi
+				hit.rateLo, hit.rateHi = rLo, rHi
+			end
+			hits[#hits + 1] = hit
+		end)
+	end
+
+	return hits
+end
+
+local function halloweenCensusText()
+	local world = halloweenWorldEggs()
+	if not world then
+		return "halloween n/a"
+	end
+	local total = 0
+	for _, egg in ipairs(world:GetChildren()) do
+		pcall(function()
+			if type(egg:GetAttribute("HalloweenEggUid")) == "string" then
+				total = total + 1
+			end
+		end)
+	end
+	return ("halloween %d egg(s), %d target"):format(total, #halloweenScan())
+end
+
+-- nil (WorldEggs missing - the read failed, so do not drop a real egg).
+local function stillAvailableHalloween(uid)
+	uid = tostring(uid)
+	local world = halloweenWorldEggs()
+	if not world then
+		return nil
+	end
+	for _, egg in ipairs(world:GetChildren()) do
+		if tostring(egg:GetAttribute("HalloweenEggUid")) == uid then
+			return halloweenEggUp(egg)
+		end
+	end
+	return false
+end
+
+-- ------------------------------------------------------- boss (Dr. Scramble)
+-- Isolated, throttled, never allowed to break hopping. Matches ONLY
+-- "scrambler" (the doctor) and the exact "dr scramble(r)" full names.
+-- Deliberately NOT matching bare "scrambl"/"scramble": normal "Scrambled ..."
+-- eggs and pets on the map contain that and caused false alerts.
+-- Anything with "egg" in the name is skipped as extra insurance.
+-- One Workspace pass per scan, early-out on match, everything inside pcall.
+-- Returns (active, evidence).
+local bossAlerted = {}
+local BOSS_SCAN_INTERVAL = 10
+
+local function bossEvidencePath(inst)
+	local ok, path = pcall(function() return inst:GetFullName() end)
+	if ok and type(path) == "string" and path ~= "" then
+		return path
+	end
+	local okN, n = pcall(function() return inst.Name end)
+	if okN then
+		return tostring(n)
+	end
+	return "unknown"
+end
+
+local function bossAliveCheck(inst)
+	local okH, hum = pcall(function()
+		return inst:FindFirstChildOfClass("Humanoid")
+	end)
+	if okH and hum then
+		local okHp, hp = pcall(function() return hum.Health end)
+		if okHp and type(hp) == "number" and hp <= 0 then
+			return false
+		end
+	end
+	return true
+end
+
+local function scanBossActive()
+	local ok, active, evidence = pcall(function()
+		local ws = game:GetService("Workspace")
+		-- Fast path: exact known names (C-side recursive search, cheap).
+		local exact = { "Dr. Scramble", "Dr Scramble", "Dr. Scrambler", "Dr Scrambler" }
+		for _, nm in ipairs(exact) do
+			local okF, found = pcall(function()
+				return ws:FindFirstChild(nm, true)
+			end)
+			if okF and found then
+				if bossAliveCheck(found) then
+					return true, bossEvidencePath(found)
+				end
+			end
+		end
+		-- Fallback: single Workspace pass, early-out on first "scrambler" hit.
+		-- ("Scrambled" eggs do NOT contain "scrambler", so they can't match.)
+		for _, v in ipairs(ws:GetDescendants()) do
+			local okN, n = pcall(function() return v.Name end)
+			if okN and type(n) == "string" then
+				local nl = n:lower()
+				if not nl:find("egg", 1, true) then
+					if nl == "dr. scramble" or nl == "dr scramble" or nl:find("scrambler", 1, true) then
+						if bossAliveCheck(v) then
+							return true, bossEvidencePath(v)
+						end
+					end
+				end
+			end
+		end
+		return false, nil
+	end)
+	if not ok then
+		return false, nil
+	end
+	return active == true, evidence
+end
+
+-- ----------------------------------------------------------------- webhook
+
+-- ------------------------------------------------------- boss (Dr. Scramble)
+local bossAlerted = {}
+local BOSS_SCAN_INTERVAL = 10
+
+local function bossEvidencePath(inst)
+	local ok, path = pcall(function() return inst:GetFullName() end)
+	if ok and type(path) == "string" and path ~= "" then
+		return path
+	end
+	local okN, n = pcall(function() return inst.Name end)
+	if okN then
+		return tostring(n)
+	end
+	return "unknown"
+end
+
+local function bossAliveCheck(inst)
+	local okH, hum = pcall(function()
+		return inst:FindFirstChildOfClass("Humanoid")
+	end)
+	if okH and hum then
+		local okHp, hp = pcall(function() return hum.Health end)
+		if okHp and type(hp) == "number" and hp <= 0 then
+			return false
+		end
+	end
+	return true
+end
+
+local function scanBossActive()
+	local ok, active, evidence = pcall(function()
+		local ws = game:GetService("Workspace")
+		local exact = { "Dr. Scramble", "Dr Scramble", "Dr. Scrambler", "Dr Scrambler" }
+		for _, nm in ipairs(exact) do
+			local okF, found = pcall(function()
+				return ws:FindFirstChild(nm, true)
+			end)
+			if okF and found then
+				if bossAliveCheck(found) then
+					return true, bossEvidencePath(found)
+				end
+			end
+		end
+		for _, v in ipairs(ws:GetDescendants()) do
+			local okN, n = pcall(function() return v.Name end)
+			if okN and type(n) == "string" then
+				local nl = n:lower()
+				if not nl:find("egg", 1, true) then
+					if nl == "dr. scramble" or nl == "dr scramble" or nl:find("scrambler", 1, true) then
+						if bossAliveCheck(v) then
+							return true, bossEvidencePath(v)
+						end
+					end
+				end
+			end
+		end
+		return false, nil
+	end)
+	if not ok then
+		return false, nil
+	end
+	return active == true, evidence
+end
+
+local function moneyText(value)
+	local v = tonumber(value) or 0
+	local units = { "K", "M", "B", "T", "Qd", "Qi" }
+	local u = 0
+	while v >= 1000 and u < #units do
+		v = v / 1000
+		u = u + 1
+	end
+	local s
+	if u == 0 then
+		s = ("%d"):format(v)
+	elseif v >= 100 then
+		s = ("%.0f%s"):format(v, units[u])
+	elseif v >= 10 then
+		s = ("%.1f%s"):format(v, units[u])
+	else
+		s = ("%.2f%s"):format(v, units[u])
+	end
+	return "$" .. s .. "/s"
+end
+
+local function formatKg(n)
+	n = math.floor(tonumber(n) or 0)
+	local s = tostring(n)
+	local i = #s % 3
+	if i == 0 then i = 3 end
+	local out = s:sub(1, i)
+	for j = i + 1, #s, 3 do
+		out = out .. "," .. s:sub(j, j + 2)
+	end
+	return out
+end
+
+local function mutationText(hit)
+	local m = hit.record and hit.record.Mutations
+	if type(m) == "table" and #m > 0 then
+		local parts = {}
+		for _, id in ipairs(m) do
+			parts[#parts + 1] = tostring(id)
+		end
+		return table.concat(parts, ", ")
+	end
+	return "NONE"
+end
+
+-- web = plain https, clickable in Discord. direct = the roblox:// deep link.
+local function joinLinks()
+	local query  = "placeId=%d&gameInstanceId=%s"
+	local direct = ("roblox://experiences/start?" .. query):format(game.PlaceId, game.JobId)
+	local web
+	if CONFIG.JOIN_BASE and CONFIG.JOIN_BASE ~= "" then
+		local base = CONFIG.JOIN_BASE
+		local sep = base:find("%?") and "&" or "?"
+		web = ("%s%sp=%d&id=%s"):format(base, sep, game.PlaceId, game.JobId)
+	else
+		web = ("https://www.roblox.com/games/start?" .. query):format(game.PlaceId, game.JobId)
+	end
+	return web, direct
+end
+
+-- The world egg's visual scale is the one size signal that IS replicated
+-- before a steal. Bigger model on the map = bigger egg in the raid, so label
+-- it instead of printing a guessed kg. Most eggs sit ~0.66x-1.45x.
+local function halloweenSizeLabel(scale)
+	local s = tonumber(scale)
+	if not s or s <= 0 then
+		return "unknown"
+	end
+	local tag
+	if s >= 4 then
+		tag = "HUGE"
+	elseif s >= 2.5 then
+		tag = "BIG"
+	elseif s >= 1.5 then
+		tag = "large"
+	elseif s >= 0.9 then
+		tag = "normal"
+	else
+		tag = "small"
+	end
+	return ("x%.2f (%s)"):format(s, tag)
+end
+
+-- ===== ORIGINAL NOTIFIER FORMAT (relay) =====================================
+-- Same message the first notifier sent: "EGGKG" + JSON on one webhook. The bot
+-- cog reads it and builds the embed, including the role pings from `roles`.
+local RELAY_NAME   = "WORST \u{2022} Steal An Egg"
+local RELAY_AVATAR = "https://github.com/Asaiya2/steal-an-egg/blob/main/neW.png?raw=true"
 
 -- Role pings. Leave "" to not ping that tier.
-local ROLE_IDS = {
-    Secret  = "",
-    Eternal = "",
-    Divine  = "",
-    Custom  = "",
-}
-
--- trims spaces so a role of " " (blank) is treated as "no ping"
-local function cleanRole(r)
-    if type(r) ~= "string" then return "" end
-    return (r:match("^%s*(.-)%s*$")) or ""
-end
+local ROLE_IDS = { Secret = "", Eternal = "", Divine = "" }
 
 -- Role pings by egg weight (kg). First match from the top wins.
 local KG_PINGS = {
-    { min = 10000000, role = "1556964378094338079" },
-    { min = 100000,  role = "1556964342656671805" },
-    { min = 1,       role = "1556964297983397900" },
+	{ min = 10000000, role = "1556964378094338079" },
+	{ min = 100000,   role = "1556964342656671805" },
+	{ min = 1,        role = "1556964297983397900" },
 }
 
-local function kgRole(kg)
-    if type(kg) ~= "number" then return "" end
-    for _, t in ipairs(KG_PINGS) do
-        if kg >= t.min then return cleanRole(t.role) end
-    end
-    return ""
-end
-
--- Role pings by egg value (money/s, includes mutation bonuses). First match wins.
+-- Role pings by egg value (money/s, includes mutations). First match wins.
 local VALUE_PINGS = {
-    { min = 10e9, role = "1557748763710332949" },  -- 10B or more
-    { min = 1e9,   role = "1557748744005361704" },  -- 1B - 10B
-    { min = 1,     role = "1557748744005361704" },  -- 1 - 1B
+	{ min = 10e9, role = "1557748763710332949" },  -- 10B or more
+	{ min = 1e9,  role = "1557748744005361704" },  -- 1B - 10B
+	{ min = 1,    role = "1557748744005361704" },  -- 1 - 1B
 }
 
-local function valueRole(value)
-    if type(value) ~= "number" then return "" end
-    for _, t in ipairs(VALUE_PINGS) do
-        if value >= t.min then return cleanRole(t.role) end
-    end
-    return ""
+local function cleanRole(r)
+	if type(r) ~= "string" then return "" end
+	return (r:match("^%s*(.-)%s*$")) or ""
 end
 
--- ===================== SETTINGS =====================
-local SCAN_INTERVAL      = 1      -- seconds between field scans
-local SEND_GAP           = 0.4    -- seconds between alerts (Discord rate limit)
-local FORGET_SECONDS     = 900    -- forget an egg this long after it disappears
-local ALERT_ON_START     = true   -- keep true: alerts for eggs already out when you join a server
-local SHOW_LOCATION      = true   -- (no longer used in the embed; player info is shown instead)
-local AUTO_BY_RARITY     = false  -- strict: only eggs from selected HOP_FOR lists are watched
-local TEST_MODE          = false  -- true: sends 3 sample alerts on start
-local KG_DECIMALS        = 0      -- 0 = "65K", 1 = "65.6K"  (use 2 to see e.g. "2.47M Kg")
-local DEBUG_DUMP         = true   -- true: prints every field of an alerted egg to the console (to find mutation data)
--- Redirect page that opens the roblox:// join link (upload join.html there).
--- Leave "" to fall back to the old roblox.com link, which does NOT join the right server.
-local JOIN_PAGE          = "https://worstasaiya.github.io/worst/worst.html"
-
--- ===================== HALLOWEEN SETTINGS =====================
--- Rare Halloween Dimension eggs (Secret / Eternal / Divine, per HOP_FOR) are sent like any other rare egg.
-local HALLOWEEN_ENABLED = true
-local HALLOWEEN_DEBUG   = true  -- prints what the scanner sees (turn off once you've confirmed it works)
-local HALLOWEEN_HOPS    = false -- false = Halloween eggs only send the alert, they do NOT start the hop window
-
--- Minimum kg needed to send an alert, per tier (0 = always send).
-local MIN_KG = {
-    Secret  = 0,
-    Eternal = 0,
-    Divine  = 0,
-    Custom  = 0,
-}
-
--- ===================== SERVER HOPPING =====================
--- HOP_FOR above determines which rarities trigger hopping.
-local HOP_ENABLED   = true
-local HOP_DELAY     = 6           -- Seconds between hops (raise to 8-10 if error 769 still shows up)
-local HOP_JITTER    = 2           -- extra random 0-2s per hop so your accounts don't all fire at the same moment
-local TELEPORT_WAIT = 30          -- How long to wait for a teleport before assuming it failed
-local MIN_PLAYERS   = 1           -- skip servers with fewer players than this (2 avoids nearly-dead servers)
-local MAX_PLAYERS   = 3           -- skip servers with more players than this (counted BEFORE you join, so you arrive as +1)
--- MULTI-ACCOUNT: list the exact Roblox usernames of EVERY account running this script
--- (same list, same order, on all of them). Each account then only hops to its own share
--- of the servers, so they never pick the same one. Leave empty for a single account.
-local ACCOUNTS = { "GGWORSTNOTIFIER", "worstvip", "livelovelaughworstu", "iamworst181", "worstvip2s", "worstsvip3", "worstvip4", "worstvip5", "worstvip6", "worstvip7s" }
-local VISITED_FILE  = "egg_hop_visited.json"
-local VISITED_TTL   = 900         -- don't revisit a server for this many seconds
-local POOL_FILE     = "egg_hop_pool_asc.json"
-local POOL_TTL      = 25          -- Fresher list = fewer dead servers (don't go much lower with 12 accounts, or you get 429s)
-local SERVER_PAGES  = 1           -- pages (100 servers each) to read per refill
-
--- ===================== CUSTOM EGGS =====================
---   names   = game names for the egg (any spacing/case)
---   minKg   = optional, only alert at or above this weight
---   webhook = optional, send to a different webhook than WEBHOOKS.Custom
---   image   = optional thumbnail URL
-local CUSTOM_EGGS = {
-
-}
-
--- ===================== TIER LISTS =====================
--- ============================================================
--- RARITY SELECTION
--- ============================================================
--- Put whichever rarities you want the script to watch/hop for here.
---
--- Examples:
---   { "Secret" }
---   { "Eternal" }
---   { "Divine" }
---   { "Secret", "Eternal" }
---   { "Secret", "Eternal", "Divine" }
---
--- The script will ONLY use the rarities listed here.
-local HOP_FOR = {
-    "Secret",
-    "Eternal",
-    "Divine",
-}
-
-if #HOP_FOR == 0 then
-    warn("[EGG KG] HOP_FOR is empty. The script will not watch or hop for any rarity.")
+local function pingRole(list, v)
+	if type(v) ~= "number" then return "" end
+	for _, t in ipairs(list) do
+		if v >= t.min then return cleanRole(t.role) end
+	end
+	return ""
 end
 
--- ===================== PERSISTENT HUNT WINDOW =====================
--- Length of the hopping window that starts when a selected egg is found.
--- 300 = 5 minutes (eggs refresh every 5 minutes).
-local RARITY_DURATION = 270
-
--- This file survives script re-execution and teleporting to another server.
-local TIMER_FILE = "egg_rarity_hunt_timer.json"
-
--- ============================================================
--- ALL RARITY EGG LISTS
--- ============================================================
-local ALL_RARE = {
-    Secret = {
-        "RazorFang", "Gargoyle", "Centaur", "Pure Jellyfish", "Mutant Shark",
-        "Stag",
-        { "Starry Fox", "Cosmic Fox" },
-        -- Halloween Manor
-        "Werewolf", "BloodBloom", "Graveyard Brute",
-    },
-
-    Eternal = {
-        "Skeleton Horse", "Pegasus", "Oni Tiger", "Gorilla King",
-        { "Celestial Sunlion", "Cosmic Lion" },
-        -- Halloween Manor
-        { "Gorillastein", "Abomination Kong" },
-        "Shelltide Voyager", "Ghost Reaper",
-    },
-
-    Divine = {
-        "World Burner", "ArchAngel", "Nightflame", "Kitsune", "Unicorn",
-        "Royal Skywhale",
-        -- Halloween Manor
-        "Voidseer Pumpkin",
-    },
-}
-
--- Build RARE from HOP_FOR.
--- This means unselected rarities do not enter LOOKUP at all.
-local RARE = {}
-
-for _, tier in ipairs(HOP_FOR) do
-    if ALL_RARE[tier] then
-        RARE[tier] = ALL_RARE[tier]
-    else
-        warn("[EGG KG] Unknown rarity in HOP_FOR: " .. tostring(tier))
-    end
-end
-
--- ===================== EGG VALUE (MONEY/S) DATA =====================
--- base income per second, and the weight (kg) at which that income is reached.
--- Eggs missing from this table show "Unknown" for Egg Value.
--- Add more like:  eggname = { income = 123e6, weight = 5000 },
--- (key = egg name in lowercase with no spaces or symbols)
-local EGG_BASE = {
-    gargoyle      = { income = 225e6, weight = 10000 },
-    purejellyfish = { income = 225e6, weight = 10000 },
-    centaur       = { income = 350e6, weight = 12000 },
-    razorfang     = { income = 350e6, weight = 12000 },
-    onitiger      = { income = 600e6, weight = 300 },
-    gorillaking   = { income = 880e6, weight = 100000 },
-    unicorn       = { income = 1e9,   weight = 1200 },
-    kitsune       = { income = 1.8e9, weight = 260 },
-    nightflame    = { income = 3e9,   weight = 160000 },
-    worldburner   = { income = 5e9,   weight = 120000 },
-    archangel     = { income = 5e9,   weight = 120000 },
-    stag                 = { income = 145e6, weight = 180 },
-    royalskywhale        = { income = 8e9,   weight = 190000 },
-    skeletonhorse        = { income = 1.3e9, weight = 65000 },
-    pegasus              = { income = 1.3e9, weight = 65000 },
-    eternallunardragon   = { income = 250e6, weight = 60000 },
-    cosmicskeleton       = { income = 45e6,  weight = 1000 },
-    celestialsunlion     = { income = 2e9,   weight = 17000 },  -- ESTIMATED from 3 screenshots, not from the wiki
-    mutantshark          = { income = 215e6, weight = 60000 },  -- ESTIMATED from 2 screenshots, not from the wiki
-    starryfox            = { income = 750e6, weight = 1500 },   -- fitted from 4 screenshots (valid ~1,100 to 1,750 Kg)
-    cosmicfox            = { income = 750e6, weight = 1500 },   -- alias of Starry Fox
-
-    -- Halloween: income = EarningRate from the game data, base weight 80 Kg (checked with the calculator)
-    graveyardbrute       = { income = 75e6,  weight = 80 },
-    werewolf             = { income = 1.3e9, weight = 80 },
-    ghostreaper          = { income = 300e6, weight = 80 },
-    gorillastein         = { income = 3.5e9, weight = 80 },
-    voidseerpumpkin      = { income = 14e9,  weight = 80 },
-    bloodbloom           = { income = 450e6, weight = 80 },     -- Haunted Swamp (income from game data, 80 Kg assumed)
-    shelltidevoyager     = { income = 1.6e9, weight = 80 },     -- Haunted Swamp (income from game data, 80 Kg assumed)
-}
-
--- variant / mutation multipliers. They ADD together: 1 + sum(mult - 1)
--- key = name in lowercase with no spaces or symbols
-local BONUS = {
-    silver      = 1.2,
-    golden      = 2.5,
-    rainbow     = 3.5,
-    parasite    = 3,
-    bloom       = 1.25,
-    spiritbloom = 2.5,
-    fractured   = 2.75,
-    scrambled   = 2.75,
-    enchanted   = 2.85,
-    nitro       = 2.75,
-    spectral    = 2.75,
-    -- internal ids the game may report instead of the display names
-    sakura      = 1.25,   -- Bloom
-    greatbloom  = 2.5,    -- Spirit Bloom
-    monstrous   = 3,      -- Parasite
-    boss        = 2.75,   -- Fractured
-}
-
--- ===================== LOOK & FEEL =====================
-local STYLE = {
-    Secret  = { color = 0xE74C3C, emoji = "🔮", title = "SECRET EGG SPAWNED",  tag = "A Hidden Egg has appeared!" },
-    Eternal = { color = 0x9B59B6, emoji = "♾️", title = "ETERNAL EGG SPAWNED", tag = "An Immortal Egg has awakened!" },
-    Divine  = { color = 0xF1C40F, emoji = "✨", title = "DIVINE EGG SPAWNED",  tag = "A Heavenly Egg has descended!" },
-    Custom  = { color = 0x3498DB, emoji = "⭐", title = "WATCHED EGG SPAWNED", tag = "An egg you are watching is out!" },
-}
-
-local BOT_NAME    = "WORST • Steal An Egg"
-local BOT_AVATAR  = "https://github.com/Asaiya2/steal-an-egg/blob/main/neW.png?raw=true"
-local FOOTER_TEXT = "WORST's Notifier"
-
+-- pet pictures from stealanegg.tools (same links as the original notifier)
 local IMAGES = {  -- pet pictures from stealanegg.tools (same links as Steal_an_egg.lua)
     ["world burner"] = "https://stealanegg.tools/images/World_Burner.png",
     ["archangel"] = "https://stealanegg.tools/images/ArchAngel.png",
@@ -321,1417 +1702,1791 @@ local IMAGES = {  -- pet pictures from stealanegg.tools (same links as Steal_an_
     ["pumpkin golem"] = "https://stealanegg.tools/images/Pumpkin_Golem_Pet.png",
 }
 
--- ============================================================
--- CODE (nothing below needs editing)
--- ============================================================
-
-local HttpService     = game:GetService("HttpService")
-local RS              = game:GetService("ReplicatedStorage")
-local Players         = game:GetService("Players")
-local TeleportService = game:GetService("TeleportService")
-
--- ============================================================
--- PERFORMANCE SAVER
--- ============================================================
-local DISABLE_3D_RENDERING = true   -- stops drawing the 3D world (biggest FPS/CPU/GPU saver)
-local FPS_CAP              = 15     -- 0 = don't touch. Lower = less CPU. Keep 10+ so task.wait timing stays accurate
-local LOWEST_GRAPHICS      = true   -- drops graphics quality to level 1
-local MUTE_SOUNDS          = true   -- silences game audio
-
-local RunService = game:GetService("RunService")
-
-local function applyPerformanceSaver()
-    if DISABLE_3D_RENDERING then
-        pcall(function() RunService:Set3dRenderingEnabled(false) end)
-    end
-
-    if FPS_CAP and FPS_CAP > 0 and type(setfpscap) == "function" then
-        pcall(setfpscap, FPS_CAP)
-    end
-
-    if LOWEST_GRAPHICS then
-        pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
-        pcall(function()
-            local Lighting = game:GetService("Lighting")
-            Lighting.GlobalShadows = false
-            Lighting.FogEnd = 9e9
-        end)
-    end
-
-    if MUTE_SOUNDS then
-        pcall(function() game:GetService("SoundService").Volume = 0 end)
-        pcall(function() UserSettings():GetService("UserGameSettings").MasterVolume = 0 end)
-    end
+local function normName(s)
+	return (tostring(s or ""):lower():gsub("[^%w]", ""))
 end
-
-applyPerformanceSaver()
-
--- Roblox sometimes re-enables rendering (respawn, focus change), so re-apply it every few seconds
-if DISABLE_3D_RENDERING then
-    task.spawn(function()
-        while true do
-            task.wait(5)
-            if not (type(getgenv) == "function" and getgenv().EGGKG_SHOW_3D == true) then
-                pcall(function() RunService:Set3dRenderingEnabled(false) end)
-            end
-        end
-    end)
-end
-
-local httpRequest = request or http_request or (syn and syn.request) or (http and http.request)
-
--- ============================================================
--- PERSISTENT HUNT WINDOW
--- ============================================================
--- huntStart is nil while we are idle (waiting for an egg). It is set when
--- a selected egg is found and cleared when RARITY_DURATION has passed.
--- It uses os.time(), not os.clock(), so it survives script re-execution
--- and teleporting between servers.
-local huntStart = nil
-local lastSpawnAt = nil
-
-local function saveHuntTimer()
-    if type(writefile) ~= "function" then return end
-    pcall(function()
-        writefile(TIMER_FILE, HttpService:JSONEncode({
-            startedAt = huntStart,
-            lastSpawnAt = lastSpawnAt,
-            duration = RARITY_DURATION,
-            rarities = HOP_FOR,
-        }))
-    end)
-end
-
-local function loadHuntTimer()
-    if type(isfile) ~= "function" or type(readfile) ~= "function" or not isfile(TIMER_FILE) then
-        return nil
-    end
-
-    local ok, data = pcall(function()
-        return HttpService:JSONDecode(readfile(TIMER_FILE))
-    end)
-    if not ok or type(data) ~= "table" then return nil end
-
-    local startedAt = tonumber(data.startedAt)
-    local savedLastSpawn = tonumber(data.lastSpawnAt)
-    local oldDuration = tonumber(data.duration)
-    if not startedAt or not oldDuration then return nil end
-
-    -- If the selected rarity set changed, ignore the old window.
-    local oldRarities = data.rarities
-    if type(oldRarities) == "table" then
-        local a, b = {}, {}
-        for _, v in ipairs(oldRarities) do a[tostring(v)] = true end
-        for _, v in ipairs(HOP_FOR) do b[tostring(v)] = true end
-        for k in pairs(a) do if not b[k] then return nil end end
-        for k in pairs(b) do if not a[k] then return nil end end
-    end
-
-    -- A duration change ignores the old window.
-    if oldDuration ~= RARITY_DURATION then return nil end
-    if os.time() - startedAt >= RARITY_DURATION then return nil end
-
-    lastSpawnAt = savedLastSpawn
-    return startedAt
-end
-
-local function clearHuntTimerFile()
-    if type(delfile) == "function" then
-        pcall(delfile, TIMER_FILE)
-    end
-end
-
-huntStart = loadHuntTimer()
-if huntStart then
-    print("[EGG KG] resumed hunt window; " .. math.max(0, os.time() - huntStart)
-        .. "s of " .. RARITY_DURATION .. "s has already elapsed")
-else
-    print("[EGG KG] idle, waiting for a selected egg")
-end
-
-local function huntElapsed()
-    if not huntStart then return 0 end
-    return math.max(0, os.time() - huntStart)
-end
-
-local function huntRemaining()
-    if not huntStart then return 0 end
-    return math.max(0, RARITY_DURATION - huntElapsed())
-end
-
-local function huntActive()
-    return huntStart ~= nil and huntRemaining() > 0
-end
-
-local function sinceLastSpawn()
-    if not lastSpawnAt then return nil end
-    return math.max(0, os.time() - lastSpawnAt)
-end
-
--- starts a new window, but only if one is not already running
-local function startHunt()
-    if huntActive() then return end
-    huntStart = os.time()
-    saveHuntTimer()
-    print("[EGG KG] selected egg found, started a " .. RARITY_DURATION .. "s window")
-end
-
-local function markSelectedSpawn()
-    lastSpawnAt = os.time()
-    startHunt()
-    saveHuntTimer()
-end
-
--- ends the window once the time is up and goes back to waiting
-local function checkHuntExpiry()
-    if huntStart and not huntActive() then
-        huntStart = nil
-        clearHuntTimerFile()
-        print("[EGG KG] window ended, waiting for the next selected egg")
-    end
-end
-
--- Put a small timer state object in Workspace so it is easy to inspect.
-local function setupWorkspaceTimer()
-    pcall(function()
-        local old = workspace:FindFirstChild("EggRarityHunt")
-        if old then old:Destroy() end
-
-        local folder = Instance.new("Folder")
-        folder.Name = "EggRarityHunt"
-        folder.Parent = workspace
-
-        local function value(className, name, val)
-            local x = Instance.new(className)
-            x.Name = name
-            x.Value = val
-            x.Parent = folder
-            return x
-        end
-
-        local vStarted   = value("IntValue", "StartedAt", huntStart or 0)
-        value("IntValue", "Duration", RARITY_DURATION)
-        value("StringValue", "SelectedRarities", table.concat(HOP_FOR, ", "))
-        local vElapsed   = value("IntValue", "Elapsed", huntElapsed())
-        local vRemaining = value("IntValue", "Remaining", huntRemaining())
-        local vActive    = value("BoolValue", "Active", huntActive())
-        local vLast      = value("IntValue", "LastSpawnAt", lastSpawnAt or 0)
-        local vSince     = value("IntValue", "SinceLastSpawn", sinceLastSpawn() or -1)
-
-        local part = Instance.new("Part")
-        part.Name = "TimerDisplay"
-        part.Anchored = true
-        part.CanCollide = false
-        part.CanQuery = false
-        part.CanTouch = false
-        part.Transparency = 1
-        part.Size = Vector3.new(1, 1, 1)
-        local character = Players.LocalPlayer and Players.LocalPlayer.Character
-        local root = character and character:FindFirstChild("HumanoidRootPart")
-        part.Position = root and (root.Position + Vector3.new(0, 5, 0)) or Vector3.new(0, 5, 0)
-        part.Parent = folder
-
-        local gui = Instance.new("BillboardGui")
-        gui.Name = "HuntTimer"
-        gui.Size = UDim2.fromOffset(280, 70)
-        gui.StudsOffset = Vector3.new(0, 3, 0)
-        gui.AlwaysOnTop = true
-        gui.Parent = part
-
-        local label = Instance.new("TextLabel")
-        label.Name = "Timer"
-        label.Size = UDim2.fromScale(1, 1)
-        label.BackgroundTransparency = 0.25
-        label.TextScaled = true
-        label.Font = Enum.Font.GothamBold
-        label.Text = "RARITY HUNT\n" .. table.concat(HOP_FOR, " + ") .. "\nWAITING FOR EGG"
-        label.Parent = gui
-
-        task.spawn(function()
-            while folder.Parent do
-                vStarted.Value = huntStart or 0
-                vElapsed.Value = huntElapsed()
-                vRemaining.Value = huntRemaining()
-                vActive.Value = huntActive()
-                vLast.Value = lastSpawnAt or 0
-                vSince.Value = sinceLastSpawn() or -1
-
-                if huntActive() then
-                    local spawnText = lastSpawnAt and ((sinceLastSpawn() or 0) .. "s since last spawn") or "no selected egg found yet"
-                    label.Text = "RARITY HUNT\n" .. table.concat(HOP_FOR, " + ") .. "\n" .. huntRemaining() .. "s left | " .. spawnText
-                else
-                    label.Text = "RARITY HUNT\n" .. table.concat(HOP_FOR, " + ") .. "\nWAITING FOR EGG"
-                end
-                task.wait(1)
-            end
-        end)
-    end)
-end
-
-setupWorkspaceTimer()
-
-local function norm(s)
-    return (tostring(s or ""):lower():gsub("[^%w]", ""))
-end
-
-local function req(getter)
-    local ok, r = pcall(function() return require(getter()) end)
-    return ok and r or nil
-end
-
--- the game's modules can take a moment to exist right after joining
-local EggState
-for _ = 1, 30 do
-    EggState = req(function() return RS.Client.EggState end)
-    if EggState then break end
-    task.wait(1)
-end
-
-local EggRecords = req(function() return RS.Shared.Util.EggRecords end)
-local Assets     = req(function() return RS.Data.Assets end)
-local Areas      = req(function() return RS.Data.Areas end)
-
-local assetDir = type(Assets) == "table" and Assets.Directory or {}
-local areaDir  = type(Areas) == "table" and (Areas.Directory or Areas) or {}
-
--- ---------------- kg ----------------
-local function eggKg(r)
-    if not EggRecords then return nil end
-    local ok, kg = pcall(EggRecords.WeightKg, r)
-    if ok and type(kg) == "number" then return kg end
-    ok, kg = pcall(EggRecords.WeightKgForScale, r.AssetCategory, r.AssetScale)
-    if ok and type(kg) == "number" then return kg end
-    return nil
-end
-
-local KG_SUFFIXES = { "", "K", "M", "B", "T", "Qa", "Qi" }
-
--- full number with commas, e.g. 1,092,052 Kg
-local function formatKg(kg)
-    if not kg then return "?" end
-    local text = string.format("%.0f", math.max(kg, 0))
-    local count
-    repeat
-        text, count = text:gsub("^(%d+)(%d%d%d)", "%1,%2")
-    until count == 0
-    return text .. " Kg"
-end
-
--- ---------------- debug dump + mutation ----------------
-local function dumpTable(t, indent, depth)
-    indent = indent or "  "
-    depth = depth or 0
-    for k, v in pairs(t) do
-        if type(v) == "table" and depth < 2 then
-            print(indent .. tostring(k) .. " = {")
-            dumpTable(v, indent .. "  ", depth + 1)
-            print(indent .. "}")
-        else
-            print(indent .. tostring(k) .. " = " .. tostring(v))
-        end
-    end
-end
-
--- best guess at common field names; if your egg uses a different one,
--- turn on DEBUG_DUMP, find the real name and add it here
-local MUTATION_KEYS = { "Mutation", "Mutations", "Variant", "Modifier", "Modifiers", "Trait", "Traits" }
-
-local function eggMutation(r)
-    for _, key in ipairs(MUTATION_KEYS) do
-        local v = r[key]
-        if v ~= nil and v ~= false and v ~= "" then
-            if type(v) == "table" then
-                local parts = {}
-                for k2, v2 in pairs(v) do
-                    if type(k2) == "string" then
-                        parts[#parts + 1] = k2
-                    elseif type(v2) == "table" then
-                        parts[#parts + 1] = tostring(v2.DisplayName or v2._id or "?")
-                    else
-                        parts[#parts + 1] = tostring(v2)
-                    end
-                end
-                if #parts > 0 then return table.concat(parts, ", ") end
-            else
-                return tostring(v)
-            end
-        end
-    end
-    return nil
-end
-
--- ---------------- egg value (money/s) ----------------
-local MONEY_SUFFIX = { "", "K", "M", "B", "T", "Qa", "Qi" }
-
-local function formatMoney(n)
-    local i = 1
-    while n >= 1000 and i < #MONEY_SUFFIX do
-        n = n / 1000
-        i = i + 1
-    end
-    return string.format("$%.2f%s/s", n, MONEY_SUFFIX[i])
-end
-
--- variants and mutations stack additively: 1 + sum(each multiplier - 1)
-local function bonusMult(mutation)
-    local total = 1
-    if mutation then
-        for name in tostring(mutation):gmatch("[^,]+") do
-            local m = BONUS[norm(name)]
-            if m then total = total + (m - 1) end
-        end
-    end
-    return total
-end
-
--- returns income without bonuses, and income with bonuses (or nil if unknown)
-local function eggIncome(info, kg, mutation)
-    local b = EGG_BASE[norm(info.display)]
-    if not b or type(kg) ~= "number" or kg <= 0 then return nil end
-    local ratio = kg / b.weight
-    local weightMult
-    -- 37/60 fits eggs at 89% and 95% of base weight and above (checked up to 125x).
-    -- 5/3 fits eggs at 0.02% to 1.9% of base weight. The real switch point is somewhere
-    -- in between and not known yet, so LOW_CUTOFF is a guess.
-    local LOW_CUTOFF = 0.5
-    local HIGH_CUTOFF = 125
-    if ratio > HIGH_CUTOFF then
-        weightMult = (HIGH_CUTOFF ^ (37 / 60)) * ((ratio / HIGH_CUTOFF) ^ 0.40)
-    elseif ratio > LOW_CUTOFF then
-        weightMult = ratio ^ (37 / 60)
-    else
-        weightMult = ratio ^ (5 / 3)
-    end
-    local base = b.income * weightMult
-    return base, base * bonusMult(mutation)
-end
-
-local function eggValueText(info, kg, mutation)
-    local base, final = eggIncome(info, kg, mutation)
-    if not base then return "Unknown" end
-    if mutation and final ~= base then
-        return formatMoney(base) .. " -> " .. formatMoney(final)
-    end
-    return formatMoney(final)
-end
-
--- ---------------- asset / area names ----------------
-local entryCache = {}
-local function getEntry(cat)
-    cat = tostring(cat or "")
-    if cat == "" then return nil end
-    local cached = entryCache[cat]
-    if cached ~= nil then return cached or nil end
-
-    local entry = assetDir[cat]
-    if entry == nil then
-        local want = norm(cat)
-        for key, e in pairs(assetDir) do
-            if type(e) == "table" then
-                local egg = type(e.Egg) == "table" and e.Egg or nil
-                if norm(key) == want or norm(e._id) == want or norm(e.DisplayName) == want
-                    or (egg and norm(egg.ModelName) == want) then
-                    entry = e
-                    break
-                end
-            end
-        end
-    end
-    entryCache[cat] = entry or false
-    return entry
-end
-
-local function areaName(areaId)
-    local key = tostring(areaId or "")
-    if key == "" then return "" end
-    local a = areaDir[key]
-    if type(a) == "table" then return tostring(a.DisplayName or key) end
-    return key
-end
-
-local function serverLink()
-    if game.JobId == "" then return nil end
-    if JOIN_PAGE ~= "" then
-        return string.format("%s?placeId=%d&jobId=%s", JOIN_PAGE, game.PlaceId, game.JobId)
-    end
-    return string.format("https://www.roblox.com/games/start?placeId=%d&gameInstanceId=%s",
-        game.PlaceId, game.JobId)
-end
-
--- exact-instance join helpers (do not depend on the website redirect)
-local function joinSnippet()
-    if game.JobId == "" then return "N/A" end
-    return string.format('game:GetService("TeleportService"):TeleportToPlaceInstance(%d, "%s", game.Players.LocalPlayer)',
-        game.PlaceId, game.JobId)
-end
-
-local function deepLink()
-    if game.JobId == "" then return "N/A" end
-    return string.format("roblox://experiences/start?placeId=%d&gameInstanceId=%s",
-        game.PlaceId, game.JobId)
-end
-
--- ---------------- players in server ----------------
-local function playerInfoText()
-    local me = Players.LocalPlayer
-    local all = Players:GetPlayers()
-    local others = {}
-    for _, p in ipairs(all) do
-        if p ~= me then others[#others + 1] = p end
-    end
-
-    -- pick a random other player; fall back to yourself if you're alone
-    local pick = (#others > 0) and others[math.random(#others)] or me
-    local name = pick and pick.Name or "Unknown"
-
-    return string.format("👥 **%d/%d players** • e.g. **%s**",
-        #all, Players.MaxPlayers, name)
-end
-
--- ---------------- watch list ----------------
-local LOOKUP = {}
 
 local IMAGES_N = {}
-for name, url in pairs(IMAGES) do IMAGES_N[norm(name)] = url end
+for name, url in pairs(IMAGES) do IMAGES_N[normName(name)] = url end
 
-local function addEntry(names, tier, minKg, webhook, image)
-    if type(names) ~= "table" then names = { names } end
-    if not names[1] then return end
-    local img = image
-    if not img then
-        for _, n in ipairs(names) do
-            if IMAGES_N[norm(n)] then img = IMAGES_N[norm(n)] break end
-        end
-    end
-    local info = { display = names[1], tier = tier, minKg = minKg or 0, webhook = webhook, image = img }
-    for _, n in ipairs(names) do
-        local k = norm(n)
-        if LOOKUP[k] == nil then LOOKUP[k] = info end
-    end
+local function petImage(name)
+	return IMAGES_N[normName(name)]
+		or ("https://stealanegg.tools/images/" .. (tostring(name):gsub("%s+", "_")) .. "_Pet.png")
 end
 
-for _, c in ipairs(CUSTOM_EGGS) do
-    addEntry(c.names, "Custom", c.minKg or MIN_KG.Custom, c.webhook, c.image)
-end
-for _, tier in ipairs(HOP_FOR) do
-    if RARE[tier] then
-        for _, entry in ipairs(RARE[tier]) do
-            addEntry(entry, tier, MIN_KG[tier], nil, nil)
-        end
-    end
-end
-
-local AUTO_TIERS = { secret = "Secret", eternal = "Eternal", divine = "Divine" }
-
-local function resolve(r)
-    local cat = r.AssetCategory or r.Category
-    if not cat then return nil end
-    local entry = getEntry(cat)
-
-    local keys = { norm(cat) }
-    if type(entry) == "table" then
-        keys[#keys + 1] = norm(entry.DisplayName)
-        keys[#keys + 1] = norm(entry._id)
-    end
-    for _, k in ipairs(keys) do
-        if k ~= "" and LOOKUP[k] then return LOOKUP[k] end
-    end
-
-    if AUTO_BY_RARITY and type(entry) == "table" and type(entry.Rarity) == "table" then
-        local tier = AUTO_TIERS[norm(entry.Rarity._id or entry.Rarity.DisplayName)]
-        if tier then
-            local display = tostring(entry.DisplayName or cat)
-            return { display = display, tier = tier, minKg = MIN_KG[tier],
-                     image = IMAGES_N[norm(display)] }
-        end
-    end
-    return nil
-end
-
--- ---------------- discord ----------------
-local function validUrl(u)
-    return type(u) == "string" and u:find("/api/webhooks/", 1, true) ~= nil
-end
-
-local function post(url, payload)
-    if not httpRequest then warn("[EGG KG] No http request function in this executor") return end
-    if not validUrl(url) then warn("[EGG KG] Webhook not set or invalid") return end
-
-    for attempt = 1, 4 do
-        local ok, res = pcall(httpRequest, {
-            Url     = url,
-            Method  = "POST",
-            Headers = { ["Content-Type"] = "application/json" },
-            Body    = HttpService:JSONEncode(payload),
-        })
-        if ok and type(res) == "table" and tonumber(res.StatusCode) == 429 then
-            local wait = 1
-            pcall(function() wait = tonumber(HttpService:JSONDecode(res.Body).retry_after) or 1 end)
-            task.wait(wait + 0.1)
-        else
-            if not ok then warn("[EGG KG] Send failed: " .. tostring(res)) end
-            return
-        end
-    end
-end
-
--- ============================================================
--- ALERTS: everything goes to ONE webhook as a message that starts with EGGKG.
--- Your Discord bot (cog 2worst_kg) reads it and posts the embed itself.
--- Nothing is sent to Cloudflare any more.
--- ============================================================
-local RELAY_WEBHOOK = WEBHOOKS.Secret
-
-local function relay(data)
-    post(RELAY_WEBHOOK, {
-        username   = BOT_NAME,
-        avatar_url = (BOT_AVATAR ~= "") and BOT_AVATAR or nil,
-        content    = "EGGKG" .. HttpService:JSONEncode(data),
-        allowed_mentions = { parse = {} },
-    })
-end
-
--- egg-form picture: the pet link with _Pet.png swapped for _Egg.png (same rule as Steal_an_egg.lua)
+-- egg-form picture: the pet link with _Pet.png swapped for _Egg.png
 local function eggImageOf(img)
-    if type(img) ~= "string" or not img:find("^https://stealanegg%.tools/") then return "" end
-    local out, n = img:gsub("_Pet%.png$", "_Egg.png")
-    if n == 0 then out, n = img:gsub("%.png$", "_Egg.png") end
-    return n > 0 and out or ""
+	if type(img) ~= "string" or not img:find("^https://stealanegg%.tools/") then return "" end
+	local out, n = img:gsub("_Pet%.png$", "_Egg.png")
+	if n == 0 then out, n = img:gsub("%.png$", "_Egg.png") end
+	return n > 0 and out or ""
 end
 
 -- a random OTHER player in the server (falls back to yourself)
 local function playerSample()
-    local me = Players.LocalPlayer
-    local others = {}
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= me then others[#others + 1] = p.Name end
-    end
-    if #others > 0 then return others[math.random(#others)] end
-    return me and me.Name or ""
+	local me = Players.LocalPlayer
+	local others = {}
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p ~= me then others[#others + 1] = p.Name end
+	end
+	if #others > 0 then return others[math.random(#others)] end
+	return me and me.Name or ""
 end
 
--- extra (optional): { value = "text", num = moneyPerSecond, zone = "Graveyard" }  (used by the Halloween eggs)
-local function sendAlert(info, kg, location, mutation, extra)
-    extra = extra or {}
-    local roles, roleSeen = {}, {}
-    local function addRole(r)
-        r = cleanRole(r)
-        if r ~= "" and not roleSeen[r] then roleSeen[r] = true roles[#roles + 1] = r end
-    end
-    addRole(ROLE_IDS[info.tier])
-    addRole(kgRole(kg))
-    local _, finalValue = eggIncome(info, kg, mutation)
-    addRole(valueRole(finalValue or extra.num))
-
-    relay({
-        egg      = info.display .. " Egg",
-        tier     = info.tier,
-        kg       = kg and formatKg(kg) or "?",
-        mutation = mutation or "NONE",
-        value    = extra.value or eggValueText(info, kg, mutation),
-        image    = info.image or "",
-        egg_image = eggImageOf(info.image),
-        sample   = playerSample(),
-        loc      = extra.zone or "",
-        players  = #Players:GetPlayers() .. "/" .. Players.MaxPlayers,
-        placeId  = tostring(game.PlaceId),
-        jobId    = game.JobId,
-        roles    = roles,
-        test     = info.test == true,
-    })
+local RELAY_SUFFIX = { "", "K", "M", "B", "T", "Qa", "Qi" }
+local function relayMoney(n)
+	n = tonumber(n) or 0
+	local i = 1
+	while n >= 1000 and i < #RELAY_SUFFIX do
+		n = n / 1000
+		i = i + 1
+	end
+	return string.format("$%.2f%s/s", n, RELAY_SUFFIX[i])
 end
 
--- alert queue (keeps us under Discord's rate limit)
-local queue = {}
-local sendBusy = false
+local HALLOWEEN_ZONES = { [1] = "Graveyard", [2] = "Haunted Swamp", [3] = "Abandoned Manor" }
 
-task.spawn(function()
-    while true do
-        local a = table.remove(queue, 1)
-        if a then
-            sendBusy = true
-            local ok, err = pcall(sendAlert, a.info, a.kg, a.location, a.mutation, a.extra)
-            if not ok then warn("[EGG KG] alert error: " .. tostring(err)) end
-            sendBusy = false
-            task.wait(SEND_GAP)
-        else
-            task.wait(0.1)
-        end
-    end
-end)
+local function relayPayload(hit, players)
+	local tier = tostring(hit.rarity)
+	local mut  = mutationText(hit)
+	local kg, kgText, valueText, num, zoneName
 
-if TEST_MODE then
-    local testTier = HOP_FOR[1]
-    local testEntry = testTier and RARE[testTier] and RARE[testTier][1]
-    local testName = type(testEntry) == "table" and testEntry[1] or testEntry
-    if testName then
-        queue[#queue + 1] = { info = LOOKUP[norm(testName)], kg = 123, location = "Test" }
-    end
+	if hit.halloween then
+		-- exact roll is not visible before a steal, so show the range
+		zoneName = HALLOWEEN_ZONES[tonumber(hit.zone) or 0] or "Halloween Dimension"
+		mut = "NONE"
+		if hit.rateLo and hit.rateHi and hit.kgLo and hit.kgHi then
+			valueText = relayMoney(hit.rateLo) .. " - " .. relayMoney(hit.rateHi)
+			kgText    = formatKg(hit.kgLo) .. " Kg - " .. formatKg(hit.kgHi) .. " Kg"
+			num       = hit.rateHi
+		else
+			local e = tonumber(hit.earn) or 0
+			valueText = e > 0 and (relayMoney(e) .. " (base)") or "Unknown"
+			kgText    = "?"
+			num       = e
+		end
+	else
+		kg     = tonumber(hit.weight)
+		kgText = kg and (formatKg(kg) .. " Kg") or "?"
+		local final, base = tonumber(hit.earn) or 0, tonumber(hit.earnBase) or 0
+		if final > 0 then
+			if mut ~= "NONE" and base > 0 and final ~= base then
+				valueText = relayMoney(base) .. " -> " .. relayMoney(final)
+			else
+				valueText = relayMoney(final)
+			end
+		else
+			valueText = "Unknown"
+		end
+		num = final
+	end
+
+	local roles, roleSeen = {}, {}
+	local function addRole(r)
+		r = cleanRole(r)
+		if r ~= "" and not roleSeen[r] then roleSeen[r] = true roles[#roles + 1] = r end
+	end
+	addRole(ROLE_IDS[tier])
+	addRole(pingRole(KG_PINGS, kg))
+	addRole(pingRole(VALUE_PINGS, num))
+
+	local img  = petImage(hit.name)
+	local data = jsonEncode({
+		egg       = tostring(hit.name) .. " Egg",
+		tier      = tier,
+		kg        = kgText,
+		mutation  = mut,
+		value     = valueText,
+		image     = img,
+		egg_image = eggImageOf(img),
+		sample    = playerSample(),
+		loc       = zoneName or "",
+		players   = tostring(players) .. "/" .. tostring(Players.MaxPlayers),
+		placeId   = tostring(game.PlaceId),
+		jobId     = game.JobId,
+		roles     = roles,
+		test      = false,
+	})
+	if not data then return nil end
+
+	return {
+		username         = RELAY_NAME,
+		avatar_url       = RELAY_AVATAR,
+		content          = "EGGKG" .. data,
+		allowed_mentions = { parse = {} },
+	}
 end
 
--- ============================================================
--- TEST BUTTON: queues a fake Divine Kitsune alert for the current server
--- ============================================================
-local function sendTestInvite()
-    queue[#queue + 1] = {
-        info = { display = "Kitsune", tier = "Divine", image = IMAGES_N["kitsune"], test = true },
-        kg = 260, location = "Test", mutation = "TEST " .. os.time(),
-    }
+local function buildPayload(hits, players, webLink, directLink, roleId)
+	local capacityLine = ("**%d/%d players**"):format(players, CONFIG.SERVER_CAPACITY)
+
+	local title
+	local description
+	if #hits == 1 then
+		local hit   = hits[1]
+		local where = hit.halloween and " in the Halloween Dimension" or ""
+		title       = ("%s EGG SPAWNED%s"):format(hit.rarity, hit.halloween and " (HALLOWEEN)" or "")
+		description = ("A %s Egg has appeared%s!\n%s"):format(hit.rarity, where, capacityLine)
+	else
+		title = #hits .. " TARGET EGGS"
+		local lines = {}
+		for _, hit in ipairs(hits) do
+			-- Halloween eggs: show the on-map visual size (the real size signal
+			-- before a steal) instead of a guessed kg band.
+			if hit.halloween then
+				lines[#lines + 1] = ("**%s** — size %s (%s)"):format(
+					hit.name, halloweenSizeLabel(hit.scale), moneyText(hit.earn))
+			else
+				lines[#lines + 1] = ("**%s** — %.2f kg (%s)"):format(hit.name, hit.weight or 0, moneyText(hit.earn))
+			end
+		end
+		description = table.concat(lines, "\n") .. "\n" .. capacityLine
+	end
+
+	local mentionRoles = parseRoleIds(roleId)
+	local content
+	if #mentionRoles > 0 then
+		content = roleMentionContent(mentionRoles)
+	end
+
+	local fields
+	if #hits == 1 then
+		local hit = hits[1]
+		fields = {
+			{ name = "🥚 Egg",          value = hit.name,  inline = true },
+			{ name = "🔹 Rarity",       value = hit.rarity, inline = true },
+			{ name = "🔗 Server",       value = ("[Click to Join Server](%s)"):format(webLink), inline = true },
+			{ name = "🧬 Egg Mutation", value = mutationText(hit), inline = false },
+			{ name = "💰 Egg Value",    value = moneyText(hit.earn), inline = false },
+			{ name = "🔐 Direct Link",  value = "`" .. directLink .. "`", inline = false },
+		}
+		-- Halloween eggs: the world model's visual scale IS replicated, so show
+		-- that instead of a guessed kg/value band. A bigger model on the map is
+		-- a bigger egg - the raid target is the visually large one.
+		if hit.halloween then
+			fields[#fields + 1] = {
+				name   = "📏 Visual Scale",
+				value  = halloweenSizeLabel(hit.scale),
+				inline = true,
+			}
+		else
+			fields[#fields + 1] = {
+				name   = "⚖️ Egg Kg",
+				value  = formatKg(hit.weight or 0) .. " Kg",
+				inline = false,
+			}
+		end
+	else
+		fields = {
+			{ name = "🔗 Server", value = ("[Click to Join Server](%s)"):format(webLink), inline = false },
+		}
+	end
+
+	return {
+		username = "egg grabber",
+		allowed_mentions = { parse = {}, roles = mentionRoles },
+		content = content,
+		embeds = {
+			{
+				title = title,
+				url = webLink,
+				description = description,
+				fields = fields,
+				footer = { text = "Egg Alert • " .. reporterName() },
+				timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+				color = COLORS[hits[1].rarity] or 0x5865F2,
+			},
+		},
+	}
 end
 
--- filled in further down, after the server pool / teleport code exists
-local manualTeleport = nil
+local function sendToWebhook(url, hits, players, roleId)
+	if type(httpRequest) ~= "function" then
+		log("no HTTP function available in this executor - cannot post")
+		return false
+	end
 
-local function makeTestButton()
-    local parent = (type(gethui) == "function" and gethui()) or game:GetService("CoreGui")
+	local payload = relayPayload(hits[1], players)
+	if not payload then
+		log("could not build the relay message")
+		return false
+	end
+	local body    = jsonEncode(payload)
+	if not body then
+		log("could not encode the Discord payload")
+		return false
+	end
 
-    pcall(function()
-        local old = parent:FindFirstChild("EggTestGui")
-        if old then old:Destroy() end
-    end)
+	for attempt = 1, CONFIG.MAX_POST_RETRIES do
+		local ok, res = pcall(httpRequest, {
+			Url = url,
+			Method = "POST",
+			Headers = { ["Content-Type"] = "application/json" },
+			Body = body,
+		})
 
-    local gui = Instance.new("ScreenGui")
-    gui.Name = "EggTestGui"
-    gui.ResetOnSpawn = false
-    gui.Parent = parent
+		if ok and type(res) == "table" then
+			local code = res.StatusCode or res.status or 0
+			log("webhook replied " .. tostring(code) .. " (attempt " .. attempt .. ")")
+			if code >= 200 and code < 300 then
+				return true
+			end
+			if code ~= 429 then
+				return false
+			end
+			task.wait(3)
+		else
+			log("webhook error: " .. tostring(res))
+			task.wait(2)
+		end
+	end
 
-    local function makeButton(text, yOffset, color, action)
-        local btn = Instance.new("TextButton")
-        btn.Size = UDim2.fromOffset(240, 50)
-        btn.AnchorPoint = Vector2.new(0.5, 0.5)
-        btn.Position = UDim2.new(0.5, 0, 0.5, yOffset)
-        btn.BackgroundColor3 = color
-        btn.TextColor3 = Color3.new(1, 1, 1)
-        btn.Font = Enum.Font.GothamBold
-        btn.TextSize = 18
-        btn.Text = text
-        btn.Active = true
-        btn.Draggable = true
-        btn.Parent = gui
-
-        local corner = Instance.new("UICorner")
-        corner.CornerRadius = UDim.new(0, 8)
-        corner.Parent = btn
-
-        btn.MouseButton1Click:Connect(function()
-            btn.Text = "Sending..."
-            task.spawn(function()
-                local ok, err = pcall(action)
-                btn.Text = ok and "Sent!" or "Failed (see console)"
-                if not ok then warn("[EGG KG] button error: " .. tostring(err)) end
-                task.wait(1.5)
-                btn.Text = text
-            end)
-        end)
-    end
-
-    makeButton("Send test alert", 0, Color3.fromRGB(52, 152, 219), sendTestInvite)
-
-    -- toggle 3D rendering on/off
-    local rendering3d = not DISABLE_3D_RENDERING
-    makeButton("Toggle 3D rendering", 60, Color3.fromRGB(230, 126, 34), function()
-        rendering3d = not rendering3d
-        if type(getgenv) == "function" then getgenv().EGGKG_SHOW_3D = rendering3d end
-        RunService:Set3dRenderingEnabled(rendering3d)
-    end)
-
-    -- manual teleport: one hop to a server from the pool, works any time (no hunt window needed)
-    makeButton("Manual teleport", 120, Color3.fromRGB(155, 89, 182), function()
-        if type(manualTeleport) ~= "function" then error("teleport code not ready yet") end
-        manualTeleport()
-    end)
+	return false
 end
 
-pcall(makeTestButton)
+-- Two separate cooldown clocks, one per route:
+--   lastPostAttempt   field eggs (main / big webhooks) - attempt-based, so a
+--                     burst of eggs is paced and flushEggs can wait it out.
+--   lastHalloweenFail halloween webhook - FAILURE-based, matching the PC
+--                     build: a halloween egg that sent fine must not block the
+--                     next one.
+local lastPostAttempt    = 0
+local lastHalloweenFail  = 0
 
--- (the Scramble tracker was removed: it used its own webhook messages)
-local Scramble = {
-    beforeLeave = function() end,
-    teleportFailed = function() end,
-}
-
--- ============================================================
--- HALLOWEEN DIMENSION TRACKER
--- These eggs are NOT in EggState.ReadFieldEggs, so they get their own scanner.
--- Reads Workspace.HalloweenDimension.WorldEggs (Zone 2 / Haunted Swamp is skipped).
--- Every rare egg found is queued once, like any other rare egg.
--- ============================================================
-local Halloween = { ready = true, busy = false }
-
-if HALLOWEEN_ENABLED then
-    task.spawn(function()
-        if not httpRequest then return end
-
-        local ZONES = { [1] = "Graveyard", [3] = "Abandoned Manor" }
-        local SKIP_ZONES = { [2] = true }
-
-        local EGGS = {
-            -- Zone 1: Graveyard
-            ["whiskers"]        = { name = "Whiskers",        tier = "Epic" },
-            ["jesterpop"]       = { name = "Jesterpop",       tier = "Legendary" },
-            ["candlefang"]      = { name = "Candlefang",      tier = "Mythic" },
-            ["spiritknight"]    = { name = "Spirit Knight",   tier = "Cosmic" },
-            ["graveyardbrute"]  = { name = "Graveyard Brute", tier = "Secret",  value = "75M/s",  num = 75e6 },
-            ["ghostreaper"]     = { name = "Ghost Reaper",    tier = "Eternal", value = "300M/s", num = 300e6 },
-            -- Zone 3: Abandoned Manor
-            ["halloweenroyalmimicegg"] = { name = "Mimic Chest", tier = "Legendary" },
-            ["mimicchest"]      = { name = "Mimic Chest",     tier = "Legendary" },
-            ["crowshade"]       = { name = "Crowshade",       tier = "Mythic" },
-            ["hexedpumpkin"]    = { name = "Hexed Pumpkin",   tier = "Cosmic" },
-            ["dreadwolf"]       = { name = "Werewolf",        tier = "Secret",  value = "1.3B/s", num = 1.3e9 },
-            ["werewolf"]        = { name = "Werewolf",        tier = "Secret",  value = "1.3B/s", num = 1.3e9 },
-            ["frankensteinkongegg"] = { name = "Gorillastein", tier = "Eternal", value = "3.5B/s", num = 3.5e9 },
-            ["abominationkong"] = { name = "Gorillastein",    tier = "Eternal", value = "3.5B/s", num = 3.5e9 },
-            ["gorillastein"]    = { name = "Gorillastein",    tier = "Eternal", value = "3.5B/s", num = 3.5e9 },
-            ["voidseerpumpkin"] = { name = "Voidseer Pumpkin", tier = "Divine", value = "14B/s", num = 14e9 },
-        }
-
-        local reported, sent = {}, {}
-
-        local function scanEggs()
-            local dim    = workspace:FindFirstChild("HalloweenDimension")
-            local folder = dim and dim:FindFirstChild("WorldEggs")
-            local list, total = {}, 0
-            if not folder then return list, false, 0 end
-
-            for _, m in ipairs(folder:GetChildren()) do
-                local zone = tonumber(m:GetAttribute("Zone")) or 0
-                if not SKIP_ZONES[zone] then
-                    total = total + 1
-                    local src  = m:GetAttribute("PreparedSourceName")
-                    local info = src and EGGS[norm(src)]
-
-                    if not info then
-                        local key = m:GetFullName() .. tostring(m:GetAttribute("HalloweenEggUid"))
-                        if not reported[key] then
-                            reported[key] = true
-                            local a = {}
-                            for k, v in pairs(m:GetAttributes()) do a[#a + 1] = k .. "=" .. tostring(v) end
-                            print("[HALLOWEEN] unidentified egg, zone " .. zone .. ", attrs: " .. table.concat(a, ", "))
-                        end
-                    elseif RARE[info.tier] then
-                        list[#list + 1] = {
-                            uid   = tostring(m:GetAttribute("HalloweenEggUid") or m:GetFullName()),
-                            name  = info.name, tier = info.tier, zone = zone,
-                            value = info.value, num = info.num,
-                        }
-                    end
-                end
-            end
-            return list, true, total
-        end
-
-        local lastDebug = ""
-        while true do
-            local ok, err = pcall(function()
-                local list, hasFolder, total = scanEggs()
-
-                if HALLOWEEN_DEBUG then
-                    local sig = tostring(hasFolder) .. ":" .. total .. ":" .. #list
-                    if sig ~= lastDebug then
-                        lastDebug = sig
-                        print("[HALLOWEEN] WorldEggs folder " .. (hasFolder and "found" or "NOT found")
-                            .. ", eggs seen: " .. total .. ", selected rarity: " .. #list)
-                    end
-                end
-
-                for _, e in ipairs(list) do
-                    if not sent[e.uid] then
-                        sent[e.uid] = true
-                        local zoneName = ZONES[e.zone] or "Halloween Dimension"
-                        queue[#queue + 1] = {
-                            info = { display = e.name, tier = e.tier, image = IMAGES_N[norm(e.name)] },
-                            kg = nil, location = zoneName, mutation = nil,
-                            extra = { value = e.num and formatMoney(e.num) or e.value, num = e.num, zone = zoneName },
-                        }
-                        if HALLOWEEN_HOPS then markSelectedSpawn() end
-                        print("[HALLOWEEN] rare spotted: " .. e.name .. " (" .. e.tier .. ")")
-                    end
-                end
-            end)
-            if not ok then warn("[HALLOWEEN] error: " .. tostring(err)) end
-            task.wait(1)
-        end
-    end)
+-- Which webhook (and optional role ping) ONE egg belongs on.
+local function hitWebhook(hit)
+	local url = relayWebhook()
+	if type(url) ~= "string" or url == "" or url:find("PASTE_YOUR", 1, true) then
+		return nil, nil, "main"
+	end
+	-- every alert goes through the relay webhook; the bot cog does the pinging
+	return url, nil, "main"
 end
 
--- ============================================================
--- SERVER HOPPER
--- ============================================================
+-- Send ONE Discord message PER egg, each with the full single-egg detail. This
+-- means a spawn that started as two eggs but now has one left is reported as
+-- that one egg alone - never bundled into a "2 TARGET EGGS" card that still
+-- lists an egg somebody already stole.
+--
+-- Returns the list of hits that were actually delivered, so the caller only
+-- remembers (and stops re-reporting) the ones that really went through.
+local function post(hits, players)
+	local sent = {}
+	if #hits == 0 then
+		return sent
+	end
 
-local targetCount = 0   -- total selected-rarity eggs seen in the last scan.
-local firstScanDone = false
+	if relayWebhook() == "" then
+		log("no webhook configured - cannot report")
+		return sent
+	end
 
-local function stopped()
-    return type(getgenv) == "function" and getgenv().EGGKG_STOP == true
+	-- The cooldown is PER ROUTE, not global. Halloween eggs go to their own
+	-- Discord webhook, so they must not inherit the field-egg clock: with the
+	-- old shared, success-based timer, any field egg posted on landing silently
+	-- swallowed every halloween egg on that server - and since this build
+	-- leaves within seconds, the 30s never expired before the hop. That is why
+	-- the phone got almost none while the PC build (whose cooldown only trips
+	-- after a FAILED post) got them all.
+	local isHalloween = hits[1].halloween == true
+	if isHalloween then
+		if os.clock() - lastHalloweenFail < CONFIG.POST_COOLDOWN then
+			return sent
+		end
+	else
+		if os.clock() - lastPostAttempt < CONFIG.POST_COOLDOWN then
+			return sent
+		end
+		lastPostAttempt = os.clock()
+	end
+
+	for _, hit in ipairs(hits) do
+		local url, roleId, label = hitWebhook(hit)
+		if url then
+			if label ~= "main" then
+				log(label .. " - posting on its own")
+			end
+			if sendToWebhook(url, { hit }, players, roleId) then
+				sent[#sent + 1] = hit
+				-- lastEggSentAt = os.clock()
+				-- eggsSentThisRun += 1
+				-- pcall(sendBotTracker)
+			elseif hit.halloween then
+				-- Only a failed halloween send backs the route off.
+				lastHalloweenFail = os.clock()
+			end
+		else
+			log("main webhook not configured - cannot report")
+		end
+	end
+
+	return sent
 end
 
--- ---- multi-account split: each account only uses its own share of the servers ----
-local mySlot, slotCount = 1, 1
+-- Report the Halloween Dimension's world eggs. Additive only: they are (almost)
+-- always up on every server, so the result never influences a hop decision.
+local function tryReportHalloween(players)
+	if CONFIG.HALLOWEEN ~= true then
+		return
+	end
+	local hits = halloweenScan()
+	if #hits == 0 then
+		return
+	end
+	local posted = readPosted()
+	local fresh  = {}
+	for _, hit in ipairs(hits) do
+		if not posted[postedKey(hit.record)] then
+			fresh[#fresh + 1] = hit
+		end
+	end
+	if #fresh == 0 then
+		return
+	end
+
+	-- Last check before the request goes out: an egg somebody took between the
+	-- scan and the send is dropped (nil = the world could not be read, so never
+	-- drop a real egg on a failed read).
+	local ready = {}
+	for _, hit in ipairs(fresh) do
+		local avail = stillAvailableHalloween(hit.uid)
+		if avail == false then
+			log(("dropped %s before send - already taken or gone from the world")
+				:format(tostring(hit.name)))
+		else
+			ready[#ready + 1] = hit
+		end
+	end
+	if #ready == 0 then
+		return
+	end
+
+	log(("halloween: %d target egg(s) up on this server - posting"):format(#ready))
+	local sent = post(ready, players)
+	for _, hit in ipairs(sent) do
+		rememberPosted(hit.record)
+	end
+end
+
+local function postBossAlert(players, evidence)
+	if CONFIG.WEBHOOK_KG == "" or CONFIG.WEBHOOK_KG:find("PASTE_YOUR", 1, true) then
+		return false
+	end
+	if type(httpRequest) ~= "function" then
+		return false
+	end
+	local webLink, directLink = joinLinks()
+	local desc = ("**Dr. Scramble** is still active on the map!\n**%d/%d players**"):format(
+		players or #Players:GetPlayers(), CONFIG.SERVER_CAPACITY)
+	if evidence and evidence ~= "" then
+		desc = desc .. "\n`" .. tostring(evidence):sub(1, 120) .. "`"
+	end
+	local vipRoles = parseRoleIds(CONFIG.VIP_ROLE_ID)
+	local payload = {
+		username = "egg grabber",
+		allowed_mentions = { parse = {}, roles = vipRoles },
+		content = #vipRoles > 0 and roleMentionContent(vipRoles) or nil,
+		embeds = {
+			{
+				title = "DR. SCRAMBLE ACTIVE",
+				url = webLink,
+				description = desc,
+				fields = {
+					{ name = "🔗 Server",      value = ("[Click to Join Server](%s)"):format(webLink), inline = false },
+					{ name = "🔐 Direct Link", value = "`" .. directLink .. "`", inline = false },
+				},
+				footer = { text = "Boss Alert • " .. reporterName() },
+				timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+				color = 0xFF5555,
+			},
+		},
+	}
+	local body = jsonEncode(payload)
+	if not body then
+		return false
+	end
+	for _ = 1, CONFIG.MAX_POST_RETRIES do
+		local okReq, res = pcall(httpRequest, {
+			Url = CONFIG.WEBHOOK_KG,
+			Method = "POST",
+			Headers = { ["Content-Type"] = "application/json" },
+			Body = body,
+		})
+		if okReq and type(res) == "table" then
+			local code = res.StatusCode or res.status or 0
+			if code >= 200 and code < 300 then
+				return true
+			end
+			task.wait(2)
+		else
+			task.wait(2)
+		end
+	end
+	return false
+end
+
+-- --------------------------------------------------------------------- hop
+
+-- The v2 servers/Public endpoint returns REAL playing counts.
+-- v1, NOT v2: v1 is the only one that returns a per-server `ping`, and
+-- sortOrder=Asc still gives the least-populated servers first - so one fetch
+-- buys both the emptiest candidates and the laggy ones we should never join.
+local SERVER_LIST_URL = "https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=50&excludeFullGames=true"
+
+-- Single-account mobile build: on-disk cache + circuit breaker to stay
+-- under Roblox's rate limit. Cache survives hops so 429s are impossible
+-- once we have one good list.
+--
+-- LIST_TTL = 0, matching the desktop hunter: ask for a FRESH list every hop.
+-- A server list has a shelf life - it only says which servers existed when
+-- Roblox drew it up. Reusing one for minutes is the main way "Connection
+-- Failed (279)" gets in: servers shut down, restart or fill while we wait, and
+-- we then jump at a JobId that is no longer routable. The disk cache is still
+-- here as the 429 / circuit-breaker fallback below, which is what it is for.
+local LIST_TTL        = 0      -- seconds to reuse on-disk cache between hops
+local LIST_STALE_OK   = 600    -- on a 429, serve cache if it is at most this old
+local LIST_CACHE_FILE = "egg-grabber-delta-serverlist.cache" -- "<epoch>\n<body>"
+local lastListFetch   = 0      -- spacing between live page requests
+
+-- circuit breaker state (in-memory, resets on script reload)
+local cbBlockUntil = 0
+local cbCount      = 0
+local cbWindow     = 0
+
+local function cacheRead()
+	local ok, content = pcall(readfile, LIST_CACHE_FILE)
+	if ok and type(content) == "string" then
+		local ts, body = content:match("^(%d+)\r?\n(.*)$")
+		if ts and body and body ~= "" then
+			return tonumber(ts), body
+		end
+	end
+	return nil, nil
+end
+
+local function cacheWrite(body)
+	pcall(writefile, LIST_CACHE_FILE, tostring(os.time()) .. "\n" .. body)
+end
+
+local function cbIsBlocked()
+	if cbBlockUntil > os.time() then
+		return true, cbBlockUntil - os.time()
+	end
+	return false, 0
+end
+
+local function cbRecord429()
+	local now = os.time()
+	if now > cbWindow + 60 then
+		cbWindow = now
+		cbCount = 0
+	end
+	cbCount = cbCount + 1
+	if cbCount >= 3 then
+		cbBlockUntil = now + 120
+	end
+end
+
+local function urlEncode(s)
+	return (tostring(s):gsub("([^%w%-%._~])", function(c)
+		return ("%%%02X"):format(string.byte(c))
+	end))
+end
+
+-- One live page request, retrying only on 429 and honouring Retry-After.
+-- Returns the raw body string, or nil + reason.
+local function requestPage(url)
+	for attempt = 1, 2 do
+		local ok, res = pcall(httpRequest, { Url = url, Method = "GET" })
+
+		if ok and type(res) == "table" and (res.StatusCode or res.status) == 200 then
+			cbCount = 0
+			return res.Body or res.body
+		end
+
+		if ok and type(res) == "table" and (res.StatusCode or res.status) == 429 then
+			cbRecord429()
+			local delay = 2 + math.random() * 0.4
+			local h = res.Headers
+			local ra = h and (h["Retry-After"] or h["retry-after"])
+			if tonumber(ra) and tonumber(ra) > 0 then
+				delay = math.max(delay, math.min(tonumber(ra), 30))
+			end
+			if attempt < 2 then
+				log(("server list rate-limited (429) - retrying in %.1fs"):format(delay))
+				task.wait(delay)
+			end
+		else
+			local detail = type(res) == "table" and tostring(res.StatusCode or res.status) or tostring(res)
+			return nil, "list request failed (" .. detail .. ")"
+		end
+	end
+	return nil, "rate limited (429)"
+end
+
+-- Walk up to CONFIG.LIST_PAGES pages of the quietest-first list and merge them
+-- into ONE body shaped like a single endpoint response ({ data = {...} }).
+-- Pages are spaced by CONFIG.LIST_PAGE_GAP seconds (kept small so a hop stays
+-- fast) and a 429 is retried instead of killing the hop.
+local function fetchServerList()
+	local baseUrl = SERVER_LIST_URL:format(game.PlaceId)
+	local cursor  = nil
+	local merged  = {}
+	local pages   = 0
+	local lastWhy = nil
+
+	for _ = 1, CONFIG.LIST_PAGES do
+		local url = baseUrl
+		if cursor then
+			url = baseUrl .. "&cursor=" .. urlEncode(cursor)
+		end
+
+		local now = os.time()
+		if now < lastListFetch + CONFIG.LIST_PAGE_GAP then
+			task.wait((lastListFetch + CONFIG.LIST_PAGE_GAP) - now)
+		end
+		lastListFetch = os.time()
+
+		local body, why = requestPage(url)
+		if not body then
+			lastWhy = why
+			break
+		end
+
+		local page = jsonDecode(body)
+		if not page or type(page.data) ~= "table" then
+			lastWhy = "list did not decode"
+			break
+		end
+
+		for _, s in ipairs(page.data) do
+			merged[#merged + 1] = s
+		end
+		pages = pages + 1
+
+		cursor = page.nextPageCursor
+		if not cursor then break end
+	end
+
+	if pages == 0 then
+		return nil, lastWhy or "list request failed"
+	end
+	return merged, pages
+end
+
+-- Fetch-or-reuse entry point. forceFresh (used right before a hop) skips the
+-- cache so we never target a server that died in the cached window.
+local function getServerList(forceFresh)
+	if type(httpRequest) ~= "function" then
+		return nil, "no http function"
+	end
+
+	local blocked, rem = cbIsBlocked()
+	if blocked then
+		local ts, body = cacheRead()
+		if ts and body and (os.time() - ts) <= LIST_STALE_OK then
+			log(("server list blocked by circuit breaker (%ds left) - using own cache (age %ds)"):format(rem or 0, os.time() - ts))
+			return { StatusCode = 200, Body = body }
+		end
+		log(("server list blocked by circuit breaker (%ds left) - no usable cache"):format(rem or 0))
+		return nil, "list blocked by circuit breaker"
+	end
+
+	local now = os.time()
+	if not forceFresh then
+		local ts, body = cacheRead()
+		if ts and body and (now - ts) <= LIST_TTL then
+			log(("server list from own cache (age %ds)"):format(now - ts))
+			return { StatusCode = 200, Body = body }
+		end
+	end
+
+	local merged, pages = fetchServerList()
+	if not merged then
+		-- fall back to even a stale cache rather than stall - but if this was a
+		-- force-fresh hop, only trust a cache that is seconds old.
+		local ts, body = cacheRead()
+		if ts and body then
+			local age = now - ts
+			if not forceFresh or age <= 3 then
+				log(("server list request failed - using own cache (age %ds)"):format(age))
+				return { StatusCode = 200, Body = body }
+			end
+			log(("ignoring %ds-old server list for a fresh hop"):format(age))
+		end
+		return nil, "list request failed"
+	end
+
+	local body = jsonEncode({ data = merged })
+	cacheWrite(body)
+	log(("server list: %d servers from %d page(s)"):format(#merged, pages))
+	return { StatusCode = 200, Body = body }
+end
+
+local function pickTargets(forceFresh)
+	local list, why = getServerList(forceFresh)
+	if not list or not list.Body then
+		return nil, why
+	end
+
+	local data = jsonDecode(list.Body)
+	if not data or type(data.data) ~= "table" then
+		return nil, "list did not decode"
+	end
+
+	local left = readLeft()
+	local visited = readVisited()
+	local visitedSet = {}
+	for _, id in ipairs(visited) do
+		visitedSet[id] = true
+	end
+
+	-- Load failed servers (servers that gave 279 / timed out / refused)
+	local failed = readFailed()
+	local failedSet = {}
+	for _, id in ipairs(failed) do
+		failedSet[id] = true
+	end
+
+	local wantMax     = CONFIG.MAX_POP_ON_LAND - 1
+	local idealListed = CONFIG.MIN_POP_ON_LAND - 1
+
+	local function collect(useVisited)
+		local candidates, considered, skipped, laggy = {}, 0, 0, 0
+
+		for _, s in ipairs(data.data) do
+			if type(s.id) == "string" and type(s.playing) == "number" then
+				considered = considered + 1
+
+				local ping    = tonumber(s.ping)
+				local skipPing = tonumber(CONFIG.LIST_PING_SKIP) or 0
+				local isLaggy  = skipPing > 0 and ping ~= nil and ping > skipPing
+
+				local bounce = s.id == game.JobId or s.id == left
+				local full   = s.playing >= s.maxPlayers
+				local empty  = s.playing < 0
+				if CONFIG.MIN_POP_ON_LAND == 1 then empty = false end
+				local over   = s.playing > wantMax
+				local seen   = useVisited and visitedSet[s.id] == true
+				-- Also skip servers that previously refused us (279 / timeout / failed)
+				local dead   = failedSet[s.id] == true
+				-- Strict 2/7-3/7 only: listed playing 1-2, nothing else aimed at.
+				local band   = s.playing ~= 1 and s.playing ~= 2
+
+				if bounce or full or empty or over or seen or band or isLaggy or dead then
+					skipped = skipped + 1
+					if isLaggy then laggy = laggy + 1 end
+					if dead then log(("skipping %s - previously failed"):format(s.id)) end
+				else
+					local popScore = 0
+					if s.playing < idealListed then
+						popScore = (idealListed - s.playing) * 10
+					elseif s.playing > idealListed then
+						popScore = (s.playing - idealListed) * 10
+					end
+
+					-- Ping is a tie-break, not the driver: population moves in
+					-- steps of 10, ping in steps of 0.01/ms, so two servers of
+					-- equal population are ordered by whichever is closer.
+					local score = popScore + (ping or 150) / 100
+
+					candidates[#candidates + 1] = {
+						id = s.id,
+						playing = s.playing,
+						ping = ping,
+						score = score,
+					}
+				end
+			end
+		end
+
+		table.sort(candidates, function(a, b) return a.score < b.score end)
+		return candidates, considered, skipped, laggy
+	end
+
+	local candidates, considered, skipped, laggy = collect(true)
+	if #candidates == 0 then
+		candidates, considered, skipped, laggy = collect(false)
+	end
+
+	log(("candidates: %d of %d listed (%d skipped, %d over the %dms ping limit)")
+		:format(#candidates, considered, skipped, laggy,
+			tonumber(CONFIG.LIST_PING_SKIP) or 0))
+
+	-- Rotate DEEP into the candidate list, like the desktop hunter.
+	-- TARGET_LIST_START (25/60) is the slot we START at - we skip the
+	-- contested head (which every other bot grabs) and probe from
+	-- deeper in the list. Fully random to spread 24 bots with no coordination.
+	local function rotateToStart(t)
+		local n = #t
+		if n <= 1 then return t end
+		local base = math.min(CONFIG.TARGET_LIST_START - 1, n - 1)
+		local startAt = 1 + math.random(0, base)
+		if startAt < 1 then startAt = 1 end
+		if startAt > n then startAt = 1 end
+		local rotated = {}
+		for i = startAt, n do rotated[#rotated + 1] = t[i] end
+		for i = 1, startAt - 1 do rotated[#rotated + 1] = t[i] end
+		return rotated
+	end
+
+	if #candidates == 0 then
+		return nil, ("no joinable server among %d listed (%d skipped)"):format(considered, skipped)
+	end
+
+	return rotateToStart(candidates)
+end
+
+local teleportFailures = 0
+
+-- Gap after a refused join. Flat 1s like the desktop hunter: the fresh
+-- 200-server list + deadIds means we don't need exponential backoff.
+local function hopBackoff(failures)
+	local waitFor = tonumber(CONFIG.HOP_RETRY_WAIT) or 1
+	log(("backing off %ds before the next join attempt"):format(waitFor))
+	local t0 = os.clock()
+	while os.clock() - t0 < waitFor do
+		if stopped() then return end
+		task.wait(0.5)
+	end
+end
+
+local function hopRound()
+	if not CONFIG.HOP then
+		log("HOP is false - staying in this server")
+		return false
+	end
+
+	writeLeft(game.JobId)
+	teleportFailures = 0
+
+	-- In-hop memory of servers that refused us this round (deadIds mirrors
+	-- the desktop hunter's pattern). Prevents retrying the same dead server
+	-- multiple times within one hop() call.
+	local deadIds = {}
+
+	-- Join pacing, before the budget starts so this wait is not charged to it.
+	local gap = tonumber(CONFIG.MIN_HOP_GAP) or 0
+	if gap > 0 then
+		local since = os.time() - readJoinStamp()
+		if since < gap then
+			-- Clamped to the gap itself: a clock jump backwards must not turn
+			-- into an hour-long hold on a "negative" age.
+			local waitFor = math.min(gap - since, gap)
+			log(("pacing the hop: %ds since the last join, holding %ds"):format(since, waitFor))
+			local t0 = os.clock()
+			while os.clock() - t0 < waitFor do
+				if stopped() then return false end
+				task.wait(0.5)
+			end
+		end
+	end
+
+	-- Total wall-clock budget for one hop() call. Without this, the attempts -
+	-- each of which can stall on waitForLanding - can burn ~4 minutes in one.
+	local hopStart = os.clock()
+	local HOP_BUDGET = 75
+
+	local verdict = nil
+	local verdictConn = nil
+	local lpWait = os.clock()
+	local lp = Players.LocalPlayer
+	while not lp and os.clock() - lpWait < 5 do
+		task.wait(0.2)
+		lp = Players.LocalPlayer
+	end
+	if lp then
+		verdictConn = lp.OnTeleport:Connect(function(state)
+			verdict = tostring(state)
+		end)
+	end
+
+	-- Every return below must go through this first: a refused/timed-out hop
+	-- stays in the same session, so a leaked OnTeleport connection per attempt
+	-- piles up over a long stay. Nil-safe (lp may never have resolved).
+	local function disconnect()
+		if verdictConn then
+			pcall(function() verdictConn:Disconnect() end)
+			verdictConn = nil
+		end
+	end
+
+	local function awaitVerdict(secs)
+		local t0 = os.clock()
+		while os.clock() - t0 < secs do
+			task.wait(0.2)
+			if stopped() then return nil end
+			if verdict then
+				if verdict:find("InProgress") then return "inprogress" end
+				if verdict:find("Failed") then return "failed" end
+			end
+		end
+		return nil
+	end
+
+	local function waitForLanding(maxSecs)
+		local t0 = os.clock()
+		while os.clock() - t0 < maxSecs do
+			task.wait(0.5)
+			if stopped() then return false end
+		end
+		return true
+	end
+
+	local function armBootstrap()
+		-- Clear the per-join lock so the next join can start a fresh instance
+		-- even if getgenv survived the teleport.
+		local gg = genv()
+		if gg ~= nil then
+			gg.EGG_GRABBER_RUNNING = false
+			gg.EGG_GRABBER_STOP = false
+		end
+		clearTeleportQueue()
+		if queueOnTeleport(bootstrapCode()) then
+			log("teleport bootstrap queued")
+		else
+			log("WARNING: this executor will not queue the teleport bootstrap - after a hop the script can only restart via Delta's AutoExec folder")
+		end
+	end
+
+	-- Always fetch a FRESH list right before hopping: the cached list can be up
+	-- to LIST_TTL old, and a server that died in that window causes Roblox's
+	-- "Connection Failed (279)" dialog. Fresh data = far fewer dead targets.
+	log("refreshing server list before hop")
+	local targets, listWhy = pickTargets(true)
+	if not targets and CONFIG.ALLOW_MATCHMAKER then
+		log("no candidates (" .. tostring(listWhy) .. ") - going to matchmaker for an available server")
+		verdict = nil
+		local ok, err = pcall(function()
+			armBootstrap()
+			stampJoin()
+			TeleportService:Teleport(game.PlaceId)
+		end)
+		if not ok then
+			log("matchmaker teleport failed: " .. tostring(err))
+			task.wait(5)
+			disconnect()
+			return false
+		end
+		local v = awaitVerdict(CONFIG.TARGET_VERDICT)
+		if v == "inprogress" then
+			if waitForLanding(8) then
+				log("matchmaker accepted but never left (no verdict) - retrying this hop")
+				disconnect()
+				return false
+			end
+			disconnect()
+			return false
+		else
+			log("matchmaker refused (" .. tostring(v) .. ") - will try again on next cycle")
+			task.wait(5)
+			disconnect()
+			return false
+		end
+	elseif not targets then
+		-- Matchmaker disabled: a crowded server is worse than staying put, since
+		-- we cannot hop out of the ones it drops us into. Wait for the next cycle
+		-- rather than teleport blind.
+		log("no low-pop candidates (" .. tostring(listWhy) .. ") and matchmaker disabled - staying put")
+		notifyStay(listWhy)
+		disconnect()
+		return false
+	end
+
+	local idx = 0
+	local refetches = 0
+	while teleportFailures < CONFIG.MAX_TELEPORT_RETRIES do
+		idx = idx + 1
+
+		if os.clock() - hopStart > HOP_BUDGET then
+			log(("hop budget (%.0fs) exceeded - giving up this round"):format(HOP_BUDGET))
+			break
+		end
+
+		if targets and idx <= #targets then
+			local cand = targets[idx]
+
+			-- Skip servers that already failed this hop round (deadIds mirrors desktop hunter)
+			if deadIds[cand.id] then
+				log(("skipping %s - already failed this hop round"):format(cand.id))
+			else
+				verdict = nil
+				armBootstrap()
+
+				local ok, err = pcall(function()
+					stampJoin()
+					TeleportService:TeleportToPlaceInstance(game.PlaceId, cand.id)
+				end)
+
+				if not ok then
+					teleportFailures = teleportFailures + 1
+					deadIds[cand.id] = true
+					rememberFailed(cand.id)
+					log("TeleportToPlaceInstance failed: " .. tostring(err))
+				else
+					local v = awaitVerdict(CONFIG.TARGET_VERDICT)
+
+					if v == "inprogress" then
+						log(("target accepted -> %s (%d playing) - leaving"):format(cand.id, cand.playing))
+						notify("hopping to a new server")
+						if waitForLanding(8) then
+							teleportFailures = teleportFailures + 1
+							deadIds[cand.id] = true
+							rememberFailed(cand.id)
+							log(("accepted but never left (%s) - attempt %d/%d")
+								:format(cand.id, teleportFailures, CONFIG.MAX_TELEPORT_RETRIES))
+						else
+							disconnect()
+							return false
+						end
+					else
+						teleportFailures = teleportFailures + 1
+						deadIds[cand.id] = true
+						rememberFailed(cand.id)
+						log(("target refused %s (%s) - attempt %d/%d")
+							:format(cand.id, v or ("no verdict in " .. CONFIG.TARGET_VERDICT .. "s"),
+								teleportFailures, CONFIG.MAX_TELEPORT_RETRIES))
+					end
+				end
+
+				if teleportFailures < CONFIG.MAX_TELEPORT_RETRIES then
+					hopBackoff(teleportFailures)
+				end
+			end
+		elseif CONFIG.ALLOW_MATCHMAKER then
+			verdict = nil
+			armBootstrap()
+
+			local ok, err = pcall(function()
+				stampJoin()
+				TeleportService:Teleport(game.PlaceId)
+			end)
+
+			if not ok then
+				teleportFailures = teleportFailures + 1
+				log("matchmaker teleport failed: " .. tostring(err))
+			else
+				log("no more candidates - the matchmaker decides")
+				local v = awaitVerdict(CONFIG.TARGET_VERDICT)
+
+				if v == "inprogress" then
+					if waitForLanding(8) then
+						teleportFailures = teleportFailures + 1
+						log(("matchmaker accepted but never left - attempt %d/%d")
+							:format(teleportFailures, CONFIG.MAX_TELEPORT_RETRIES))
+					else
+						disconnect()
+						return false
+					end
+				else
+					teleportFailures = teleportFailures + 1
+					log(("matchmaker refused (%s) - attempt %d/%d")
+						:format(v or "no verdict", teleportFailures, CONFIG.MAX_TELEPORT_RETRIES))
+					targets, listWhy = pickTargets()
+					idx = 0
+				end
+			end
+
+			if teleportFailures < CONFIG.MAX_TELEPORT_RETRIES then
+				hopBackoff(teleportFailures)
+			end
+		else
+			-- Matchmaker disabled: we ran through every targeted candidate and
+			-- Roblox refused them all. Refetch a fresh list and try again rather
+			-- than handing the choice to the matchmaker.
+			refetches = refetches + 1
+			if refetches > CONFIG.MAX_LIST_REFETCHES then
+				log("targeted candidates exhausted (" .. tostring(listWhy) .. ") - staying put")
+				notifyStay("candidates exhausted: " .. tostring(listWhy))
+				break
+			end
+			log(("targeted candidates exhausted - refetching list (%d/%d)")
+				:format(refetches, CONFIG.MAX_LIST_REFETCHES))
+			task.wait(1)
+			targets, listWhy = pickTargets(true)
+			if not targets then
+				log("no low-pop candidates after refetch (" .. tostring(listWhy) .. ") - staying put")
+				notifyStay("refetch: " .. tostring(listWhy))
+				break
+			end
+			idx = 0
+		end
+	end
+
+	disconnect()
+	log("giving up on teleport after " .. CONFIG.MAX_TELEPORT_RETRIES .. " attempts")
+	return false
+end
+
+-- hop() never gives up: it runs hopRound() in a loop with a pause between
+-- rounds. If a round exhausts MAX_TELEPORT_RETRIES, the candidate list was
+-- stale or Roblox was busy - wait HOP_ROUND_PAUSE and start a fresh round
+-- with a new server list. This matches the desktop hunter's resilience.
+local function hop()
+	if not CONFIG.HOP then
+		return hopRound()
+	end
+
+	local round = 0
+	while true do
+		round += 1
+		if hopRound() then
+			return true
+		end
+		if stopped() then
+			return false
+		end
+
+		log(("hop round %d found nowhere to go - waiting %ds then retrying")
+			:format(round, CONFIG.HOP_ROUND_PAUSE))
+
+		local t0 = os.clock()
+		while os.clock() - t0 < CONFIG.HOP_ROUND_PAUSE do
+			if stopped() then return false end
+			task.wait(0.5)
+		end
+	end
+end
+
+-- -------------------------------------------------------------------- main
+
+-- Report any fresh eggs without affecting flow: no hop, no error, just
+-- post-and-remember. Used for the initial landing scan and the per-poll
+-- opportunistic check. Returns 1 posted, 2 failed, 0 nothing fresh.
+local function tryReportFreshOnly(hits)
+	if #hits == 0 then
+		return 0
+	end
+	local posted = readPosted()
+	local fresh = {}
+	for _, hit in ipairs(hits) do
+		if not posted[postedKey(hit.record)] then
+			fresh[#fresh + 1] = hit
+		end
+	end
+	if #fresh == 0 then
+		return 0
+	end
+	log(("found %d fresh egg(s) on this server - posting"):format(#fresh))
+	local sent = post(fresh, #Players:GetPlayers())
+	for _, hit in ipairs(sent) do
+		rememberPosted(hit.record)
+	end
+	if #sent > 0 then
+		return 1
+	end
+	return 2
+end
+
+local function tryReportAny(hits)
+	if #hits == 0 then
+		return false
+	end
+	local posted = readPosted()
+	local fresh  = {}
+	for _, hit in ipairs(hits) do
+		if not posted[postedKey(hit.record)] then
+			fresh[#fresh + 1] = hit
+		end
+	end
+	if #fresh == 0 then
+		return false
+	end
+	log(("quick-scan found %d target egg(s) - posting"):format(#fresh))
+	local sent = post(fresh, #Players:GetPlayers())
+	for _, hit in ipairs(sent) do
+		rememberPosted(hit.record)
+	end
+	return #sent > 0
+end
+
+-- Post everything visible on this server BEFORE we teleport, and wait for the
+-- post to actually go through (webhook cooldown included). A hop must never
+-- throw away an egg we already saw. Returns true when nothing is left unsent.
+local function flushEggs(assets, eggState)
+	if relayWebhook() == "" then
+		return true
+	end
+	for _ = 1, 6 do
+		local before  = lastPostAttempt
+		local verdict = tryReportFreshOnly(scan(assets, eggState))
+		if verdict == 0 then
+			return true
+		end
+		if verdict == 1 then
+			-- Short gap: this pass only exists to catch a SECOND egg that was
+			-- already on screen, so a full second of waiting buys little.
+			log("egg(s) reported before hopping - re-checking for more")
+			task.wait(0.5)
+		else
+			-- Eggs are visible but did not go out. Wait out the webhook
+			-- cooldown, but if the post itself is failing, give up quickly
+			-- instead of freezing the hunt on one server.
+			local cooldownLeft = (CONFIG.POST_COOLDOWN or 0) - (os.clock() - lastPostAttempt)
+			if lastPostAttempt ~= before or cooldownLeft <= 0 then
+				log("egg post failed before hopping - retrying")
+				task.wait(2)
+			else
+				log(("egg(s) unsent - waiting %.0fs for the webhook cooldown"):format(cooldownLeft))
+				task.wait(cooldownLeft + 0.5)
+			end
+		end
+	end
+	return false
+end
+
+-- Median ping (ms) over a few GetNetworkPing samples. Returns nil when the
+-- local player isn't around to measure.
+local function avgPingMs()
+	local lp = Players.LocalPlayer
+	if not lp then
+		return nil
+	end
+	local samples = math.max(1, CONFIG.PING_SAMPLES or 3)
+	local vals = {}
+	for i = 1, samples do
+		local ok, p = pcall(function() return lp:GetNetworkPing() end)
+		if ok and type(p) == "number" then
+			vals[#vals + 1] = p * 1000
+		end
+		if i < samples then
+			-- Only relevant when PING_SAMPLES > 1; kept short so a multi-sample
+			-- read never becomes the slowest thing on a landing.
+			task.wait(0.3)
+		end
+	end
+	if #vals == 0 then
+		return nil
+	end
+	table.sort(vals)
+	return vals[math.ceil(#vals / 2)]
+end
+
+-- ---------------------------------------------------------------- spawn wave
+-- The map refreshes on 5-minute wall-clock boundaries (:00/:05/...).
+-- Cycle: keep hopping and posting all cycle, then stop from 4:30 and hold the
+-- current server through the wave, resuming at 5:05.
+local SPAWN_PERIOD = 300
+local SPAWN_SETTLE = 5
+local SPAWN_HOLD_AT = 270 -- 4:30 into the cycle: stop hopping, hold for wave
+
+local function hoppingPaused()
+	local e = os.time() % SPAWN_PERIOD
+	return e >= SPAWN_HOLD_AT or e < SPAWN_SETTLE
+end
+
+-- ------------------------------------------------------- 3D rendering off
+-- Roblox has no "stop drawing" switch, so this stacks four cheap layers:
+--   1. every BasePart under workspace gets LocalTransparencyModifier = 1, so
+--      the renderer skips it - re-applied as parts stream in, because the
+--      character's fade-through-wall code overwrites it every few seconds;
+--   2. shadows off + lowest render quality (one-time);
+--   3. an FPS cap - the single biggest GPU/battery lever on a phone;
+--   4. a full-screen cover over whatever still draws (terrain, sky, UI).
+-- Nothing here touches replication: EggState, the Halloween world and the
+-- boss scan read objects and attributes, never pixels - all keep working.
+-- Originals live in getgenv (wiped on teleport anyway, and a teleport rebuilds
+-- the whole world) so DISABLE_3D = false can genuinely put things back.
+local RENDER_GUI   = "EggGrabberRenderOff"
+local LTM_STORE    = "EGG_GRABBER_HIDDEN_LTM"
+local RENDER_SAVED = "EGG_GRABBER_RENDER_SAVED"
+
+local function envTable(key)
+	local g = genv()
+	if g == nil then return nil end
+	if type(g[key]) ~= "table" then g[key] = {} end
+	return g[key]
+end
+
+local function hidePart(part, store)
+	if store ~= nil and store[part] == nil then
+		store[part] = part.LocalTransparencyModifier
+	end
+	if part.LocalTransparencyModifier ~= 1 then
+		part.LocalTransparencyModifier = 1
+	end
+end
+
+local function sweepHidden(root, store)
+	if root == nil then return end
+	pcall(function()
+		for _, d in ipairs(root:GetDescendants()) do
+			if d:IsA("BasePart") then
+				hidePart(d, store)
+			end
+		end
+	end)
+end
+
+-- The periodic re-hide walks only the parts we already hid, not the whole
+-- workspace. GetDescendants() hands back every Instance in the game - scripts,
+-- folders, attachments, sounds - so that table is several times bigger than the
+-- part list and gets rebuilt on every pass: the single most expensive thing in
+-- here, and pure GC pressure on a phone. New parts are caught by
+-- DescendantAdded the moment they stream in, so nothing is missed.
+local function rehideStored(store)
+	if store == nil then return end
+	pcall(function()
+		for part in pairs(store) do
+			if part == nil or part.Parent == nil or not part:IsA("BasePart") then
+				store[part] = nil -- destroyed/streamed out: stop tracking it
+			elseif part.LocalTransparencyModifier ~= 1 then
+				part.LocalTransparencyModifier = 1
+			end
+		end
+	end)
+end
+
+local function renderOffGraphics()
+	local saved = envTable(RENDER_SAVED)
+	local qualityOK, shadowsOK, fpsOK = false, false, false
+
+	pcall(function()
+		local rs = settings().Rendering
+		if saved ~= nil and saved.quality == nil then
+			saved.quality = rs.QualityLevel
+		end
+		-- The enum member name has changed across Roblox versions; try the
+		-- known spellings rather than assume one.
+		for _, name in ipairs({ "Level01", "QualityLevel1", "Level1" }) do
+			local ok, item = pcall(function() return Enum.RenderQuality[name] end)
+			if ok and item then
+				rs.QualityLevel = item
+				break
+			end
+		end
+		if saved ~= nil and saved.shadowTech == nil then
+			saved.shadowTech = rs.ShadowTechnology
+		end
+		rs.ShadowTechnology = Enum.ShadowTechnology.NoShadows
+		qualityOK = true
+	end)
+
+	pcall(function()
+		local lighting = game:GetService("Lighting")
+		if saved ~= nil and saved.globalShadows == nil then
+			saved.globalShadows = lighting.GlobalShadows
+		end
+		lighting.GlobalShadows = false
+		shadowsOK = true
+	end)
+
+	local fps = tonumber(CONFIG.RENDER_OFF_FPS) or 0
+	if fps <= 0 then
+		fpsOK = true
+	elseif type(setfpscap) == "function" then
+		pcall(function()
+			if saved ~= nil then saved.fps = true end
+			setfpscap(fps)
+			fpsOK = true
+		end)
+	else
+		-- No setfpscap in this executor: not a failure, there is simply no
+		-- cap to set. Treating it as one is what made the caller re-apply the
+		-- render settings on every sweep, which is a hitch on every sweep.
+		fpsOK = true
+	end
+
+	-- A script fired very early can land before Lighting or the render
+	-- settings exist, so the caller retries this a few times right after a
+	-- landing - and then stops for good. These writes rebuild Roblox's render
+	-- state; a permanent retry is a permanent stutter.
+	return qualityOK and shadowsOK and fpsOK
+end
+
+-- Undo everything the layers above changed. Part transparency is restored from
+-- LTM_STORE; the FPS cap has no readable original, so it goes back to Roblox's
+-- usual default of 60.
+local function renderOffRestore()
+	local saved = envTable(RENDER_SAVED)
+	if saved ~= nil then
+		pcall(function()
+			if saved.quality ~= nil then
+				settings().Rendering.QualityLevel = saved.quality
+			end
+			if saved.shadowTech ~= nil then
+				settings().Rendering.ShadowTechnology = saved.shadowTech
+			end
+		end)
+		pcall(function()
+			if saved.globalShadows ~= nil then
+				game:GetService("Lighting").GlobalShadows = saved.globalShadows
+			end
+		end)
+		if saved.fps and type(setfpscap) == "function" then
+			pcall(setfpscap, 60)
+		end
+		for k in pairs(saved) do saved[k] = nil end
+	end
+
+	local store = envTable(LTM_STORE)
+	if store ~= nil then
+		for part, prev in pairs(store) do
+			pcall(function()
+				if part.Parent ~= nil and part:IsA("BasePart") then
+					part.LocalTransparencyModifier = prev
+				end
+			end)
+			store[part] = nil
+		end
+	end
+
+	local lp = Players.LocalPlayer
+	local pg = lp and lp:FindFirstChildOfClass("PlayerGui")
+	local gui = pg and pg:FindFirstChild(RENDER_GUI)
+	if gui then gui:Destroy() end
+end
+
+-- There is no blocking call anywhere above this point, so renderOffEnable()
+-- reaches the two instant layers while the loading screen is still up: the
+-- settings (quality/shadows/FPS) and a hide-the-parts sweep over whatever has
+-- already streamed in. Only the cover has to wait for PlayerGui to replicate,
+-- so it is spawned and retried instead of holding up the hunter.
+local renderOffDone = false
+
+local function renderOffEnable()
+	if renderOffDone then
+		return CONFIG.DISABLE_3D == true
+	end
+	renderOffDone = true
+
+	if CONFIG.DISABLE_3D ~= true then
+		-- Also clean up after a previous run that HAD it on, so flipping the
+		-- key off really does put the world back.
+		local lp = Players.LocalPlayer
+		local pg = lp and lp:FindFirstChildOfClass("PlayerGui")
+		local store = envTable(LTM_STORE)
+		if (pg and pg:FindFirstChild(RENDER_GUI)) or (store and next(store) ~= nil) then
+			renderOffRestore()
+			log("3D rendering back on - world restored")
+		end
+		return false
+	end
+
+	local store = envTable(LTM_STORE)
+	local graphicsDone = renderOffGraphics()
+	local graphicsTries = 1
+	sweepHidden(workspace, store) -- yields nothing: hides everything already in the map
+
+	-- Streamed parts get hidden the moment they arrive, so the periodic pass
+	-- further down only has to repair the ones the game itself un-hides (the
+	-- local character's own parts, mainly).
+	local conn = nil
+	local function hookNewParts()
+		if conn or workspace == nil then return end
+		local ok, c = pcall(function()
+			return workspace.DescendantAdded:Connect(function(d)
+				if d:IsA("BasePart") then
+					pcall(hidePart, d, store)
+				end
+			end)
+		end)
+		if ok then conn = c end
+	end
+	hookNewParts()
+
+	task.spawn(function()
+		-- No panel wanted: drop one left over from a previous run and stop
+		-- here. The parts stay hidden either way - the screen is just left
+		-- readable, so Delta's own menu is no longer buried under a white
+		-- sheet.
+		if CONFIG.SHOW_COVER ~= true then
+			local lp = Players.LocalPlayer
+			local pg = lp and lp:FindFirstChildOfClass("PlayerGui")
+			local gui = pg and pg:FindFirstChild(RENDER_GUI)
+			if gui then pcall(function() gui:Destroy() end) end
+			return
+		end
+
+		-- 1) The cover. PlayerGui does not exist while the loading screen is
+		--    still up, so poll fast and drop the panel in the moment it does -
+		--    DURING the load, not after it. Bounded, and it never gives up on
+		--    the first miss the way the old one-shot version did.
+		--    Its own task on purpose: a late PlayerGui must never hold up the
+		--    sweeps in the task below.
+		local deadline = os.clock() + 90
+		while os.clock() < deadline and not stopped() do
+			local lp = Players.LocalPlayer
+			local pg = lp and lp:FindFirstChildOfClass("PlayerGui")
+			if pg then
+				local ok = pcall(function()
+					local old = pg:FindFirstChild(RENDER_GUI)
+					if old then old:Destroy() end
+
+					local gui = Instance.new("ScreenGui")
+					gui.Name           = RENDER_GUI
+					gui.ResetOnSpawn   = false
+					gui.IgnoreGuiInset = true
+					gui.DisplayOrder   = tonumber(CONFIG.RENDER_OFF_DISPLAY_ORDER) or 9999
+
+					local cover = Instance.new("Frame")
+					cover.Name             = "cover"
+					cover.AnchorPoint      = Vector2.new(0.5, 0.5)
+					cover.Position         = UDim2.fromScale(0.5, 0.5)
+					cover.Size             = UDim2.fromScale(2, 2) -- bleeds past any inset
+					cover.BackgroundColor3 = CONFIG.RENDER_OFF_COLOR or Color3.new(1, 1, 1)
+					cover.BorderSizePixel  = 0
+					cover.Active           = false -- taps fall through to the game
+					cover.Parent           = gui
+
+					gui.Parent = pg
+				end)
+				if ok then break end
+			end
+			task.wait(0.1)
+		end
+	end)
+
+	-- 2) Keep everything applied for as long as this server lives.
+	task.spawn(function()
+		local lastFullSweep = os.clock()
+		while not stopped() do
+			-- The three graphics writes are retried a handful of times right
+			-- after a landing (a run can beat Lighting / RenderSettings into
+			-- existence) and then left alone for good. Rewriting them rebuilds
+			-- Roblox's render state, so retrying them on every pass - which is
+			-- what the previous build did - was a hitch on every pass.
+			if not graphicsDone and graphicsTries < 10 then
+				graphicsTries = graphicsTries + 1
+				graphicsDone = renderOffGraphics()
+			end
+			hookNewParts()
+
+			task.wait(4)
+			if stopped() then break end
+
+			-- Roblox's own camera code resets LocalTransparencyModifier on the
+			-- LOCAL CHARACTER every few frames (the first-person fade), so that
+			-- is the only thing that genuinely needs repairing on a short timer
+			-- - and it is a handful of parts. Sweeping every tracked part here
+			-- instead is tens of thousands of property reads inside a single
+			-- frame, which is what the stutter every few seconds was.
+			local char = Players.LocalPlayer and Players.LocalPlayer.Character
+			sweepHidden(char, store)
+
+			local fullEvery = tonumber(CONFIG.RENDER_OFF_FULL_SWEEP) or 60
+			if fullEvery > 0 and os.clock() - lastFullSweep >= fullEvery then
+				lastFullSweep = os.clock()
+				rehideStored(store)
+			end
+		end
+		if conn then pcall(function() conn:Disconnect() end) end
+	end)
+
+	local fps = tonumber(CONFIG.RENDER_OFF_FPS) or 0
+	local covered = CONFIG.SHOW_COVER == true and ", screen covered" or ""
+	log(fps > 0
+		and ("3D rendering OFF - world hidden, FPS capped at %d"):format(fps) .. covered
+		or ("3D rendering OFF - world hidden" .. covered))
+	return true
+end
+
+local function main()
+	-- Kill the 3D view before anything else: every wait below is replication
+	-- (game:IsLoaded, WaitForChild, ReadFieldEggs), so hiding the world costs
+	-- the hunter exactly nothing.
+	renderOffEnable()
+
+	-- A load failure is routine right after a hop: this file reruns while the
+	-- DataModel is still coming up, so ReplicatedStorage is often not ready
+	-- yet. Wait it out and retry in place FIRST - spending a hop on a module
+	-- that simply had not replicated yet is what fed the teleport storm.
+	local assets, eggState = loadModules()
+	if not assets then
+		log("load failed: " .. tostring(eggState) .. " - retrying load in place")
+		task.wait(CONFIG.LOAD_RETRY_WAIT)
+		assets, eggState = loadModules()
+	end
+	if not assets then
+		log("still not loaded: " .. tostring(eggState) .. " - hopping to another server")
+		if hop() then
+			return
+		end
+		-- Neither loading nor hopping worked. Do not end the run: raise, and
+		-- the supervisor below waits and calls main() again.
+		error("load failed and could not hop")
+	end
+
+	log(("landed on server %s (%d/%d)"):format(game.JobId, #Players:GetPlayers(), CONFIG.SERVER_CAPACITY))
+	notify(("landed %d/%d players"):format(#Players:GetPlayers(), CONFIG.SERVER_CAPACITY))
+	rememberVisit(game.JobId)
+
+	local players = #Players:GetPlayers()
+	if players > CONFIG.MAX_POP_ON_LAND then
+		log(("landed in a %d/%d server - quick scanning before hopping (want up to %d)")
+			:format(players, CONFIG.SERVER_CAPACITY, CONFIG.MAX_POP_ON_LAND))
+		waitForEggs(eggState, CONFIG.QUICK_SCAN_SECS)
+		if tryReportAny(scan(assets, eggState)) then
+			log("target egg found on busy landing - reported, still hopping")
+		end
+		flushEggs(assets, eggState)
+		task.wait(CONFIG.REJECT_DELAY)
+		if hop() then
+			return
+		end
+		log("nowhere to go - staying here after all")
+	elseif players < CONFIG.MIN_POP_ON_LAND then
+		if players == 0 then
+			log("landed with 0 players - hopping")
+			task.wait(CONFIG.REJECT_DELAY)
+			if hop() then return end
+		end
+	elseif readLeft() == game.JobId then
+		log("rejecting landing: the server we just left")
+		task.wait(CONFIG.REJECT_DELAY)
+		if hop() then
+			return
+		end
+		log("nowhere to go - staying here after all")
+	end
+
+	if not waitForEggs(eggState, CONFIG.LOAD_TIMEOUT) then
+		log("egg data did not populate in time - scanning anyway")
+	end
+
+	-- Report anything already sitting here first, and wait for the post to
+	-- actually go through (webhook cooldown included), so the ping hop below
+	-- never skips eggs on this server.
+	flushEggs(assets, eggState)
+
+	-- Halloween Dimension: purely additive reporting. Its eggs are (almost)
+	-- always up, so the result is ignored and never gates a hop - and nothing
+	-- about the boss scan is run because of it.
+	tryReportHalloween(#Players:GetPlayers())
+	log(halloweenCensusText())
+
+	-- Ping gate: eggs (if any) are already reported above, so a laggy server
+	-- can be skipped without losing anything. One GetNetworkPing read, so it
+	-- costs nothing measurable.
+	if CONFIG.MAX_PING_MS and CONFIG.MAX_PING_MS > 0 then
+		local ping = avgPingMs()
+		if ping and ping > CONFIG.MAX_PING_MS then
+			log(("high ping %.0fms (want <=%dms) - hopping"):format(ping, CONFIG.MAX_PING_MS))
+			if hop() then
+				return
+			end
+		elseif ping then
+			log(("ping %.0fms - good, staying"):format(ping))
+		end
+	end
+
+	local started       = os.clock()
+	local lastSummary   = os.clock()
+	local lastRepeatLog = 0
+	local lastBossScan  = 0
+	local lobbyStuckAt  = 0
+
+	while true do
+		if stopped() then
+			log("stopped by EGG_GRABBER_STOP flag")
+			return
+		end
+
+		if not game:IsLoaded() then
+			-- Client is not in a game (279 / disconnect / error screen). Do NOT
+			-- teleport from here - doing so forces the client to relaunch which
+			-- takes the other clones down with it. Wait for the reconnect
+			-- (Play button / Termux / AutoExec once loaded) instead.
+			if lobbyStuckAt == 0 then
+				lobbyStuckAt = os.clock()
+			end
+			if os.clock() - lobbyStuckAt >= 30 then
+				log("client not loaded 30s+ - waiting for reconnect, not teleporting")
+			else
+				log("lost the server / stuck on loading - waiting for reconnect")
+			end
+			task.wait(2)
+		else
+			lobbyStuckAt = 0
+		end
+
+		local hits    = scan(assets, eggState)
+		local players = #Players:GetPlayers()
+
+		-- Opportunistic post of anything fresh the moment it is seen; the
+		-- branches below only hop once it has actually gone through.
+		tryReportFreshOnly(hits)
+
+		-- Halloween Dimension eggs: additive reporting only - never a hop or
+		-- hold reason, since they are (almost) always present on every server.
+		tryReportHalloween(players)
+
+		-- Dr. Scramble boss detection (DISABLED)
+		--[[
+		if not bossAlerted[game.JobId] and os.clock() - lastBossScan >= BOSS_SCAN_INTERVAL then
+			lastBossScan = os.clock()
+			local active, evidence = scanBossActive()
+			if active then
+				log("Dr. Scramble active (" .. tostring(evidence) .. ") - sending alert")
+				if postBossAlert(players, evidence) then
+					bossAlerted[game.JobId] = true
+				end
+			end
+		end
+		]]--
+
+		if #hits > 0 then
+			local posted = readPosted()
+			local fresh  = {}
+			for _, hit in ipairs(hits) do
+				if not posted[postedKey(hit.record)] then
+					fresh[#fresh + 1] = hit
+				end
+			end
+
+			if #fresh == 0 then
+				if hoppingPaused() then
+					log("holding for spawn wave")
+				else
+					log(("all %d target egg(s) visible already reported (%d/%d) - hopping to search for fresh")
+						:format(#hits, players, CONFIG.SERVER_CAPACITY))
+					if hop() then
+						return
+					end
+				end
+			else
+				log(("FOUND %d target egg(s) (%d already reported), %d/%d players - posting")
+					:format(#fresh, #hits - #fresh, players, CONFIG.SERVER_CAPACITY))
+				notify(("found %d target egg(s)"):format(#fresh))
+
+				local sent = post(fresh, players)
+				for _, hit in ipairs(sent) do
+					rememberPosted(hit.record)
+				end
+
+				if #sent >= #fresh then
+					if CONFIG.DWELL > 0 then
+						log(("holding %ss so the join link stays alive"):format(CONFIG.DWELL))
+						task.wait(CONFIG.DWELL)
+					end
+
+					log("target egg reported - hopping on to keep hunting")
+					notify("egg posted - hopping")
+					if hoppingPaused() then
+						log("target egg reported - holding for spawn wave")
+					else
+					if hop() then
+						return
+					end
+					end
+					log("nowhere to go - staying here after all")
+				elseif #sent > 0 then
+					log(("posted %d of %d egg(s) - staying to retry the rest")
+						:format(#sent, #fresh))
+				else
+					log("post did not go through - staying to retry")
+				end
+			end
+		else
+			if os.clock() - lastSummary >= 30 then
+				lastSummary = os.clock()
+				log(("watching (%ds)   %s   %s")
+					:format(math.floor(os.clock() - started), censusText(assets, eggState), halloweenCensusText()))
+			end
+
+			if hoppingPaused() then
+				log("holding for spawn wave")
+			else
+				log("no target eggs on this server - hopping to search elsewhere")
+				if hop() then
+					return
+				end
+			end
+			started = os.clock()
+			lastSummary = os.clock()
+			lastRepeatLog = 0
+		end
+
+		task.wait(CONFIG.POLL)
+	end
+end
+
+-- -------------------------------------------------------------------- start
+
+-- Only run in the target experience. This makes the script safe to keep in
+-- AutoExec: in every other game it just exits.
+if tostring(game.PlaceId) ~= tostring(CONFIG.PLACE_ID) then
+	print("[egg-grabber] wrong place (" .. tostring(game.PlaceId) .. ") - not starting")
+	notifyForce("wrong game - join Steal An Egg first")
+	return
+end
+
+-- One instance per executor environment.
+local g = genv()
+if g ~= nil and g.EGG_GRABBER_RUNNING then
+	print("[egg-grabber] duplicate start ignored - already running")
+	notifyForce("already running - reset flags to restart")
+	return
+end
+
+-- Persistent kill switch (getgenv is wiped on every teleport).
+local okS, stopFile = pcall(readfile, STOP_FILE)
+if okS and type(stopFile) == "string" and stopFile:match("%s*1") then
+	print("[egg-grabber] kill switch set (egg-grabber-delta-stop.txt) - not starting")
+	notifyForce("kill switch set - clear stop file")
+	return
+end
+
+if g ~= nil then
+	g.EGG_GRABBER_RUNNING = true
+end
+
+-- Report up front how this run will restart after a hop, so a silent stop is
+-- never a mystery.
 do
-    local me = Players.LocalPlayer and Players.LocalPlayer.Name or ""
-    if #ACCOUNTS > 0 then
-        slotCount = #ACCOUNTS
-        local found = false
-        for i, n in ipairs(ACCOUNTS) do
-            if tostring(n):lower() == me:lower() then mySlot = i found = true end
-        end
-        if not found then
-            warn("[EGG KG] '" .. me .. "' is not in ACCOUNTS, it will share slot 1 and may collide")
-        end
-    end
-    if slotCount > 1 then
-        -- separate files per account so they don't overwrite each other
-        VISITED_FILE = "egg_hop_visited_" .. mySlot .. ".json"
-        POOL_FILE    = "egg_hop_pool_" .. mySlot .. ".json"
-        print("[EGG KG] multi-account: slot " .. mySlot .. " of " .. slotCount)
-    end
+	local qfn = queue_on_teleport or queueonteleport
+	local saved = false
+	if type(isfile) == "function" then
+		local okF, present = pcall(isfile, SELF)
+		saved = okF and present == true
+	end
+	log(("restart check: queue=%s loadfile=%s readfile=%s saved=%s")
+		:format(
+			type(qfn) == "function" and "yes" or "NO",
+			type(loadfile) == "function" and "yes" or "NO",
+			type(readfile) == "function" and "yes" or "NO",
+			saved and "yes" or "NO"))
+	if not saved and scriptUrl() == "" then
+		log("WARNING: '" .. SELF .. "' is not saved in Delta's workspace and no script URL is set, so a hop cannot reload the script. Set SCRIPT_URL, save the file there, or use AutoExec.")
+	end
 end
 
-local function mySlice(id)
-    if slotCount <= 1 then return true end
-    local h = 0
-    for i = 1, #id do h = (h * 31 + id:byte(i)) % 1000003 end
-    return h % slotCount == mySlot - 1
-end
+-- Anti-AFK: REMOVED on purpose. Steal An Egg's BAC anti-cheat kicks for
+-- VirtualUser input (that was the trigger for BAC-5516 / BAC-8518). Delta has
+-- its own built-in anti-AFK - turn that on in the Delta menu instead of using
+-- this script.
 
--- ---- visited servers (so we don't go back) ----
-local function loadVisited()
-    local t = {}
-    pcall(function()
-        if type(isfile) == "function" and type(readfile) == "function" and isfile(VISITED_FILE) then
-            local data = HttpService:JSONDecode(readfile(VISITED_FILE))
-            local now = os.time()
-            for id, ts in pairs(data) do
-                if type(ts) == "number" and now - ts < VISITED_TTL then t[id] = ts end
-            end
-        end
-    end)
-    return t
-end
-
-local visited = loadVisited()
-
-local function saveVisited()
-    if type(writefile) == "function" then
-        pcall(writefile, VISITED_FILE, HttpService:JSONEncode(visited))
-    end
-end
-
-if game.JobId ~= "" then
-    visited[game.JobId] = os.time()
-    saveVisited()
-end
-
--- ---- server list (emptiest first), saved to a file so each new server can reuse it ----
-local pool      = {}          -- server ids, fewest players first
-local poolStamp = os.time()   -- when this list was fetched from Roblox
-local rateWait  = 5           -- backoff after a rate limit, doubles each time
-
-local function savePool()
-    if type(writefile) == "function" then
-        pcall(writefile, POOL_FILE, HttpService:JSONEncode({ t = poolStamp, ids = pool }))
-    end
-end
-
-local function loadPool()
-    pcall(function()
-        if type(isfile) == "function" and type(readfile) == "function" and isfile(POOL_FILE) then
-            local d = HttpService:JSONDecode(readfile(POOL_FILE))
-            if type(d) == "table" and os.time() - (tonumber(d.t) or 0) < POOL_TTL then
-                poolStamp = tonumber(d.t) or os.time()
-                for _, id in ipairs(d.ids or {}) do
-                    if not visited[id] and id ~= game.JobId and mySlice(id) then
-                        pool[#pool + 1] = id
-                    end
-                end
-            end
-        end
-    end)
-end
-
-local function fetchServers(cursor)
-    if not httpRequest then return nil end
-    local url = string.format(
-        "https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&excludeFullGames=true&limit=100",
-        game.PlaceId)
-    if cursor then url = url .. "&cursor=" .. cursor end
-
-    local ok, res = pcall(httpRequest, { Url = url, Method = "GET" })
-    if ok and type(res) == "table" and tonumber(res.StatusCode) == 200 then
-        local ok2, data = pcall(function() return HttpService:JSONDecode(res.Body) end)
-        if ok2 and type(data) == "table" then return data end
-    end
-    return nil, (ok and type(res) == "table") and res.StatusCode or nil
-end
-
-local function refillPool()
-    local cursor
-    for _ = 1, SERVER_PAGES do
-        local data, status = fetchServers(cursor)
-        if not data then
-            if tonumber(status) == 429 then
-                rateWait = math.min(rateWait * 2, 120)
-                warn("[EGG KG] server list rate limited, waiting " .. rateWait .. "s")
-                task.wait(rateWait)
-            end
-            break
-        end
-
-        rateWait = 5
-        poolStamp = os.time()
-
-        local found = {}
-        for _, s in ipairs(data.data or {}) do
-            local playing, maxP = tonumber(s.playing), tonumber(s.maxPlayers)
-            if s.id ~= game.JobId and not visited[s.id] and playing and maxP
-                and playing >= MIN_PLAYERS and playing <= MAX_PLAYERS and playing < maxP - 1
-                and mySlice(s.id) then
-                found[#found + 1] = { id = s.id, n = playing }
-            end
-        end
-        table.sort(found, function(x, y) return x.n < y.n end)   -- fewest players first
-        for _, f in ipairs(found) do pool[#pool + 1] = f.id end
-
-        cursor = data.nextPageCursor
-        if not cursor then break end
-    end
-    savePool()
-end
-
-loadPool()
-
--- ---- teleport + hop loop ----
-local teleporting, floodUntil = false, 0
-
--- back off after EVERY failed teleport (error 769 included), and back off longer
--- the more failures happen in a row. A successful teleport ends this script and the next
--- server starts at 0, so there is no need to reset it.
-local failStreak = 0
-
-TeleportService.TeleportInitFailed:Connect(function(_, result, msg)
-    teleporting = false
-    failStreak = failStreak + 1
-    local backoff = math.min(5 * failStreak, 30)          -- 5s, 10s, 15s ... max 30s
-    if result == Enum.TeleportResult.Flooded then
-        backoff = math.max(backoff, 15)
-    end
-    floodUntil = os.clock() + backoff
-    pcall(Scramble.teleportFailed)   -- still in this server: resume the Scramble message edits
-    warn("[EGG KG] teleport failed (" .. tostring(result) .. ", streak " .. failStreak
-        .. "), waiting " .. backoff .. "s. " .. tostring(msg))
-end)
-
-local hopping = false
-
-local function hopLoop()
-    hopping = true
-    warn("[EGG KG] hunt window active (" .. table.concat(HOP_FOR, ", ") .. "), hopping every ~" .. HOP_DELAY .. "s")
-
-    -- wait for the first scan so we know what's in this server
-    local t0 = os.clock()
-    while not firstScanDone and os.clock() - t0 < 40 do task.wait(0.2) end
-
-    -- wait for the Halloween check ("Found none" / egg message) to be sent
-    t0 = os.clock()
-    while not Halloween.ready and os.clock() - t0 < 15 do task.wait(0.2) end
-
-    -- then let any webhook go out
-    t0 = os.clock()
-    while (#queue > 0 or sendBusy or Halloween.busy) and os.clock() - t0 < 20 do task.wait(0.2) end
-
-    while HOP_ENABLED and not stopped() and huntActive() do
-        -- random jitter so the accounts don't all hit Roblox at the same moment
-        task.wait(HOP_DELAY + math.random() * HOP_JITTER)
-        if not huntActive() then break end
-
-        if os.clock() < floodUntil then task.wait(floodUntil - os.clock()) end
-        if not huntActive() then break end
-        if #pool == 0 then refillPool() end
-
-        if #pool > 0 then
-            -- first attempt: emptiest server. After any failed hop: random server from the pool
-            local idx = 1
-            if failStreak > 0 then
-                idx = math.random(#pool)
-                print("[EGG KG] previous hop failed, picking a random server")
-            end
-            local id = table.remove(pool, idx)
-            visited[id] = os.time()
-            saveVisited()
-            savePool()
-            visited[id] = os.time()
-            saveVisited()
-            savePool()
-
-            -- Scramble message: set it to "Not in server anymore" BEFORE we leave
-            pcall(Scramble.beforeLeave)
-
-            teleporting = true
-            local tp0 = os.clock()
-            local ok, err = pcall(function()
-                TeleportService:TeleportToPlaceInstance(game.PlaceId, id, Players.LocalPlayer)
-            end)
-            if not ok then
-                teleporting = false
-                failStreak = failStreak + 1          -- count errors thrown directly by the call too
-                floodUntil = os.clock() + math.min(5 * failStreak, 30)
-                pcall(Scramble.teleportFailed)
-                warn("[EGG KG] teleport error: " .. tostring(err))
-            end
-            -- a successful teleport ends this script; wait for a failure or a timeout
-            while teleporting and os.clock() - tp0 < TELEPORT_WAIT do task.wait(0.2) end
-            if teleporting then
-                -- timed out without success or failure: treat it as a failure too
-                failStreak = failStreak + 1
-                floodUntil = os.clock() + math.min(5 * failStreak, 30)
-                pcall(Scramble.teleportFailed)
-            end
-            teleporting = false
-        else
-            warn("[EGG KG] no servers available, retrying")
-        end
-    end
-
-    hopping = false
-    warn("[EGG KG] hopping stopped (window ended or stopped by you), waiting for the next egg")
-end
-
--- MANUAL TELEPORT (test button): one hop, same server pool and same safety steps as the hop loop
-manualTeleport = function()
-    if teleporting then error("a teleport is already in progress") end
-    if #pool == 0 then refillPool() end
-    if #pool == 0 then error("no servers available") end
-
-    local id = table.remove(pool, 1)
-    visited[id] = os.time()
-    saveVisited()
-    savePool()
-
-    pcall(Scramble.beforeLeave)
-
-    warn("[EGG KG] manual teleport to " .. tostring(id))
-    teleporting = true
-    local tp0 = os.clock()
-    local ok, err = pcall(function()
-        TeleportService:TeleportToPlaceInstance(game.PlaceId, id, Players.LocalPlayer)
-    end)
-    if not ok then
-        teleporting = false
-        pcall(Scramble.teleportFailed)
-        error(err)
-    end
-    while teleporting and os.clock() - tp0 < TELEPORT_WAIT do task.wait(0.2) end
-    if teleporting then
-        teleporting = false
-        pcall(Scramble.teleportFailed)
-        error("teleport timed out")
-    end
-end
-
--- starts hopping only while a hunt window is active (after a selected egg was found)
+-- Supervisor: main() must never be allowed to end the run. The only way it
+-- returns is via the stop switch or a successful hop (which reloads this file
+-- on the new server); any other exit - an error, or a load failure with
+-- nowhere to hop - means the hunt would sit dead until someone noticed.
+-- So wrap it: if it comes back without being stopped and without having
+-- hopped, wait and run it again. Nothing is lost by retrying: main()
+-- re-reads the world on entry and the instance lock is only released on a
+-- clean stop.
 task.spawn(function()
-    while true do
-        if HOP_ENABLED and not hopping and not stopped() and huntActive() then
-            task.spawn(hopLoop)
-        end
-        task.wait(1)
-    end
+	while true do
+		local ok, err = pcall(main)
+		if stopped() then
+			break
+		end
+		if not ok then
+			log("main() error: " .. tostring(err) .. " - restarting in " .. CONFIG.MAIN_RESTART_WAIT .. "s")
+		else
+			log("main() returned without hopping - restarting in " .. CONFIG.MAIN_RESTART_WAIT .. "s")
+		end
+		local t0 = os.clock()
+		while os.clock() - t0 < CONFIG.MAIN_RESTART_WAIT do
+			if stopped() then break end
+			task.wait(0.5)
+		end
+		if stopped() then break end
+	end
+
+	-- Only reached on a real stop: clear the in-memory flag so a fresh
+	-- execute can start again.
+	local g2 = genv()
+	if g2 ~= nil then
+		g2.EGG_GRABBER_RUNNING = false
+	end
 end)
-
-local function applyBrockTreadmillAFK()
-    local ReplicatedStorage = RS
-    local Workspace = game:GetService("Workspace")
-    local localPlayer = Players.LocalPlayer
-    local enabled = true
-
-    local BROCK_ID = "BrockTreadmill"
-    local BROCK_MULT = 1000000000
-    local TITAN_COLOR = Color3.fromRGB(255, 64, 64)
-
-    local function unfreeze(tbl)
-        if type(tbl) ~= "table" then return tbl end
-        if setreadonly then pcall(setreadonly, tbl, false) end
-        if make_writeable then pcall(make_writeable, tbl) end
-        return tbl
-    end
-
-    local function safeHook(tbl, key, newFunc)
-        if type(tbl) ~= "table" then return false end
-        unfreeze(tbl)
-        local ok = pcall(function() tbl[key] = newFunc end)
-        if not ok and hookfunction and type(tbl[key]) == "function" then
-            local hOk = pcall(function() return hookfunction(tbl[key], newFunc) end)
-            if hOk then return true end
-        end
-        return ok
-    end
-
-    pcall(function()
-        local CmdrClient = require(ReplicatedStorage:WaitForChild("CmdrClient"))
-        if CmdrClient and CmdrClient.Dispatcher and CmdrClient.Dispatcher.EvaluateAndRun then
-            CmdrClient.Dispatcher:EvaluateAndRun("useBrockTreadmill " .. localPlayer.Name .. " " .. tostring(enabled))
-        end
-    end)
-
-    pcall(function()
-        localPlayer:SetAttribute("TreadmillOverride", enabled and BROCK_ID or nil)
-    end)
-
-    pcall(function()
-        local treadmillsMod = require(ReplicatedStorage.Data.Treadmills)
-        unfreeze(treadmillsMod)
-        unfreeze(treadmillsMod.Directory)
-
-        local brockConfig = (treadmillsMod.SessionOnly and treadmillsMod.SessionOnly.BrockTreadmill) or {
-            _id = BROCK_ID,
-            DisplayName = "Brock Treadmill",
-            SpeedMultiplier = BROCK_MULT,
-            Price = 0,
-            Icon = "",
-            DisplayInShop = false,
-            Rarity = {
-                _id = "Titan",
-                DisplayName = "Titan",
-                Color = TITAN_COLOR,
-                Rank = 11
-            }
-        }
-
-        pcall(function() treadmillsMod.Directory[BROCK_ID] = brockConfig end)
-
-        if enabled then
-            if not getgenv()._OldTreadmillResolve then
-                getgenv()._OldTreadmillResolve = treadmillsMod.ResolveForPlayer
-                getgenv()._OldTreadmillGetUpgrade = treadmillsMod.GetByUpgradeLevel
-                getgenv()._OldTreadmillGetById = treadmillsMod.GetById
-            end
-
-            safeHook(treadmillsMod, "ResolveForPlayer", function(p)
-                if p == localPlayer then return brockConfig end
-                if getgenv()._OldTreadmillResolve then return getgenv()._OldTreadmillResolve(p) end
-                return brockConfig
-            end)
-            safeHook(treadmillsMod, "GetByUpgradeLevel", function(...) return brockConfig end)
-            safeHook(treadmillsMod, "GetById", function(id)
-                if id == BROCK_ID then return brockConfig end
-                if getgenv()._OldTreadmillGetById then return getgenv()._OldTreadmillGetById(id) end
-                return brockConfig
-            end)
-        else
-            if getgenv()._OldTreadmillResolve then
-                safeHook(treadmillsMod, "ResolveForPlayer", getgenv()._OldTreadmillResolve)
-                safeHook(treadmillsMod, "GetByUpgradeLevel", getgenv()._OldTreadmillGetUpgrade)
-                safeHook(treadmillsMod, "GetById", getgenv()._OldTreadmillGetById)
-            end
-        end
-    end)
-
-    pcall(function()
-        local TreadmillUtil = require(ReplicatedStorage.Shared.Util.TreadmillUtil)
-        unfreeze(TreadmillUtil)
-        if enabled then
-            if not getgenv()._OldResolveSpeedPerStep then
-                getgenv()._OldResolveSpeedPerStep = TreadmillUtil.ResolveSpeedPowerPerStep
-            end
-            safeHook(TreadmillUtil, "ResolveSpeedPowerPerStep", function(saveData, mult, ...)
-                if getgenv()._OldResolveSpeedPerStep then
-                    return getgenv()._OldResolveSpeedPerStep(saveData, BROCK_MULT, ...)
-                end
-                return BROCK_MULT
-            end)
-        elseif getgenv()._OldResolveSpeedPerStep then
-            safeHook(TreadmillUtil, "ResolveSpeedPowerPerStep", getgenv()._OldResolveSpeedPerStep)
-        end
-    end)
-
-    pcall(function()
-        local PlotState = require(ReplicatedStorage.Client.PlotState)
-        local localSlot = PlotState.ResolveLocalSlot()
-        local rendersFolder = Workspace:FindFirstChild("__ClientTreadmillRenders")
-
-        if rendersFolder then
-            for _, h in ipairs(rendersFolder:GetDescendants()) do
-                if h:IsA("Highlight") then h:Destroy() end
-            end
-
-            local existingRenders = rendersFolder:GetChildren()
-            local targetRender = (localSlot and rendersFolder:FindFirstChild("TreadmillRender_" .. localSlot)) or existingRenders[1]
-            for _, child in ipairs(existingRenders) do
-                if child ~= targetRender then child:Destroy() end
-            end
-
-            if targetRender then
-                for _, desc in ipairs(targetRender:GetDescendants()) do
-                    if desc:IsA("Model") and (desc.Name == "Guardian" or desc.Name:find("Guardian")) then
-                        desc:Destroy()
-                    elseif desc:IsA("BillboardGui") or desc:IsA("SurfaceGui") then
-                        desc:Destroy()
-                    elseif desc:IsA("ParticleEmitter") or desc:IsA("Beam") or desc:IsA("Trail") then
-                        desc.Enabled = false
-                    elseif desc:IsA("BasePart") and desc.Name ~= "TreadmillBottom" and desc.Name ~= "Root" then
-                        desc.Transparency = 1
-                        desc.CanCollide = false
-                    end
-                end
-
-                local Render_m = require(ReplicatedStorage.Controllers.Game.Plots.TreadmillStaticController.Render)
-                local fakeSave = { TreadmillUpgradeLevel = 12, BaseUpgradeLevel = 1 }
-                local ok, res = pcall(function()
-                    return Render_m.Build(localSlot or 1, localPlayer.UserId, fakeSave, 1, true, rendersFolder)
-                end)
-                local builtModel = ok and res and res.Model or nil
-                if builtModel then
-                    builtModel:SetAttribute("IsBrockRender", true)
-                    for _, h in ipairs(builtModel:GetDescendants()) do
-                        if h:IsA("Highlight") then h:Destroy() end
-                    end
-                    for _, desc in ipairs(builtModel:GetDescendants()) do
-                        if desc:IsA("Model") and (desc.Name == "Guardian" or desc.Name:find("Guardian")) then
-                            desc:Destroy()
-                        elseif desc:IsA("BasePart") and desc.Name ~= "TreadmillBottom" and desc.Name ~= "Root" then
-                            desc.CanCollide = false
-                        elseif desc:IsA("TextLabel") then
-                            if desc.Text:find("x") or desc.Name == "Multiplier" or desc.Name == "Value" then
-                                desc.Text = "x1,000,000,000"
-                                desc.TextColor3 = TITAN_COLOR
-                            elseif desc.Text:find("%+") or desc.Name == "Rate" then
-                                desc.Text = "+1,000,000,000/step"
-                                desc.TextColor3 = TITAN_COLOR
-                            elseif desc.Name == "Title" or desc.Name == "Name" or desc.Text:find("Treadmill") then
-                                desc.Text = "Brock Treadmill"
-                                desc.TextColor3 = TITAN_COLOR
-                            end
-                        end
-                    end
-                end
-            end
-        end
-
-        local plots = Workspace:FindFirstChild("Plots") or (Workspace:FindFirstChild("World") and Workspace.World:FindFirstChild("Plots"))
-        if plots and localSlot then
-            local plot = plots:FindFirstChild(tostring(localSlot))
-            if plot and plot:FindFirstChild("TreadmillUpgrade") then
-                for _, desc in ipairs(plot.TreadmillUpgrade:GetDescendants()) do
-                    if desc:IsA("TextLabel") then
-                        if desc.Name == "Info" then
-                            desc.Text = "Brock Treadmill"
-                            desc.TextColor3 = TITAN_COLOR
-                        elseif desc.Name == "Level" then
-                            desc.Text = "TITAN (x1B Active)"
-                            desc.TextColor3 = TITAN_COLOR
-                        end
-                    end
-                end
-            end
-        end
-    end)
-
-    pcall(function()
-        local Remotes = require(ReplicatedStorage.Shared.Remotes)
-        if Remotes.Treadmill and Remotes.Treadmill.AskWearStill then
-            Remotes.Treadmill.AskWearStill:InvokeServer()
-        end
-    end)
-
-    pcall(function()
-        if enabled and localPlayer.Character and localPlayer.Character:FindFirstChild("Humanoid") then
-            local hum = localPlayer.Character.Humanoid
-            hum.WalkSpeed = math.max(hum.WalkSpeed, 100)
-        end
-    end)
-
-    print("[EGG KG] Brock Treadmill AFK routine applied")
-end
-
-local brockAFKApplied = false
-
--- ============================================================
--- SCANNER
--- ============================================================
-
-if type(EggState) ~= "table" or type(EggState.ReadFieldEggs) ~= "function" then
-    warn("[EGG KG] EggState.ReadFieldEggs not found, cannot scan. Script stopped.")
-    return
-end
-
-local seen = {}
-local firstScan = true
-
-local function scan()
-    local ok, data = pcall(EggState.ReadFieldEggs)
-    if not (ok and type(data) == "table") then return end
-    local raw = data.Records or data
-    if type(raw) ~= "table" then return end
-
-    local now = os.clock()
-    local selectedCount = 0
-
-    for key, r in pairs(raw) do
-        if type(r) == "table" then
-            local uid = tostring(r.Uid or (type(key) == "string" and key) or "")
-            local info = resolve(r)
-
-            if info and uid ~= "" then
-                if RARE[info.tier] then
-                    selectedCount = selectedCount + 1
-                end
-
-                local isNew = seen[uid] == nil
-                seen[uid] = now
-
-                if isNew and (ALERT_ON_START or not firstScan) then
-                    local kg = eggKg(r)
-                    if (not kg) or kg >= (info.minKg or 0) then
-                        -- a selected egg starts the window (if one isn't already running)
-                        if RARE[info.tier] then
-                            markSelectedSpawn()
-                        end
-                        if DEBUG_DUMP then
-                            print("[EGG KG] RECORD DUMP for " .. info.display)
-                            dumpTable(r)
-                        end
-                        queue[#queue + 1] = { info = info, kg = kg, location = areaName(r.AreaId), mutation = eggMutation(r) }
-                        print(string.format("[EGG KG] %s (%s) | %s | %s",
-                            info.display, info.tier, formatKg(kg), areaName(r.AreaId)))
-                    end
-                end
-            end
-        end
-    end
-
-    targetCount = selectedCount
-    firstScan = false
-    firstScanDone = true
-
-    for uid, t in pairs(seen) do
-        if now - t > FORGET_SECONDS then seen[uid] = nil end
-    end
-end
-
-print("[EGG KG] running. Hopping " .. (HOP_ENABLED and "ON" or "OFF")
-    .. " for: " .. table.concat(HOP_FOR, ", ")
-    .. ". Custom entries: " .. #CUSTOM_EGGS
-    .. ". Cloudflare: OFF")
-
--- runs forever: scan, and close the window when its time is up
-while true do
-    local ok, err = pcall(scan)
-    if not ok then warn("[EGG KG] scan error: " .. tostring(err)) end
-    checkHuntExpiry()
-
-    -- Apply the Brock Treadmill routine once while idle, before a rare-egg
-    -- hunt starts. It does not block the scanner or server-hop loop.
-    if not brockAFKApplied and not huntActive() and not hopping and not stopped() then
-        brockAFKApplied = true
-        task.spawn(function()
-            local okBrock, errBrock = pcall(applyBrockTreadmillAFK)
-            if not okBrock then
-                warn("[EGG KG] Brock Treadmill AFK routine failed: " .. tostring(errBrock))
-            end
-        end)
-    end
-
-    task.wait(SCAN_INTERVAL)
-end
-print("Training")
