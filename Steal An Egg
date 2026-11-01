@@ -249,19 +249,19 @@ local RARE_EGGS = {
     ["phoenix"]              = { tier = "Eternal", value = "85M/s",  image = "https://stealanegg.tools/images/Phoenix.png",        role = "1558521741762896013" },
 
     -- ===== SECRET =====
-    ["king snake"]      = { tier = "Secret", value = "3.5M/s",  image = "https://stealanegg.tools/images/King_Snake.png", role = "1558521606333014017" },
-    ["yeti"]            = { tier = "Secret", value = "5M/s",   image = "https://stealanegg.tools/images/Yeti.png",      role = "1558521675308335205" },
+    ["king snake"]      = { tier = "Secret", value = "3.5M/s",  image = "https://stealanegg.tools/images/King_Snake_Pet.png", role = "1558521606333014017" },
+    ["yeti"]            = { tier = "Secret", value = "5M/s",   image = "https://stealanegg.tools/images/Yeti_Pet.png",      role = "1558521675308335205" },
     ["cerberus"]        = { tier = "Secret", value = "8M/s",   image = "https://stealanegg.tools/images/Cerberus.png",  role = "1558521813615775744" },
     ["kraken"]          = { tier = "Secret", value = "15M/s",
                             image = "https://stealanegg.tools/images/Kraken.png",
                             role = "1558521877805273099" },
     ["trex"]            = { tier = "Secret", value = "25M/s",  image = "https://stealanegg.tools/images/TRex_Pet.png",      role = "1558521942410006608" },
-    ["tralaledon"]      = { tier = "Secret", value = "32M/s",  image = "https://stealanegg.tools/images/Tralaledon.png",     role = "1558521991156465714" },
+    ["tralaledon"]      = { tier = "Secret", value = "32M/s",  image = "https://stealanegg.tools/images/Tralaledon_Pet.png",     role = "1558521991156465714" },
     ["cosmic skeleton"] = { tier = "Secret", value = "45M/s",
                             image = "https://stealanegg.tools/images/Cosmic_Skeleton_Boss_Pet.png",
                             role = "1558522089911230556" },
-    ["cosmic dragon"]   = { tier = "Secret", value = "60M/s",  image = "https://stealanegg.tools/images/Cosmic_Dragon.png" },
-    ["stag"]            = { tier = "Secret", value = "145M/s", image = "https://stealanegg.tools/images/Stag.png", role = "1558522247734366228" },
+    ["cosmic dragon"]   = { tier = "Secret", value = "60M/s",  image = "https://stealanegg.tools/images/Cosmic_Dragon_Pet.png" },
+    ["stag"]            = { tier = "Secret", value = "145M/s", image = "https://stealanegg.tools/images/Stag_Pet.png", role = "1558522247734366228" },
     ["mutant shark"]    = { tier = "Secret", value = "215M/s",
                             image = "https://stealanegg.tools/images/Mutant_Shark.png",
                             role = "1558522369947992185" },
@@ -281,7 +281,7 @@ local RARE_EGGS = {
 
     ["gorillastein"]     = { tier = "Eternal", value = "3.5B/s", image = "https://stealanegg.tools/images/Abomination_Kong_Pet.png",
                              siteName = "Abomination Kong" },
-    ["shelltide voyager"] = { tier = "Eternal", value = "1.6B/s" },
+    ["shelltide voyager"] = { tier = "Eternal", value = "1.6B/s", image = "https://stealanegg.tools/images/Shelltide_Voyager_Pet.png" },
     ["ghost reaper"]     = { tier = "Eternal", value = "300M/s", image = "https://stealanegg.tools/images/Ghost_Reaper_Pet.png" },
 
     ["werewolf"]         = { tier = "Secret",  value = "1.3B/s", image = "https://stealanegg.tools/images/Werewolf_Pet.png" },
@@ -289,23 +289,22 @@ local RARE_EGGS = {
     ["graveyard brute"]  = { tier = "Secret",  value = "75M/s",  image = "https://stealanegg.tools/images/Graveyard_Brute_Pet.png" },
 
     -- ===== HALLOWEEN PETS (Halloween Egg + Zombified re-roll) =====
-    -- No images on purpose: these send as a plain notification.
     -- Divine
-    ["bone emperor"]            = { tier = "Divine",  value = "7.5B/s" },
-    ["zombified bone emperor"]  = { tier = "Divine",  value = "14B/s" },
+    ["bone emperor"]            = { tier = "Divine",  value = "7.5B/s", image = "https://stealanegg.tools/images/Bone_Emperor_Pet.png" },
+    ["zombified bone emperor"]  = { tier = "Divine",  value = "14B/s",  image = "https://stealanegg.tools/images/Zombified_Bone_Emperor_Pet.png" },
 
     -- Eternal
-    ["phantom dragon"]            = { tier = "Eternal", value = "1.5B/s" },
-    ["zombified phantom dragon"]  = { tier = "Eternal", value = "6B/s" },
-    ["zombified grave cerberus"]  = { tier = "Eternal", value = "4B/s" },
-    ["soul phantom"]              = { tier = "Eternal" },   -- rate not in game data yet
+    ["phantom dragon"]            = { tier = "Eternal", value = "1.5B/s", image = "https://stealanegg.tools/images/Phantom_Dragon_Pet.png" },
+    ["zombified phantom dragon"]  = { tier = "Eternal", value = "6B/s",   image = "https://stealanegg.tools/images/Zombified_Phantom_Dragon_Pet.png" },
+    ["zombified grave cerberus"]  = { tier = "Eternal", value = "4B/s",   image = "https://stealanegg.tools/images/Zombified_Grave_Cerberus_Pet.png" },
+    ["soul phantom"]              = { tier = "Eternal", image = "https://stealanegg.tools/images/Soul_Phantom_Pet.png" },   -- rate not in game data yet
 
     -- Secret
-    ["grave cerberus"]            = { tier = "Secret",  value = "450M/s" },
-    ["zombified tombstone bear"]  = { tier = "Secret",  value = "1.4B/s" },
-    ["zombified night fang"]      = { tier = "Secret",  value = "1.1B/s" },
-    ["zombified pumpkin fiend"]   = { tier = "Secret",  value = "800M/s" },
-    ["pumpkin golem"]             = { tier = "Secret" },    -- rate not in game data yet
+    ["grave cerberus"]            = { tier = "Secret",  value = "450M/s", image = "https://stealanegg.tools/images/Grave_Cerberus_Pet.png" },
+    ["zombified tombstone bear"]  = { tier = "Secret",  value = "1.4B/s", image = "https://stealanegg.tools/images/Zombified_Tombstone_Bear_Pet.png" },
+    ["zombified night fang"]      = { tier = "Secret",  value = "1.1B/s", image = "https://stealanegg.tools/images/Zombified_Night_Fang_Pet.png" },
+    ["zombified pumpkin fiend"]   = { tier = "Secret",  value = "800M/s", image = "https://stealanegg.tools/images/Zombified_Pumpkin_Fiend_Pet.png" },
+    ["pumpkin golem"]             = { tier = "Secret",  value = "350M/s", image = "https://stealanegg.tools/images/Pumpkin_Golem_Pet.png" },
 }
 
 
