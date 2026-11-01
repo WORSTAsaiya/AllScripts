@@ -174,6 +174,8 @@ local S = {
     -- ----- debug -----
     DEBUG_PRINT = false,  -- print every egg's raw category / resolved name
     DEBUG_WEBHOOK = true, -- send rare-egg alert diagnostics to WEBHOOKS.Debug
+    RELAY_TO_BOT  = true, -- true = the BOT sends the rare egg alerts: this script only posts "EGGALERT{...}" to the Debug webhook
+                          -- (the bot removes the duplicates and posts through the tier webhooks). false = old way (claim + webhooks from here)
     TEST_MODE   = false,  -- send 3 sample egg alerts + 1 butterfly alert on start
 }
 
@@ -253,10 +255,10 @@ local RARE_EGGS = {
     ["kraken"]          = { tier = "Secret", value = "15M/s",
                             image = "https://stealanegg.tools/images/Kraken.png",
                             role = "1558521877805273099" },
-    ["trex"]            = { tier = "Secret", value = "25M/s",  image = "https://stealanegg.tools/images/TRex.png",      role = "1558521942410006608" },
+    ["trex"]            = { tier = "Secret", value = "25M/s",  image = "https://stealanegg.tools/images/TRex_Pet.png",      role = "1558521942410006608" },
     ["tralaledon"]      = { tier = "Secret", value = "32M/s",  image = "https://stealanegg.tools/images/Tralaledon.png",     role = "1558521991156465714" },
     ["cosmic skeleton"] = { tier = "Secret", value = "45M/s",
-                            image = "https://stealanegg.tools/images/Cosmic_Skeleton.png",
+                            image = "https://stealanegg.tools/images/Cosmic_Skeleton_Boss_Pet.png",
                             role = "1558522089911230556" },
     ["cosmic dragon"]   = { tier = "Secret", value = "60M/s",  image = "https://stealanegg.tools/images/Cosmic_Dragon.png" },
     ["stag"]            = { tier = "Secret", value = "145M/s", image = "https://stealanegg.tools/images/Stag.png", role = "1558522247734366228" },
@@ -283,7 +285,7 @@ local RARE_EGGS = {
     ["ghost reaper"]     = { tier = "Eternal", value = "300M/s", image = "https://stealanegg.tools/images/Ghost_Reaper_Pet.png" },
 
     ["werewolf"]         = { tier = "Secret",  value = "1.3B/s", image = "https://stealanegg.tools/images/Werewolf_Pet.png" },
-    ["bloodbloom"]       = { tier = "Secret",  value = "450M/s" },
+    ["bloodbloom"]       = { tier = "Secret",  value = "450M/s", image = "https://stealanegg.tools/images/BloodBloom_Pet.png" },
     ["graveyard brute"]  = { tier = "Secret",  value = "75M/s",  image = "https://stealanegg.tools/images/Graveyard_Brute_Pet.png" },
 
     -- ===== HALLOWEEN PETS (Halloween Egg + Zombified re-roll) =====
@@ -885,6 +887,32 @@ local function sendEggEmbed(eggName, tier, location)
     end
 end
 
+-- Sends one rare egg to the BOT (through the Debug webhook) instead of posting it ourselves.
+-- Every account sends the same egg; the bot keeps ONE (same egg + same zone within 270 s) and posts it.
+-- Returns true if Discord accepted the message.
+local function relayEgg(eggName, tier, location, uid)
+    local data = RARE_EGGS[eggName] or {}
+    local payload = {
+        name  = (DISPLAY_OF[norm(eggName)] or prettyName(eggName)) .. " Egg",
+        site  = (data.siteName or prettyName(eggName)) .. " Egg",
+        tier  = tier,
+        loc   = location or "",
+        value = (data.value and data.value ~= "") and data.value or "VALUE NOT SET",
+        image = (data.image and data.image:find("^https://")) and data.image or "",
+        role  = data.role,
+        uid   = uid,
+        user  = DEBUG_USER,
+        job   = DEBUG_JOB,
+        t     = os.time(),
+    }
+    local res = sendRequest("POST", WEBHOOKS.Debug, {
+        username = "EGG DEBUG",
+        content  = "EGGALERT" .. HttpService:JSONEncode(payload),
+        allowed_mentions = { parse = {} },
+    }, 4, false)
+    return res ~= nil
+end
+
 if S.TEST_MODE then
     task.spawn(function()
         task.wait(1); sendEggEmbed("unicorn", "Divine", "Cosmic")
@@ -1033,13 +1061,24 @@ task.spawn(function()
                 cttl = 1800
             end
 
-            local shouldSend, why = claim(ckey, cttl)
-            debugLog(string.format("CLAIM %s -> %s (%s) key=`%s`",
-                tostring(a.name), shouldSend and "SEND" or "SKIP", tostring(why), ckey:sub(1, 80)))
+            local relayed = false
+            if S.RELAY_TO_BOT and validUrl(WEBHOOKS.Debug) then
+                local okR, sentR = pcall(relayEgg, a.name, a.tier, a.location, a.uid)
+                relayed = okR and sentR == true
+                debugLog(string.format("RELAY %s -> bot (%s)", tostring(a.name),
+                    relayed and "sent" or "FAILED, using the old claim + webhook path"))
+                if relayed then task.wait(S.ALERT_SEND_GAP) end
+            end
 
-            if shouldSend then
-                pcall(sendEggEmbed, a.name, a.tier, a.location)
-                task.wait(S.ALERT_SEND_GAP)
+            if not relayed then
+                local shouldSend, why = claim(ckey, cttl)
+                debugLog(string.format("CLAIM %s -> %s (%s) key=`%s`",
+                    tostring(a.name), shouldSend and "SEND" or "SKIP", tostring(why), ckey:sub(1, 80)))
+
+                if shouldSend then
+                    pcall(sendEggEmbed, a.name, a.tier, a.location)
+                    task.wait(S.ALERT_SEND_GAP)
+                end
             end
         else
             task.wait(0.05)
