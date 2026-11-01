@@ -73,6 +73,13 @@ local CONFIG = {
 	-- re-fetches the script from here. Leave "" to use the workspace file instead.
 	SCRIPT_URL = "",
 
+	-- MULTI-ACCOUNT: list the exact Roblox USERNAMES (not display names) of EVERY
+	-- account running this script - the same list, in the same order, on all of
+	-- them. Each account then only hops to its own share of the servers (by server
+	-- id), so two of your accounts never pick the same one. Empty = single account.
+	-- Example: ACCOUNTS = { "alt_one", "alt_two", "alt_three" },
+	ACCOUNTS = {"SDFSDgsfgfgs"},
+
 	-- The ONE webhook every egg alert goes to (your bot cog reads it and posts the embed).
 	RELAY_WEBHOOK = "https://discord.com/api/webhooks/1553898268226887855/fG9vg0e9vhb_dUCi0xWqNzYr5-2w8QwelJ282YrUZWI7KPrjdH3V8gqmG7JX7zqSPHEP",
 
@@ -2323,6 +2330,39 @@ local function getServerList(forceFresh)
 	return { StatusCode = 200, Body = body }
 end
 
+-- ---------------------------------------------------------------- multi-account
+-- Each account owns the servers whose id hashes to its slot, so no two of your
+-- accounts ever target the same server.
+local mySlot, slotCount = 1, 1
+do
+	local me = Players.LocalPlayer and Players.LocalPlayer.Name or ""
+	local list = CONFIG.ACCOUNTS
+	if type(list) == "table" and #list > 1 then
+		slotCount = #list
+		local found = false
+		for i, n in ipairs(list) do
+			if tostring(n):lower() == me:lower() then
+				mySlot = i
+				found = true
+			end
+		end
+		if not found then
+			log("WARNING: '" .. me .. "' is not in CONFIG.ACCOUNTS - it will share slot 1 and may collide with that account")
+		else
+			log(("multi-account: '%s' is slot %d of %d"):format(me, mySlot, slotCount))
+		end
+		-- each account sees only ~1/N of the list, so read more pages per hop
+		CONFIG.LIST_PAGES = math.max(tonumber(CONFIG.LIST_PAGES) or 1, 3)
+	end
+end
+
+local function mySlice(id)
+	if slotCount <= 1 then return true end
+	local h = 0
+	for i = 1, #id do h = (h * 31 + id:byte(i)) % 1000003 end
+	return h % slotCount == mySlot - 1
+end
+
 local function pickTargets(forceFresh)
 	local list, why = getServerList(forceFresh)
 	if not list or not list.Body then
@@ -2370,10 +2410,12 @@ local function pickTargets(forceFresh)
 				local seen   = useVisited and visitedSet[s.id] == true
 				-- Also skip servers that previously refused us (279 / timeout / failed)
 				local dead   = failedSet[s.id] == true
+				-- another of your accounts owns this server
+				local notMine = not mySlice(s.id)
 				-- Strict 2/7-3/7 only: listed playing 1-2, nothing else aimed at.
 				local band   = s.playing ~= 1 and s.playing ~= 2
 
-				if bounce or full or empty or over or seen or band or isLaggy or dead then
+				if bounce or full or empty or over or seen or band or isLaggy or dead or notMine then
 					skipped = skipped + 1
 					if isLaggy then laggy = laggy + 1 end
 					if dead then log(("skipping %s - previously failed"):format(s.id)) end
