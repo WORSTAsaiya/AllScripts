@@ -974,7 +974,8 @@ end
 --   eggs = one entry per egg that exists now: { uid, k, nameKey, catKey, areaId }
 
 -- Halloween Dimension eggs currently on the map: uid -> counts key (filled by the Halloween scanner in PART 5).
--- They are added to the counts the bot receives so the Halloween board and the rare boards see them.
+-- They are added to the counts the bot receives (see the main loop) and are LATCHED together with the normal
+-- eggs: they only change when the normal board resets (the "Next update" reroll), exactly like the other boards.
 -- They are NOT added to ids / eggs, so they never trigger the new-cycle detector or a second rare alert.
 local HALLOWEEN_LIVE = {}
 
@@ -1073,10 +1074,6 @@ local function buildSnapshot()
                 areaId  = r.AreaId,
             }
         end
-    end
-
-    for _, hk in pairs(HALLOWEEN_LIVE) do
-        counts[hk] = (counts[hk] or 0) + 1
     end
 
     if S.DEBUG_PRINT then
@@ -1293,6 +1290,13 @@ end
 
 -- ---------- feed helpers ----------
 
+-- current Halloween egg counts (counts key -> number), from the Halloween scanner in PART 5
+local function hCounts()
+    local c = {}
+    for _, hk in pairs(HALLOWEEN_LIVE) do c[hk] = (c[hk] or 0) + 1 end
+    return c
+end
+
 local function copyCounts(t)
     local c = {}
     for k, v in pairs(t) do c[k] = v end
@@ -1338,6 +1342,7 @@ end
 
 task.spawn(function()
     local latched, cycleStart = {}, nil
+    local hLatched = {}   -- Halloween eggs, latched on the same cycle as `latched`
     local windowIds, windowAt = nil, 0
     local settling, settleStart = false, 0
     local lastSig, lastSentAt = nil, 0
@@ -1377,6 +1382,7 @@ task.spawn(function()
             if windowIds == nil then
                 windowIds, windowAt = ids, now
                 latched, cycleStart = copyCounts(live), now
+                hLatched = hCounts()
             else
                 local _, fresh = diffIds(windowIds, ids)
 
@@ -1387,11 +1393,15 @@ task.spawn(function()
 
                 if bigChange and not locked then
                     latched, cycleStart = copyCounts(live), now
+                    hLatched = hCounts()
                     settling, settleStart = true, now
                     windowIds, windowAt = ids, now
                 else
                     for k, n in pairs(live) do
                         if n > (latched[k] or 0) then latched[k] = n end
+                    end
+                    for k, n in pairs(hCounts()) do
+                        if n > (hLatched[k] or 0) then hLatched[k] = n end
                     end
                     if now - windowAt >= S.WINDOW_SECONDS then
                         windowIds, windowAt = ids, now
@@ -1413,7 +1423,10 @@ task.spawn(function()
                 and cycleStart ~= nil
                 and (now - cycleStart) < S.LATCH_SECONDS
 
-            local shown = latchActive and latched or live
+            local shown = copyCounts(latchActive and latched or live)
+            for k, n in pairs(latchActive and hLatched or hCounts()) do
+                shown[k] = (shown[k] or 0) + n
+            end
             local sig   = signature(shown)
 
             -- banner / event changes are sent right away instead of waiting for the heartbeat
