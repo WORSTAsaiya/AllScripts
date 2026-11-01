@@ -1479,8 +1479,8 @@ local function sendButterflyEmbed(startedAt, duration)
 
     local endsAt = startedAt + duration
 
-    -- combined channel: the BOT posts it (and edits it when the event ends).
-    -- The old webhook copy below is only used if the relay is off or failed.
+    -- the BOT posts it (in every channel that ran !bot_butterfly / !bot_all) and edits it when the event ends.
+    -- The webhook posts below are ONLY used if the relay is off or failed (same as the eggs).
     task.spawn(function()
         local relayed = S.RELAY_TO_BOT and validUrl(WEBHOOKS.Debug) and relayButterfly(startedAt, endsAt)
         debugLog("RELAY butterfly bloom -> bot (" .. (relayed and "sent" or "FAILED or off, using the old webhook copy") .. ")")
@@ -1498,9 +1498,8 @@ local function sendButterflyEmbed(startedAt, duration)
                 embeds  = { buildButterflyEmbed(startedAt, endsAt, true) },
             }
         end)
-    end)
 
-    task.spawn(function()
+        -- fallback only (relay off / failed): the old direct webhook post + the "ended" edit
         -- 1. send with ?wait=true so Discord returns the message id
         local res = sendRequest("POST", WEBHOOKS.Butterfly .. "?wait=true", {
             username   = BOT.NAME,
