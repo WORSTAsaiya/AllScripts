@@ -87,37 +87,37 @@ local CONFIG = {
 	-- immediately, so it is safe to leave in Delta's AutoExec folder.
 	PLACE_ID = 107778070777162,
 
-	WEBHOOK = "https://discord.com/api/webhooks/1548176167545217036/4yKLRndl5YWYH-R553V_auhYY5mSuJH2ct3BqFKM2L2-8k8O0mxaKX2CnO7-T2k0v5Cd",
+	WEBHOOK = "https://discord.com/api/webhooks/1553898268226887855/fG9vg0e9vhb_dUCi0xWqNzYr5-2w8QwelJ282YrUZWI7KPrjdH3V8gqmG7JX7zqSPHEP",
 
 	-- Second webhook: eggs earning at least BIG_VALUE_THRESHOLD per second also
 	-- get posted here (same payload, both channels - main stays the full feed).
-	WEBHOOK_BIG = "https://discord.com/api/webhooks/1557403684571324497/6sPnL3WaSVuq9AUdwm_b3od-LDyGfyxd4t6R5l7TwRTBxgXlBskSdplwOD1SCSMMRztG",
+	WEBHOOK_BIG = "https://discord.com/api/webhooks/1553898268226887855/fG9vg0e9vhb_dUCi0xWqNzYr5-2w8QwelJ282YrUZWI7KPrjdH3V8gqmG7JX7zqSPHEP",
 
 	-- Base URL of the hosted redirect page (a plain https link that forwards the
 	-- browser to roblox:// so one click lands on the exact server). Leave "" to
 	-- fall back to Roblox's own web join link.
-	JOIN_BASE = "https://iridescent-wisp-1e0361.netlify.app/",
+	JOIN_BASE = "https://worstasaiya.github.io/worst/worst.html",
 
 	-- $1,000,000,000/s - a "1B money pet" alert
 	BIG_VALUE_THRESHOLD = 1e9,
 
 	-- 500,000 to 1,000,000 kg filter for this extra webhook
-	WEBHOOK_KG = "https://discord.com/api/webhooks/1557756218804674623/rnN1VbdB0ejThzxAkNYX8y7FRAFMozpE_20fqX1PpXSfoj4JXl2OPerGvq2FSDha7gFj",
+	WEBHOOK_KG = "https://discord.com/api/webhooks/1553898268226887855/fG9vg0e9vhb_dUCi0xWqNzYr5-2w8QwelJ282YrUZWI7KPrjdH3V8gqmG7JX7zqSPHEP",
 
 	-- role pinged on 1B+ webhook posts (the user's @vip role)
 	VIP_ROLE_ID = "1563483086107447296",
 
 	-- Bot tracker webhook (updates same message per bot)
-	WEBHOOK_TRACKER = "https://discord.com/api/webhooks/1565974323934793778/LbLg_sANVHwB2xoDY_BbXjfvue_S8avGbXmejgHmdQwDk5IYQ8TuwMrmd_O75f0dCzqZ",
+	WEBHOOK_TRACKER = "https://discord.com/api/webhooks/1553898268226887855/fG9vg0e9vhb_dUCi0xWqNzYr5-2w8QwelJ282YrUZWI7KPrjdH3V8gqmG7JX7zqSPHEP",
 	TRACKER_MIN_INTERVAL = 15,
 
 	-- Halloween Dimension: its world eggs land on their own channel (with the
 	-- VIP ping) instead of the main/big/kg ones. They are (almost) always up,
 	-- so reporting them never influences a hop decision.
 	HALLOWEEN = true,
-	WEBHOOK_HALLOWEEN = "https://discord.com/api/webhooks/1561102494564753508/2YNNlV4q14KEqJ6gFe3EE5lYzdv8qYNoPRBN_2K-0Td2VwtkvXfyHcG1-QVwZFP0eVb3",
+	WEBHOOK_HALLOWEEN = "https://discord.com/api/webhooks/1553898268226887855/fG9vg0e9vhb_dUCi0xWqNzYr5-2w8QwelJ282YrUZWI7KPrjdH3V8gqmG7JX7zqSPHEP",
 	-- Separate webhook for big Halloween pets (visual scale >= 1.5 "large" and up)
-	WEBHOOK_HALLOWEEN_BIG = "https://discord.com/api/webhooks/1564094247974477956/YRjG-oP0zbjzItoex2qZl-l0dFnNiHJym5P7bB_9BH2th5eaFR2DQlMzdKLMTF6uqNST",
+	WEBHOOK_HALLOWEEN_BIG = "https://discord.com/api/webhooks/1553898268226887855/fG9vg0e9vhb_dUCi0xWqNzYr5-2w8QwelJ282YrUZWI7KPrjdH3V8gqmG7JX7zqSPHEP",
 	HALLOWEEN_BIG_MIN_SCALE = 1.5,
 
 	-- NOTE: no script-side anti-AFK here on purpose. Steal An Egg's BAC
@@ -181,7 +181,7 @@ local CONFIG = {
 	DWELL = 1.0,
 
 	-- Boss alert settings
-	BOSS_WEBHOOK = "https://discord.com/api/webhooks/1558391643793784895/wJys4QVSUOo6TpuXRHcGWWyEU0ah1eQKk9PuduhNBnAGsMwevjItOsucVOY-KT3-KrNA",
+	BOSS_WEBHOOK = "https://discord.com/api/webhooks/1553898268226887855/fG9vg0e9vhb_dUCi0xWqNzYr5-2w8QwelJ282YrUZWI7KPrjdH3V8gqmG7JX7zqSPHEP",
 	BOSS_ROLE_ID = "1365362827988041778",
 
 	-- seconds between post attempts when Discord rejects one
@@ -1589,7 +1589,7 @@ local function joinLinks()
 	if CONFIG.JOIN_BASE and CONFIG.JOIN_BASE ~= "" then
 		local base = CONFIG.JOIN_BASE
 		local sep = base:find("%?") and "&" or "?"
-		web = ("%s%sp=%d&id=%s"):format(base, sep, game.PlaceId, game.JobId)
+		web = ("%s%splaceId=%d&jobId=%s"):format(base, sep, game.PlaceId, game.JobId)
 	else
 		web = ("https://www.roblox.com/games/start?" .. query):format(game.PlaceId, game.JobId)
 	end
@@ -1907,15 +1907,22 @@ local function buildPayload(hits, players, webLink, directLink, roleId)
 	}
 end
 
-local function sendToWebhook(url, hits, players, roleId)
+local function sendToWebhook(url, hits, players, roleId, direct)
 	if type(httpRequest) ~= "function" then
 		log("no HTTP function available in this executor - cannot post")
 		return false
 	end
 
-	local payload = relayPayload(hits[1], players)
+	local payload
+	if direct then
+		-- plain Discord embed (for a normal channel that no bot cog reads)
+		local webLink, directLink = joinLinks()
+		payload = buildPayload(hits, players, webLink, directLink, roleId or "")
+	else
+		payload = relayPayload(hits[1], players)
+	end
 	if not payload then
-		log("could not build the relay message")
+		log("could not build the message")
 		return false
 	end
 	local body    = jsonEncode(payload)
@@ -2015,6 +2022,15 @@ local function post(hits, players)
 			end
 			if sendToWebhook(url, { hit }, players, roleId) then
 				sent[#sent + 1] = hit
+				-- 1B+/s eggs ALSO get a copy on the big webhook (VIP ping); the relay
+				-- above stays the full feed.
+				local big = CONFIG.WEBHOOK_BIG
+				if not hit.halloween and type(big) == "string" and big ~= ""
+					and not big:find("PASTE_YOUR", 1, true)
+					and (tonumber(hit.earn) or 0) >= (tonumber(CONFIG.BIG_VALUE_THRESHOLD) or 1e9) then
+					log("1B+/s egg - also posting to the big webhook")
+					pcall(sendToWebhook, big, { hit }, players, CONFIG.VIP_ROLE_ID, true)
+				end
 				-- lastEggSentAt = os.clock()
 				-- eggsSentThisRun += 1
 				-- pcall(sendBotTracker)
