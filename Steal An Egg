@@ -169,9 +169,6 @@ local S = {
     -- true  = each server gets its own claim (only if every server had its own different eggs).
     CLAIM_PER_SERVER = false,
 
-    -- ----- Rejoin button -----
-    REJOIN_BUTTON = true,    -- show a "Rejoin" button in the middle of the screen
-
     -- ----- debug -----
     DEBUG_PRINT = false,  -- print every egg's raw category / resolved name
     DEBUG_WEBHOOK = true, -- send rare-egg alert diagnostics to WEBHOOKS.Debug
@@ -2087,87 +2084,9 @@ if S.HALLOWEEN_ENABLED then
     print("[EGG] Halloween Dimension scanner running")
 end
 
--- ============================================================
--- PART 6: REJOIN BUTTON
--- A button in the middle of the screen. Click it to rejoin the game.
--- Tries the SAME server first; if that fails (full / closed) it joins any server.
--- ============================================================
-
-if S.REJOIN_BUTTON then
-    task.spawn(function()
-        local TeleportService = game:GetService("TeleportService")
-        local lp = Players.LocalPlayer
-        if not lp then return end
-
-        -- remove the button left by a previous run of this script
-        pcall(function()
-            if ENV.WORST_GUI then ENV.WORST_GUI:Destroy() end
-        end)
-
-        local gui = Instance.new("ScreenGui")
-        gui.Name = "WorstRejoin"
-        gui.ResetOnSpawn = false
-        gui.IgnoreGuiInset = true
-        gui.DisplayOrder = 999
-        gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-
-        local parented = false
-        if gethui then parented = pcall(function() gui.Parent = gethui() end) end
-        if not parented then
-            parented = pcall(function() gui.Parent = game:GetService("CoreGui") end)
-        end
-        if not parented then
-            gui.Parent = lp:WaitForChild("PlayerGui")
-        end
-        ENV.WORST_GUI = gui
-
-        local btn = Instance.new("TextButton")
-        btn.Name = "Rejoin"
-        btn.AnchorPoint = Vector2.new(0.5, 0.5)
-        btn.Position = UDim2.new(0.5, 0, 0.5, 0)
-        btn.Size = UDim2.new(0, 170, 0, 46)
-        btn.BackgroundColor3 = Color3.fromRGB(231, 76, 60)
-        btn.BorderSizePixel = 0
-        btn.AutoButtonColor = true
-        btn.Text = "Rejoin"
-        btn.TextColor3 = Color3.new(1, 1, 1)
-        btn.TextSize = 20
-        btn.Font = Enum.Font.GothamBold
-        btn.Parent = gui
-
-        local corner = Instance.new("UICorner")
-        corner.CornerRadius = UDim.new(0, 10)
-        corner.Parent = btn
-
-        local busy = false
-        btn.MouseButton1Click:Connect(function()
-            if busy then return end
-            busy = true
-            btn.Text = "Rejoining..."
-            debugLog("REJOIN button pressed")
-
-            -- 1) same server
-            local ok = pcall(function()
-                TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, lp)
-            end)
-
-            -- 2) if that errors, or the teleport fails, join any server
-            local failConn
-            failConn = TeleportService.TeleportInitFailed:Connect(function()
-                if failConn then failConn:Disconnect() end
-                pcall(function() TeleportService:Teleport(game.PlaceId, lp) end)
-            end)
-
-            if not ok then
-                pcall(function() TeleportService:Teleport(game.PlaceId, lp) end)
-            end
-
-            task.delay(15, function()
-                busy = false
-                if btn.Parent then btn.Text = "Rejoin" end
-            end)
-        end)
-    end)
-end
+-- remove the Rejoin button left over from an older version of this script
+pcall(function()
+    if ENV.WORST_GUI then ENV.WORST_GUI:Destroy(); ENV.WORST_GUI = nil end
+end)
 
 print("[EGG] running!")
