@@ -1,6 +1,6 @@
 -- WORST Server Notifiers
 -- ============================================================
---  WORST • RARE EGG NOTIFIER + BOT FEED + BUTTERFLY + RACING
+--  WORST • RARE EGG NOTIFIER + BOT FEED + BUTTERFLY + RACING + UFO
 --  + HALLOWEEN DIMENSION (Secret / Eternal / Divine)
 --  + HALLOWEEN PETS (Paid / Zombified re-roll pets)
 --
@@ -177,7 +177,7 @@ local S = {
     DEBUG_WEBHOOK = true, -- send rare-egg alert diagnostics to WEBHOOKS.Debug
     RELAY_TO_BOT  = true, -- true = the BOT sends the rare egg alerts: this script only posts "EGGALERT{...}" to the Debug webhook
                           -- (the bot removes the duplicates and posts through the tier webhooks). false = old way (claim + webhooks from here)
-    TEST_MODE   = false,  -- send 3 sample egg alerts + 1 butterfly alert on start
+    TEST_MODE   = false,  -- send 3 sample egg alerts + 1 butterfly alert + a normal and a rare UFO on start
 }
 
 -- Zones expected to hold S.EGGS_PER_ZONE eggs each (used by the settle check).
@@ -198,6 +198,12 @@ local BUTTERFLY = {
     COOLDOWN         = 600,   -- seconds between alerts
     DEFAULT_DURATION = 300,
     IMAGE            = "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcShJHyWT_Tli6qDaHj2LdtNGXKvujRKQIWaIFLZtBVv1Q&s=10",
+}
+
+-- UFO Sightings: the game sends the event on this remote (Event.Variant = "Regular" or "Rare").
+-- The alert is relayed to the BOT (needs S.RELAY_TO_BOT). Members get it with !bot_ufo / !bot_ufo normal / !bot_ufo rare.
+local UFO = {
+    REMOTE = "RE/UFOSightings/State",
 }
 
 local RACE = {
@@ -954,11 +960,36 @@ local function relayButterfly(startedAt, endsAt)
     return res ~= nil
 end
 
+-- Tells the BOT that a UFO sighting started. variant = "normal" or "rare". The bot dedupes by id (every account sends it),
+-- posts it in the channels that ran !bot_ufo (normal / rare) and edits it when it ends.
+local function relayUfo(id, variant, startedAt, endsAt, rawVariant)
+    local res = sendRequest("POST", WEBHOOKS.Debug, {
+        username = "EGG DEBUG",
+        content  = "EGGEVENT" .. HttpService:JSONEncode({
+            event   = "ufo",
+            id      = id,
+            variant = variant,
+            raw     = rawVariant,
+            started = startedAt,
+            ends    = endsAt,
+            user    = DEBUG_USER,
+            job     = DEBUG_JOB,
+        }),
+        allowed_mentions = { parse = {} },
+    }, 4, false)
+    return res ~= nil
+end
+
 if S.TEST_MODE then
     task.spawn(function()
         task.wait(1); sendEggEmbed("unicorn", "Divine", "Cosmic")
         task.wait(1); sendEggEmbed("gorilla king", "Eternal", "Titan Temple")
         task.wait(1); sendEggEmbed("razorfang", "Secret", "Demons")
+        if S.RELAY_TO_BOT and validUrl(WEBHOOKS.Debug) then
+            local t = os.time()
+            task.wait(1); relayUfo("TestNormal" .. t, "normal", t, t + 60, "Regular")
+            task.wait(1); relayUfo("TestRare" .. t,   "rare",   t, t + 60, "Rare")
+        end
     end)
 end
 
@@ -1592,6 +1623,63 @@ end
 
 for _, d in ipairs(RS:GetDescendants()) do hookButterfly(d) end
 RS.DescendantAdded:Connect(hookButterfly)
+
+
+-- ============================================================
+-- UFO SIGHTINGS
+-- The game fires RE/UFOSightings/State many times per event (progress updates), so each
+-- Event.Id is sent ONCE. Event.Variant "Regular" -> "normal"; anything else (e.g. "Rare") -> "rare".
+-- The seen-list survives a re-execute, so re-running the script does not re-send a live UFO.
+-- ============================================================
+
+local seenUfo = ENV.WORST_SEEN_UFO or {}   -- event id -> time it ends
+ENV.WORST_SEEN_UFO = seenUfo
+
+local function onUfoState(data)
+    if not alive() then return end
+    if type(data) ~= "table" then return end
+
+    local ev = data.Event
+    if type(ev) ~= "table" or ev.Id == nil or ev.Variant == nil then return end
+
+    local id        = tostring(ev.Id)
+    local rawVar    = tostring(ev.Variant)
+    local low       = rawVar:lower()
+    local variant   = (low == "regular" or low == "normal") and "normal" or "rare"
+    local startedAt = tonumber(ev.StartsAt) or os.time()
+    local endsAt    = tonumber(ev.EndsAt) or (startedAt + 300)
+
+    local now = os.time()
+    if endsAt <= now then return end       -- already over
+    if seenUfo[id] then return end         -- already sent this one
+    seenUfo[id] = endsAt
+
+    for k, v in pairs(seenUfo) do          -- forget old ones
+        if v < now - 3600 then seenUfo[k] = nil end
+    end
+
+    print("[UFO] " .. variant .. " sighting (" .. id .. ", game says '" .. rawVar .. "')")
+
+    task.spawn(function()
+        if not (S.RELAY_TO_BOT and validUrl(WEBHOOKS.Debug)) then
+            warn("[UFO] RELAY_TO_BOT is off or the Debug webhook is missing, so the UFO alert was not sent")
+            return
+        end
+        local relayed = relayUfo(id, variant, startedAt, endsAt, rawVar)
+        debugLog(string.format("RELAY ufo %s (game variant '%s') id=%s -> bot (%s)",
+            variant, rawVar, id, relayed and "sent" or "FAILED"))
+    end)
+end
+
+local function hookUfo(remote)
+    if remote:IsA("RemoteEvent") and remote.Name == UFO.REMOTE then
+        remote.OnClientEvent:Connect(onUfoState)
+        print("[UFO] hooked " .. remote:GetFullName())
+    end
+end
+
+for _, d in ipairs(RS:GetDescendants()) do hookUfo(d) end
+RS.DescendantAdded:Connect(hookUfo)
 
 if S.TEST_MODE then
     task.delay(4, function()
