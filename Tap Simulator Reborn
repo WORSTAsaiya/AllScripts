@@ -161,6 +161,80 @@ else
 end
 env.WORSTHubRecord = record
 
+-- ============================================================ AUTO CLOSE UI
+-- Closes every game window that pops up (machines, Balloon Luck, shops, ...) the moment it opens, because they block auto hatch.
+-- Switched by the "Auto Close Ui" toggle on Settings > General (env.WORST_AUTOCLOSE_UI).
+-- Never touched: the HUD ("Game"), the Inventory (the script scans / closes it itself), anything trade related, the hub itself,
+-- and everything while the trade agent is busy.
+task.spawn(function()
+	local pgui = player:WaitForChild("PlayerGui")
+	local SKIP_EXACT = { game = true, inventory = true, worsthubui = true }
+	local SKIP_PART = { "trad", "worst", "kaitun", "hatch", "notif", "chat", "topbar", "hud", "loading", "status", "site_panel" }
+	local function skipName(n)
+		n = n:lower()
+		if SKIP_EXACT[n] then return true end
+		for _, part in ipairs(SKIP_PART) do
+			if n:find(part, 1, true) then return true end
+		end
+		return false
+	end
+	-- true if the object is really showing (it and every parent frame up to its ScreenGui are visible)
+	local function showing(o)
+		local p = o
+		while p and not p:IsA("ScreenGui") do
+			if p:IsA("GuiObject") and not p.Visible then return false end
+			p = p.Parent
+		end
+		return p ~= nil and p.Enabled
+	end
+	local function fire(btn)
+		if typeof(getconnections) ~= "function" then return end
+		for _, sig in ipairs({ "MouseButton1Click", "Activated", "MouseButton1Down", "MouseButton1Up" }) do
+			pcall(function() for _, c in ipairs(getconnections(btn[sig])) do c:Fire() end end)
+		end
+	end
+	local function closeBtnOf(g)
+		for _, nm in ipairs({ "Close", "CloseButton", "Exit" }) do
+			local o = g:FindFirstChild(nm, true)
+			if o and showing(o) then
+				return o:IsA("GuiButton") and o or o:FindFirstChildWhichIsA("GuiButton", true)
+			end
+		end
+		return nil
+	end
+	local cooldown = {}
+	local function closeGui(g, force)
+		if (cooldown[g] or 0) > os.clock() then return end
+		cooldown[g] = os.clock() + 1
+		local btn = closeBtnOf(g)
+		if btn then fire(btn) end
+		task.wait(0.15)
+		-- still open: switch it off directly (only windows that live in Tabs; other ScreenGuis may be needed by the game)
+		if force and g.Parent and g.Enabled then pcall(function() g.Enabled = false end) end
+	end
+	while alive do
+		if env.WORST_AUTOCLOSE_UI == true and not env.TSR_TRADE_BUSY then
+			pcall(function()
+				for _, child in ipairs(pgui:GetChildren()) do
+					if child:IsA("Folder") and child.Name == "Tabs" then
+						-- the game's menu windows: every one that is open
+						for _, g in ipairs(child:GetChildren()) do
+							if g:IsA("ScreenGui") and g.Enabled and not skipName(g.Name) then closeGui(g, true) end
+						end
+					elseif child:IsA("ScreenGui") then
+						if child.Enabled and not skipName(child.Name) and closeBtnOf(child) then closeGui(child, false) end
+					elseif child:IsA("Folder") and not skipName(child.Name) then
+						for _, g in ipairs(child:GetChildren()) do
+							if g:IsA("ScreenGui") and g.Enabled and not skipName(g.Name) and closeBtnOf(g) then closeGui(g, false) end
+						end
+					end
+				end
+			end)
+		end
+		task.wait(0.2)
+	end
+end)
+
 -- also close the old standalone panels if they are still running
 for _, name in ipairs({ "HatchCraftPanel", "VolcanoHatchPanel", "GoldenCraftPanel" }) do
 	local old = env[name]
@@ -1228,6 +1302,7 @@ local function buildLogic()
 							end
 							island = island or "Spawn"
 						end
+						if name:find("30M") then island = "Spawn" end   -- the 30M Event eggs stand in Spawn (the guess above can pick Sky Island)
 						local stand  = pos + Vector3.new(0, -3, 0)
 						local land   = landings[island] and landings[island].Position
 						if land then
@@ -1356,6 +1431,38 @@ local function buildLogic()
 		return hrp ~= nil and (hrp.Position - cf.Position).Magnitude <= (radius or TP_RADIUS)
 	end
 
+	-- ===== Gold / Diamond / Rainbow machine spots per island =====
+	-- A crafting trip teleports to the spot of that machine that is CLOSEST to where your character is right now (islands are far
+	-- apart, so this is "the machine on the island you are on"). An island without that machine falls back to the nearest island
+	-- that has one. Kept in Config (no new locals): Config.spots.gold / .diamond / .rainbow and Config.nearest(list) -> island, CFrame.
+	Config.spots = {
+		gold = {
+			{ island = "Spawn", cf = CFrame.new(-14.149008750915527, -515.9865112304688, -1908.5687255859375, 0.018633292987942696, 8.642818905002514e-09, -0.9998263716697693, -2.474858984413686e-09, 1, 8.59819682119678e-09, 0.9998263716697693, 2.3142165961331784e-09, 0.018633292987942696) },
+			{ island = "Crystal Cave", cf = CFrame.new(-139.4049835205078, 5444.1884765625, -2032.2901611328125, 0.7983980774879456, -3.819129901216911e-09, 0.6021299958229065, 6.739244717834936e-09, 1, -2.5932438418863057e-09, -0.6021299958229065, 6.128342278088894e-09, 0.7983980774879456) },
+			{ island = "Shadow Realm", cf = CFrame.new(37.53450393676758, 7686.38623046875, -1734.8853759765625, -0.8386572003364563, -5.6239088053189334e-08, -0.5446596145629883, -4.738656400604668e-08, 1, -3.0290486563444574e-08, 0.5446596145629883, 4.06213979120551e-10, -0.8386572003364563) },
+			{ island = "Heaven", cf = CFrame.new(-123.94955444335938, 15322.8037109375, -1812.1279296875, 0.025982677936553955, 6.1471130408108365e-09, 0.9996623992919922, -3.716618124371962e-09, 1, -6.0525890965834606e-09, -0.9996623992919922, -3.558100925005192e-09, 0.025982677936553955) },
+		},
+		-- the Diamond machine is only in Crystal Cave (Heaven has Gold + Rainbow only)
+		diamond = {
+			{ island = "Crystal Cave", cf = CFrame.new(-171.0638427734375, 5442.818359375, -1996.0255126953125, 0.341137558221817, -1.0005638984011966e-07, 0.9400134086608887, 2.577974989037557e-08, 1, 9.708579540301798e-08, -0.9400134086608887, -8.886301472443847e-09, 0.341137558221817) },
+		},
+		-- Rainbow machines: Shadow Realm and Heaven. Volcano has none of its own, so from the Volcano the Shadow Realm one is used.
+		rainbow = {
+			{ island = "Shadow Realm", cf = CFrame.new(77.31425476074219, 7673.57177734375, -1925.3316650390625, 0.5453548431396484, 1.245962533147349e-08, -0.8382052779197693, -3.60093466156286e-08, 1, -8.563827869068064e-09, 0.8382052779197693, 3.485354937993179e-08, 0.5453548431396484) },
+			{ island = "Heaven", cf = CFrame.new(120.258544921875, 15323.8330078125, -1810.82470703125, -0.0870286226272583, 7.841659765972508e-08, -0.9962058067321777, 1.1669022415006225e-09, 1, 7.861331852154763e-08, 0.9962058067321777, 5.67913405191689e-09, -0.0870286226272583) },
+		},
+	}
+	function Config.nearest(spots)
+		local hrp = getHRP()
+		if not hrp then return spots[1].island, spots[1].cf end
+		local best, bestD = spots[1], math.huge
+		for _, sp in ipairs(spots) do
+			local d = (hrp.Position - sp.cf.Position).Magnitude
+			if d < bestD then best, bestD = sp, d end
+		end
+		return best.island, best.cf
+	end
+
 	-- true only while the inventory window is closed and no scan is running (assigned further down, once invIsOn exists)
 	local inventoryClosed = function() return true end
 
@@ -1365,7 +1472,7 @@ local function buildLogic()
 	local eggNames, eggLabels, eggByName = {}, {}, {}
 	for _, e in ipairs(EGGS) do
 		eggNames[#eggNames + 1] = e.name
-		eggLabels[#eggLabels + 1] = e.auto and ("[NEW!!] " .. e.name) or e.name
+		eggLabels[#eggLabels + 1] = e.name   -- no "[NEW!!]" tag
 		eggByName[e.name] = e
 	end
 	local eggEntry = {
@@ -3840,7 +3947,7 @@ local function buildLogic()
 		if not active(id) then return "stopped" end
 
 		setStatus("Teleporting directly to Golden machine...")
-		if not directCraftTeleport(function() return active(id) end, CRAFT_CF, setStatus) then
+		if not directCraftTeleport(function() return active(id) end, select(2, Config.nearest(Config.spots.gold)), setStatus) then
 			return active(id) and "fail" or "stopped"
 		end
 		if not active(id) then return "stopped" end
@@ -4234,6 +4341,7 @@ local function buildLogic()
 				end
 				if not stillActive() then return "stopped" end
 
+				if type(cf) == "function" then cf = cf() end   -- Diamond: pick the machine on the island you are on
 				statusFn("Teleporting directly to " .. island .. " crafting machine...")
 				local arrived = directCraftTeleport(stillActive, cf, statusFn)
 				if not stillActive() then return "stopped" end
@@ -4533,14 +4641,14 @@ local function buildLogic()
 			amountName = "Diamond Amount",
 			amountDesc = "How many Golden pets of the same kind to use per Diamond craft (machine must accept the amount).",
 			amounts = { {label="2 pets",pets=2}, {label="3 pets",pets=3}, {label="4 pets",pets=4}, {label="5 pets",pets=5} },
-			machine = "Diamond", action = "Craft", island = ISLAND_DIAMOND, cf = CF_DIAMOND,
+			machine = "Diamond", action = "Craft", island = ISLAND_DIAMOND, cf = function() return select(2, Config.nearest(Config.spots.diamond)) end,
 			desc = "Turns 5 Golden pets of the same kind into a Diamond pet (Crystal Cave). Pauses auto hatch while crafting.",
 			dropDesc = "Which Golden pet to turn into Diamond (updates after every scan).",
 		})
 		local rainbowJob = newJob({
 			name = "Craft to Rainbow", icon = "🌈", label = "Rainbow", fromLabel = "Diamond",
 			dropName = "Rainbow Pet", fromTier = "diamond", need = 2, queue = true,
-			machine = "Shiny", action = "Start", island = ISLAND_RAINBOW, cf = CF_RAINBOW,
+			machine = "Shiny", action = "Start", island = ISLAND_RAINBOW, cf = function() return select(2, Config.nearest(Config.spots.rainbow)) end,
 			amountName = "Rainbow Amount",
 			amountDesc = "How many Diamond pets of the same kind go into ONE Rainbow craft: more pets = a much shorter craft. Kaitun Hatch always uses 2.",
 			amounts = {
@@ -4592,7 +4700,7 @@ local function buildLogic()
 				local ready = readyList()
 				if #ready > 0 then
 					job.setStatus(string.format("%d Rainbow craft(s) finished - going to claim...", #ready))
-					local r = runTrip("Collect Rainbow", act, ISLAND_RAINBOW, CF_RAINBOW, function()
+					local r = runTrip("Collect Rainbow", act, ISLAND_RAINBOW, function() return select(2, Config.nearest(Config.spots.rainbow)) end, function()
 						for _, cid in ipairs(ready) do
 							if not act() then return "stopped" end
 							local res = requestWait({ Machine = "Shiny", Action = "Claim", CraftId = cid }, function(d)
@@ -4646,6 +4754,8 @@ local function buildLogic()
 			rDrop = rainbowJob.drop, rCraft = rainbowJob.entry, rAmount = rainbowJob.amountEntry,
 			collect = collectJob.entry,
 			dJob = diamondJob, rJob = rainbowJob,
+			internals = { newJob = newJob, planFor = planFor, doCrafts = doCrafts, runTrip = runTrip, dJob = diamondJob,
+				ISLAND_DIAMOND = ISLAND_DIAMOND, CF_DIAMOND = CF_DIAMOND },   -- used by the 30M Event quest crafts
 		}
 	end
 
@@ -6069,7 +6179,7 @@ local function buildLogic()
 						local names = {}
 						for pet in pairs(pets) do
 							local ri = rarityIndex[petRarity[pet]]
-							if ri and ri >= lo and ri <= hi then names[#names + 1] = pet end
+							if ri and ri >= lo and ri <= hi and not (HG.questProtect and HG.questProtect[pet]) then names[#names + 1] = pet end
 						end
 						table.sort(names)
 						local entries = {}
@@ -6410,7 +6520,7 @@ local function buildLogic()
 				local ids = {}
 				for _, g in pairs(groups) do
 					local r = petRarity[g.name]
-					if r and vars[g.tier] then
+					if r and vars[g.tier] and not (HG.questProtect and HG.questProtect[g.name]) then
 						local idx = invRarityIdx(r)   -- only the rarities listed in the dropdowns can be deleted
 						if idx and idx >= lo and idx <= hi then
 							for _, x in ipairs(g.ids) do ids[#ids + 1] = x.id end
@@ -6769,6 +6879,8 @@ local function buildLogic()
 				unmapped = function() local l = {} for _, n in ipairs(eggNames) do if not eggPets[n] then l[#l + 1] = n end end return l end, refresh = refreshEntry, egg = eggPick, from = fromEntry, to = toEntry, variants = varPick,
 				auto = autoEntry,
 				rarityOf = function(name) return petRarity[name] end,
+				eggPets = function(egg) return eggPets[egg] end,   -- 30M Event quests: the pets an egg drops (set: pet name -> true)
+				reapply = function() pcall(reapply) end,            -- 30M Event quests: re-send the delete lists after the protected pets changed
 				rarest = function()   -- the rarest pet you own: name, rarity (used by the black screen of Disable 3D Rendering / Mini Ui)
 					if not next(petRarity) then pcall(discover) end
 					local okG, groups = pcall(scanFromData)
@@ -7048,6 +7160,577 @@ local function buildLogic()
 
 	local pet = buildPetJobs()
 
+	-------------------------------------------------------------------------- FARMING > 30M EVENT (Luck Quests)
+	-- Three toggles that work on the Luck Quests of the 30M Event egg (Turn N <rarity> pets Golden / Diamond):
+	--   Quest Hatch   hatches the event egg until you own enough pets for every quest that is still open, then puts your egg + Auto Hatch back.
+	--   Quest Protect keeps those pets out of every auto delete (Farming Auto Delete, Pets > Auto Delete Inventory, Kaitun). It is also on
+	--                 by itself while Quest Hatch or Quest Craft is on, so the pets can never be deleted behind their back.
+	--   Quest Craft   crafts the ACTIVE quest only (Golden quests at the Golden machine, the Diamond quest at the Diamond machine). It uses the
+	--                 normal trip system (one machine trip at a time, hatch pauses, priority "Craft"), so it never collides with Auto Craft & co.
+	-- Quest progress is read from the game's own Luck Quests panel (even while Auto Close Ui keeps it closed); when it can't be read the numbers
+	-- from the screenshot are used and the crafts done here are counted (saved in WORST/quest30_<userid>.json).
+	HG.quest30 = (function()
+		local okQ, resQ = pcall(function()
+			local pets = pet
+			local I = pets.internals
+			assert(I and I.newJob, "craft jobs not available")
+			local ICON, AUTO = "🏆", "Auto-detect"
+			local NAME = "30M Quest Craft"
+			local DEFAULT_QUESTS = {
+				{ rarity = "rare",      variant = "Golden",  need = 10 },
+				{ rarity = "epic",      variant = "Golden",  need = 25 },
+				{ rarity = "legendary", variant = "Golden",  need = 12 },
+				{ rarity = "mythical",  variant = "Golden",  need = 13 },
+				{ rarity = "mythical",  variant = "Diamond", need = 19 },
+			}
+			local RNORM = { common = "common", commons = "common", uncommon = "uncommon", uncommons = "uncommon", rare = "rare", rares = "rare",
+				epic = "epic", epics = "epic", legendary = "legendary", legendaries = "legendary", mythic = "mythical", mythics = "mythical",
+				mythical = "mythical", mythicals = "mythical", godly = "godly", secret = "secret", secrets = "secret" }
+			local VNORM = { golden = "Golden", diamond = "Diamond", rainbow = "Rainbow", shiny = "Rainbow" }
+			local function normR(r) if not r then return nil end return RNORM[(tostring(r):lower():gsub("%s+", ""))] end
+
+			------------------------------------------------------------ entries
+			local pickedEgg = AUTO
+			local eggOpts = { AUTO }
+			for _, n in ipairs(eggNames) do eggOpts[#eggOpts + 1] = n end
+			local eggPick = {
+				type = "dropdown", name = "Event Egg", icon = "🥚", width = 300, options = eggOpts, default = AUTO,
+				desc = "The 30M Event egg. Auto-detect looks for an egg with \"30M\" in its name; pick it here by hand if it isn't found.",
+			}
+			local hatchT = {
+				type = "toggle", name = "Quest Hatch", icon = "🥚", default = false,
+				desc = "Hatches the 30M Event egg until you own enough pets for every open Luck Quest, then gives Auto Hatch and your egg back.",
+			}
+			local protT = {
+				type = "toggle", name = "Quest Protect", icon = "🛡", default = false,
+				desc = "Keeps the pets the open Luck Quests need (all variants) out of every auto delete. Switches on by itself while Quest Hatch / Quest Craft is on.",
+			}
+			local craftT = {
+				type = "toggle", name = "Quest Craft", icon = ICON, default = false,
+				desc = "Crafts the active Luck Quest (Golden or Diamond machine) with the event egg's pets. One machine trip at a time, so it can't clash with Auto Craft.",
+			}
+			local inflateT = {
+				type = "toggle", name = "Auto Inflate", icon = "🎈", default = false,
+				desc = "Balloon Luck: inflates the balloon by itself as soon as you have enough Air for the next level (Air comes from hatching pets of the 30M egg).",
+			}
+			local statusBtn = {
+				type = "questinfo", name = "Quest Status", icon = "📋", noSave = true,   -- Kaitun-style card (Config.questCardInfo), updates by itself
+			}
+			local resetBtn = {
+				type = "button", name = "Reset Quest Counter", icon = "♻", noSave = true,
+				desc = "Forgets the crafts counted by this script (only used when the game's quest panel can't be read).",
+			}
+
+			------------------------------------------------------------ quest state
+			local QFILE = "quest30_" .. tostring(lp.UserId) .. ".json"
+			local done = {}   -- "rarity|variant|need" -> crafts counted by this script
+			do
+				local raw = Store.read(QFILE)
+				if raw then
+					local okJ, data = pcall(function() return HttpService:JSONDecode(raw) end)
+					if okJ and type(data) == "table" then for k, v in pairs(data) do done[k] = tonumber(v) or 0 end end
+				end
+			end
+			local function saveDone() pcall(Store.write, QFILE, HttpService:JSONEncode(done)) end
+			local function qKey(q) return q.rarity .. "|" .. q.variant .. "|" .. tostring(q.need) end
+
+			local function clean(t)
+				t = tostring(t or ""):gsub("<[^>]*>", ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+				return t
+			end
+			-- reads the Luck Quests rows from the game's UI (works while the window is closed): { rarity, variant, need, cur, max, locked, done }
+			local function readUI()
+				local pgui = lp:FindFirstChild("PlayerGui")
+				if not pgui then return nil end
+				local rows, n = {}, 0
+				for _, d in ipairs(pgui:GetDescendants()) do
+					n = n + 1
+					if n % 3000 == 0 then task.wait() end
+					if d:IsA("TextLabel") then
+						local num, word, var = clean(d.Text):match("^[Tt]urn (%d+) (%a+) (%a+)$")
+						local r = word and normR(word)
+						local v = var and VNORM[var:lower()]
+						if num and r and v then rows[#rows + 1] = { label = d, rarity = r, variant = v, need = tonumber(num), idx = #rows + 1 } end
+					end
+				end
+				if #rows == 0 then return nil end
+				for _, row in ipairs(rows) do
+					-- the biggest parent that still holds only this row's title = the row itself
+					local cur = row.label.Parent
+					while cur and cur.Parent and not cur.Parent:IsA("LayerCollector") do
+						local up, count = cur.Parent, 0
+						for _, o in ipairs(rows) do if o.label:IsDescendantOf(up) then count = count + 1 end end
+						if count > 1 then break end
+						cur = up
+					end
+					row.box = cur
+					for _, d in ipairs(cur and cur:GetDescendants() or {}) do
+						if d:IsA("TextLabel") or d:IsA("TextButton") then
+							local t = clean(d.Text)
+							local a, b = t:match("^(%d[%d,%.]*)%s*/%s*(%d[%d,%.]*)$")
+							if a then row.cur, row.max = tonumber((a:gsub(",", ""))), tonumber((b:gsub(",", ""))) end
+							local low = t:lower()
+							if low == "locked" then row.locked = true end
+							if low:find("claimed", 1, true) or low:find("complete", 1, true) or low == "done" then row.done = true end
+						end
+					end
+					if row.cur and row.max and row.cur >= row.max then row.done = true end
+					row.y = (row.box and row.box:IsA("GuiObject")) and row.box.AbsolutePosition.Y or 0
+					row.order = (row.box and row.box:IsA("GuiObject")) and row.box.LayoutOrder or 0
+				end
+				table.sort(rows, function(a, b)
+					if a.y ~= b.y then return a.y < b.y end
+					if a.order ~= b.order then return a.order < b.order end
+					return a.idx < b.idx
+				end)
+				return rows
+			end
+
+			local quests, fromUI, lastRead = DEFAULT_QUESTS, false, -1e9
+			local function refreshQuests(force)
+				if not force and os.clock() - lastRead < 15 then return end
+				lastRead = os.clock()
+				local okR, rows = pcall(readUI)
+				if okR and rows then quests, fromUI = rows, true else quests, fromUI = DEFAULT_QUESTS, false end
+			end
+			-- crafts still to do for quest i (the better of the game's number and this script's own count)
+			local function remaining(i)
+				local q = quests[i]
+				if not q then return 0 end
+				if q.done then return 0 end
+				local have = done[qKey(q)] or 0
+				if fromUI and not q.locked and q.cur then have = math.max(have, q.cur) end
+				return math.max(0, q.need - have)
+			end
+			local function activeIdx()
+				for i = 1, #quests do
+					if remaining(i) > 0 then return i, quests[i].locked == true end
+				end
+			end
+			local function qText(i)
+				local q = quests[i]
+				if not q then return "?" end
+				return string.format("#%d %d %s %s", i, q.need, q.rarity, q.variant:lower())
+			end
+
+			------------------------------------------------------------ event egg + pets
+			local function eggName()
+				if pickedEgg ~= AUTO then return eggByName[pickedEgg] and pickedEgg or nil end
+				for _, n in ipairs(eggNames) do
+					local l = n:lower()
+					if l:find("30m", 1, true) or l:find("30 m", 1, true) then return n end
+				end
+				return nil
+			end
+			local lastRefreshTry = -1e9
+			local function eggSet()
+				local name = eggName()
+				if not name then return nil, nil, "event egg not found - pick it in Event Egg" end
+				local set = autodel and autodel.eggPets and autodel.eggPets(name)
+				if not set then
+					if autodel and autodel.refresh and autodel.refresh.run and os.clock() - lastRefreshTry > 60 then
+						lastRefreshTry = os.clock()
+						task.spawn(function() pcall(autodel.refresh.run) end)
+					end
+					return name, nil, "no pet data for " .. name .. " yet (Farming > Delete Hatches > Refresh Egg Data)"
+				end
+				return name, set
+			end
+			local function unspent(g)
+				local c = 0
+				for _, x in ipairs(g.ids) do if not spent[x.id] then c = c + 1 end end
+				return c
+			end
+
+			-- pets still needed per rarity: { [rarity] = missing normal pets }, rarities still in play
+			local function computeNeeds(groups, set)
+				local gq, dq, open = {}, {}, {}
+				local dNeed = I.dJob.need or 5
+				for i, q in ipairs(quests) do
+					local r = remaining(i)
+					if r > 0 then
+						open[q.rarity] = true
+						if q.variant == "Golden" then gq[q.rarity] = (gq[q.rarity] or 0) + r
+						elseif q.variant == "Diamond" then dq[q.rarity] = (dq[q.rarity] or 0) + r * dNeed end
+					end
+				end
+				local ownN, ownG = {}, {}
+				if groups then
+					for _, g in pairs(groups) do
+						if set[g.name] then
+							local r = normR(autodel.rarityOf(g.name))
+							if r then
+								local raw = tostring(g.rawTier):lower()
+								if raw == "normal" then ownN[r] = (ownN[r] or 0) + unspent(g)
+								elseif raw == "golden" then ownG[r] = (ownG[r] or 0) + unspent(g) end
+							end
+						end
+					end
+				end
+				local missing, total = {}, 0
+				for r in pairs(open) do
+					local crafts = math.max(gq[r] or 0, (dq[r] or 0) - (ownG[r] or 0))   -- Golden crafts still to make (they also feed the Diamond quest)
+					local lack = math.max(0, crafts * NEED - (ownN[r] or 0))
+					if lack > 0 then missing[r] = lack total = total + lack end
+				end
+				return missing, total, open
+			end
+
+			------------------------------------------------------------ protect (shared by all three toggles)
+			local hOn, cOn, pOn = false, false, false
+			local hRun, cRun, pRun = 0, 0, 0
+			local lastProtKey = ""
+			local function applyProtect()
+				local want = pOn or hOn or cOn
+				local set = nil
+				if want then
+					local _, eset = eggSet()
+					if eset then
+						local _, _, open = computeNeeds(nil, eset)
+						set = {}
+						for name in pairs(eset) do
+							local r = normR(autodel.rarityOf(name))
+							if r and open[r] then set[name] = true end
+						end
+						if next(set) == nil then set = nil end
+					end
+				end
+				local keyParts = {}
+				for n in pairs(set or {}) do keyParts[#keyParts + 1] = n end
+				table.sort(keyParts)
+				local key = table.concat(keyParts, ",")
+				HG.questProtect = set
+				if key ~= lastProtKey then
+					lastProtKey = key
+					if autodel and autodel.reapply then autodel.reapply() end
+				end
+				return set
+			end
+			local function protLoop(id)
+				while alive and pRun == id and (pOn or hOn or cOn) do
+					refreshQuests()
+					pcall(applyProtect)
+					local t0 = os.clock()
+					while alive and pRun == id and os.clock() - t0 < 10 do task.wait(0.5) end
+				end
+				if alive and pRun == id then pcall(applyProtect) end   -- nothing on any more: unprotect
+			end
+			local function syncProtect()
+				pRun = pRun + 1
+				if pOn or hOn or cOn then task.spawn(protLoop, pRun) else pcall(applyProtect) end
+			end
+
+			------------------------------------------------------------ status line (shown on Quest Status)
+			local function statusLines()
+				refreshQuests(true)
+				local lines = { fromUI and "Quests read from the game" or "Quests: built-in list (game panel not readable) - crafts counted here" }
+				for i, q in ipairs(quests) do
+					lines[#lines + 1] = string.format("%s: %s", qText(i), q.locked and "locked" or (remaining(i) == 0 and "done" or (remaining(i) .. " left")))
+				end
+				return table.concat(lines, " | ")
+			end
+			-- Live data for the Quest Status card: a header line + one { name, value } per quest (the card refreshes every 3 s)
+			statusBtn.get = function()
+				refreshQuests()
+				local act = activeIdx()
+				local stats = {}
+				for i, q in ipairs(quests) do
+					local v
+					if q.locked then v = "locked"
+					elseif remaining(i) == 0 then v = "done"
+					else v = string.format("%d / %d", q.need - remaining(i), q.need) end
+					stats[#stats + 1] = { name = string.format("%d %s %s", q.need, q.rarity, q.variant:lower()), value = (i == act and "▶ " or "") .. v }
+				end
+				return fromUI and "Read from the game" or "Built-in list (game panel not readable) - crafts counted by this script", stats
+			end
+			resetBtn.run = function()
+				for k in pairs(done) do done[k] = nil end
+				saveDone()
+				lastRead = -1e9
+				return true
+			end
+
+			------------------------------------------------------------ Quest Hatch
+			local engaged, prev = false, nil
+			-- What Quest Hatch changed (your egg + Auto Hatch) is also written to a small file while it is engaged, so that after a re-execute
+			-- the old values are known: Quest Hatch off -> Auto Hatch / egg are put back; Quest Hatch on -> it keeps the ORIGINAL values to put back later.
+			local HFILE = "quest30_hatch_" .. tostring(lp.UserId) .. ".json"
+			local function readMarker()
+				local raw = Store.read(HFILE)
+				if not raw then return nil end
+				local okJ, d = pcall(function() return HttpService:JSONDecode(raw) end)
+				if okJ and type(d) == "table" and type(d.on) == "boolean" then return { egg = d.egg, on = d.on } end
+				return nil
+			end
+			local function writeMarker(p) pcall(Store.write, HFILE, HttpService:JSONEncode(p and { egg = p.egg, on = p.on } or {})) end
+			-- Auto Hatch running on the 30M event egg is Quest Hatch's own leftover (e.g. saved from an earlier run), never "how you had it":
+			-- it is not remembered as ON, so turning Quest Hatch off switches Auto Hatch off.
+			local function fixPrev(p)
+				if p and p.on and type(p.egg) == "string" and p.egg:find("30M") then p.on = false end
+				return p
+			end
+			local function engage(name)
+				if engaged then return end
+				engaged = true
+				prev = fixPrev(readMarker() or { egg = selectedEgg and selectedEgg.name, on = (hatchEntry._get and hatchEntry._get()) == true })
+				writeMarker(prev)
+				local e = eggByName[name]
+				local label = name
+				if eggEntry._refresh then eggEntry._refresh(label) end
+				eggEntry.callback(label)
+				if hatchEntry._setUI and not (hatchEntry._get and hatchEntry._get()) then hatchEntry._setUI(true) end
+			end
+			local function release()
+				if not engaged then return end
+				engaged = false
+				local p = prev
+				prev = nil
+				writeMarker(nil)
+				if not p then return end
+				if p.egg and eggByName[p.egg] and not (selectedEgg and selectedEgg.name == p.egg) then
+					local e = eggByName[p.egg]
+					local label = p.egg
+					if eggEntry._refresh then eggEntry._refresh(label) end
+					eggEntry.callback(label)
+				end
+				if hatchEntry._setUI and (hatchEntry._get and hatchEntry._get()) ~= p.on then hatchEntry._setUI(p.on) end
+			end
+			local function hatchLoop(id)
+				local function act() return alive and hOn and hRun == id end
+				while act() do
+					refreshQuests()
+					local name, set, why = eggSet()
+					if not set then
+						setDesc(hatchT, "Waiting: " .. tostring(why))
+						release()
+					else
+						local groups = getGroups(act)
+						if not act() then break end
+						if groups then
+							local missing, total = computeNeeds(groups, set)
+							if total > 0 then
+								local parts = {}
+								for r, n in pairs(missing) do parts[#parts + 1] = string.format("%d %s", n, r) end
+								table.sort(parts)
+								engage(name)
+								setDesc(hatchT, "Hatching " .. name .. " | still missing: " .. table.concat(parts, ", "))
+							else
+								release()
+								setDesc(hatchT, "Enough pets for every open quest - waiting (Auto Hatch is back to how you had it)")
+							end
+						else
+							setDesc(hatchT, "Can't read your pets right now...")
+						end
+					end
+					local t0 = os.clock()
+					while act() and os.clock() - t0 < 12 do task.wait(0.5) end
+				end
+				release()
+				if alive and hRun == id then setDesc(hatchT, hatchT.desc) end
+			end
+			local function restoreFromMarker()   -- Quest Hatch is off but an earlier run left your egg / Auto Hatch changed: put them back
+				if engaged or hOn then return end
+				local m = fixPrev(readMarker())
+				if not m then return end
+				prev, engaged = m, true
+				release()
+			end
+			hatchT.callback = function(on)
+				if not alive then return end
+				hRun = hRun + 1
+				hOn = on == true
+				syncProtect()
+				if hOn then task.spawn(hatchLoop, hRun) else release() restoreFromMarker() setDesc(hatchT, hatchT.desc) end
+			end
+			task.spawn(function()   -- after a re-execute: wait until the toggles exist and the saved configuration is applied, then undo what the last run left behind
+				local t0 = os.clock()
+				while alive and not (hatchEntry._setUI and eggEntry.callback) and os.clock() - t0 < 30 do task.wait(0.5) end
+				task.wait(5)
+				if alive then restoreFromMarker() end
+			end)
+
+			------------------------------------------------------------ Quest Craft
+			local gJob = I.newJob({
+				name = NAME .. " Golden", icon = ICON, label = "Golden", fromLabel = "Normal", fromTier = "normal", need = NEED,
+				machine = "Golden", action = "Craft", island = CRAFT_ISLAND, cf = CRAFT_CF, noDrop = true, desc = "30M quest Golden crafts",
+			})
+			local dJobQ = I.newJob({
+				name = NAME .. " Diamond", icon = ICON, label = "Diamond", fromLabel = "Golden", fromTier = "golden", need = I.dJob.need or 5,
+				machine = "Diamond", action = "Craft", island = I.ISLAND_DIAMOND, cf = I.CF_DIAMOND, noDrop = true, desc = "30M quest Diamond crafts",
+			})
+			local function clearWant(job) for k in pairs(job.want) do job.want[k] = nil end job.finished = false end
+
+			local function craftLoop(id)
+				local function act() return alive and cOn and cRun == id end
+				local function say(t) setDesc(craftT, t) end
+				while act() do
+					if not HG.gate(NAME, act, say) then return end   -- priority first
+					refreshQuests()
+					local i, locked = activeIdx()
+					local name, set, why = eggSet()
+					local wait = 15
+					if not set then
+						say("Waiting: " .. tostring(why))
+					elseif not i then
+						say("All Luck Quests are done")
+						wait = 30
+					elseif locked then
+						say(qText(i) .. " is still locked - waiting for it to unlock")
+					else
+						local q = quests[i]
+						local job = q.variant == "Golden" and gJob or (q.variant == "Diamond" and dJobQ or nil)
+						if not job then
+							say(qText(i) .. ": " .. q.variant .. " quests aren't automated")
+							wait = 30
+						else
+							job.need = (q.variant == "Golden") and NEED or (I.dJob.need or 5)
+							clearWant(job)
+							local groups = getGroups(act)
+							if not act() then return end
+							if not groups then
+								say("Can't read your pets right now...")
+							else
+								local fromRaw = (q.variant == "Golden") and "normal" or "golden"
+								local cand = {}
+								for key, g in pairs(groups) do
+									if set[g.name] and normR(autodel.rarityOf(g.name)) == q.rarity and tostring(g.rawTier):lower() == fromRaw then
+										local n = math.floor(unspent(g) / job.need)
+										if n > 0 then cand[#cand + 1] = { key = key, n = n } end
+									end
+								end
+								table.sort(cand, function(a, b) if a.n ~= b.n then return a.n > b.n end return a.key < b.key end)
+								local left = remaining(i)
+								for _, c in ipairs(cand) do
+									if left <= 0 then break end
+									local take = math.min(c.n, left)
+									job.want[c.key] = take
+									left = left - take
+								end
+								if next(job.want) == nil then
+									say(string.format("%s | %d left | waiting for %d+ %s %s pets", qText(i), remaining(i), job.need, q.rarity, fromRaw))
+								else
+									local list, sets = I.planFor(job, groups)
+									if sets > 0 then
+										say(string.format("%s | %d left | crafting %d now...", qText(i), remaining(i), sets))
+										local before = job.crafts
+										local r = I.runTrip(NAME, act, job.cfg.island, job.cfg.cf, function() return I.doCrafts(job, act, list) end, say)
+										local made = job.crafts - before
+										if made > 0 then
+											local key = qKey(q)
+											done[key] = (done[key] or 0) + made
+											saveDone()
+											lastRead = -1e9   -- read the game's progress again right away
+										end
+										say(string.format("%s | +%d crafted | %d left", qText(i), made, math.max(0, remaining(i) - 0)))
+										if r == "stopped" then clearWant(job) return end
+										wait = 3
+									end
+								end
+								clearWant(job)   -- never leave counters behind (an empty list would mean "craft everything")
+							end
+						end
+					end
+					local t0 = os.clock()
+					while act() and os.clock() - t0 < wait do task.wait(0.5) end
+				end
+			end
+			craftT.callback = function(on)
+				if not alive then return end
+				cRun = cRun + 1
+				cOn = on == true
+				syncProtect()
+				if cOn then task.spawn(craftLoop, cRun) else setDesc(craftT, craftT.desc) end
+			end
+			protT.callback = function(on)
+				if not alive then return end
+				pOn = on == true
+				syncProtect()
+			end
+			eggPick.callback = function(option)
+				pickedEgg = option or AUTO
+				lastProtKey = ""
+				if hOn then hRun = hRun + 1 release() task.spawn(hatchLoop, hRun) end
+			end
+
+			table.insert(cleanupHooks, function()
+				hOn, cOn, pOn = false, false, false
+				hRun, cRun, pRun = hRun + 1, cRun + 1, pRun + 1
+				pcall(release)
+				HG.questProtect = nil
+				if autodel and autodel.reapply then pcall(autodel.reapply) end
+			end)
+
+			------------------------------------------------------------ Auto Inflate (Balloon Luck)
+			-- BalloonLuckService.RF.Inflate:InvokeServer() raises the balloon one level and takes the Air for it. From a capture the cost of going
+			-- from level L to L+1 is 580 * 1.29^L (L=1: 748 ... L=10: 7402, matching the game's "Need ... Air" button). Air and Level are read from
+			-- the game's own data (BalloonLuck). The call is only sent when the Air is enough; if the server still refuses (cost differs, max level)
+			-- the script waits until the Air has grown by 5% (or 60 s) before asking again.
+			local iRun, iOn = 0, false
+			local function balloonState()
+				local okD, d = pcall(function() return require(RS.Controllers.Core.DataController):GetReplica().Data end)
+				if not okD or type(d) ~= "table" or type(d.BalloonLuck) ~= "table" then return nil end
+				local b = d.BalloonLuck
+				local st = type(b.S) == "table" and b.S or b
+				local air, lvl = tonumber(st.Air), tonumber(st.Level)
+				if not air or not lvl then return nil end
+				return air, lvl
+			end
+			local function inflateCost(lvl) return math.floor(580 * 1.29 ^ lvl + 0.5) end
+			local function inflateRemote()
+				local r = RS:FindFirstChild("RemoteServices")
+				r = r and r:FindFirstChild("BalloonLuckService")
+				r = r and r:FindFirstChild("RF")
+				r = r and r:FindFirstChild("Inflate")
+				return r
+			end
+			local function inflateLoop(id)
+				local function act() return alive and iOn and iRun == id end
+				local retryAt, retryT = 0, 0   -- after a refusal: Air that has to be reached / time before the next try
+				while act() do
+					local air, lvl = balloonState()
+					local rf = inflateRemote()
+					if not rf then
+						setDesc(inflateT, "Balloon Luck remote not found")
+					elseif not air then
+						setDesc(inflateT, "Can't read your Balloon Luck data yet...")
+					else
+						local cost = inflateCost(lvl)
+						local ready = air >= cost and (air >= retryAt or os.clock() >= retryT)
+						if ready then
+							setDesc(inflateT, string.format("Inflating | Lv %d | Air %d / %d", lvl, air, cost))
+							pcall(function() return rf:InvokeServer() end)
+							task.wait(0.7)
+							local air2, lvl2 = balloonState()
+							if lvl2 and lvl2 > lvl then
+								retryAt, retryT = 0, 0
+								setDesc(inflateT, string.format("Inflated to Lv %d | Air left %d", lvl2, air2 or 0))
+							else   -- the server did not raise the level: wait for more Air (or a minute) before trying again
+								retryAt, retryT = air * 1.05, os.clock() + 60
+								setDesc(inflateT, string.format("Lv %d | the server did not inflate - waiting for more Air", lvl))
+							end
+						else
+							setDesc(inflateT, string.format("Lv %d | Air %d / %d (next level)", lvl, air, cost))
+						end
+					end
+					local t0 = os.clock()
+					while act() and os.clock() - t0 < 2 do task.wait(0.5) end
+				end
+				if alive and iRun == id then setDesc(inflateT, inflateT.desc) end
+			end
+			inflateT.callback = function(on)
+				if not alive then return end
+				iRun = iRun + 1
+				iOn = on == true
+				if iOn then task.spawn(inflateLoop, iRun) else setDesc(inflateT, inflateT.desc) end
+			end
+
+			return { entries = { eggPick, hatchT, protT, craftT, inflateT, statusBtn, resetBtn } }
+		end)
+		if okQ then return resQ end
+		warn("[WORST Hub] 30M Event quests failed to load: " .. tostring(resQ))
+		return nil
+	end)()
+
 	-------------------------------------------------------------------------- KAITUN
 	HG.kaitun = (function()
 		local mainEntry = {
@@ -7138,7 +7821,7 @@ local function buildLogic()
 			-- If the catalog is unavailable, use the last discovered/configured egg.
 			if not latestName then latestName = EGGS[#EGGS] and EGGS[#EGGS].name end
 			if latestName and eggByName[latestName] then
-				local latestLabel = eggByName[latestName].auto and ("[NEW!!] " .. latestName) or latestName
+				local latestLabel = latestName
 				if eggEntry._refresh then eggEntry._refresh(latestLabel) end
 				eggEntry.callback(latestLabel)
 				if hatchEntry._setUI and not (hatchEntry._get and hatchEntry._get()) then hatchEntry._setUI(true) end
@@ -7390,12 +8073,12 @@ local function buildLogic()
 			desc = "Goes to each island's portal, buys it, travels there and continues to the next one. Keeps retrying until you can afford it. Stays on when finished and re-checks for new islands every 5 minutes.",
 		}
 		-- the dropdown shows "[NEW!!] <island>" for islands found in the game that are not hard-coded in the script
-		local function islandLabel(n) return newIsland[n] and ("[NEW!!] " .. n) or n end
+		local function islandLabel(n) return n end   -- no "[NEW!!]" tag
 		local TRAVEL_OPTIONS = {}
 		for _, n in ipairs(TRAVEL_LIST) do TRAVEL_OPTIONS[#TRAVEL_OPTIONS + 1] = islandLabel(n) end
 		local pickEntry = {
 			type = "dropdown", name = "Teleport to", icon = "🧭", width = 240,
-			desc = "Pick the island you want to travel to. Islands marked [NEW!!] were found in the game and are not in the script's list yet.",
+			desc = "Pick the island you want to travel to. Islands found in the game that are not in the script's list are added automatically.",
 			options = TRAVEL_OPTIONS, default = TRAVEL_OPTIONS[1],
 		}
 		local goEntry = {
@@ -8739,8 +9422,8 @@ local function buildLogic()
 				options = { "Keep", "Replace", "Better" }, default = "Keep",
 			}
 			local infoEntry = {
-				type = "button", name = "Current Ring", icon = "💍", noSave = true,
-				desc = "Shows your current ring (its name and four stats) in a small card. Also prints the ring data and the Colosseum remotes to the console (F9).",
+				type = "ringinfo", name = "Current Ring", icon = "💍", noSave = true,
+				desc = "Shows your current ring (its name and four stats). Updates by itself.",
 			}
 
 			local runId, mode = 0, "Keep"
@@ -9561,12 +10244,42 @@ local function buildLogic()
 				if data then pcall(walkD, data, 1, "") else print("game data not available") end
 			end
 
+			-- Live data for the Current Ring card: ring name + the four stats in a fixed order.
+			infoEntry.get = function()
+				local cur = currentRelic()
+				local byType = {}
+				local boosts = cur and cur.Boosts
+				if type(boosts) == "table" then
+					for _, b in pairs(boosts) do
+						if type(b) == "table" then byType[tostring(b.Type)] = fmtStat(b.Value) end
+					end
+				end
+				local stats = {}
+				for _, k in ipairs({ "Luck", "ClickMultiplier", "Rebirth", "Walkspeed" }) do
+					stats[#stats + 1] = { name = STAT_LABEL[k], value = byType[k] or "-" }
+				end
+				return cur and tostring(cur.Name or "Ring") or "No ring yet", stats
+			end
+
 			-- ---- POWER-UPS: teleport to the pickups on the arena floor (Sugar Rush = 2x damage, Freeze = enemies frozen 3 s, Treat = +1 Treat) ----
 			-- The pickups are found by their text label ("Sugar Rush!", "Freeze", "+1 Treat") in the world, so no object name has to be known.
 			-- Only pickups inside the arena are used, and only while a run is being fought. "Print Pickup Info" lists what was found (F9).
 			local grabToggle = {
 				type = "toggle", name = "Auto Collect Drop Boosts", icon = "⚡", default = false,
 				desc = "While Pet Defense is fighting: teleports to the pickups on the arena floor - Sugar Rush (2x damage), Candy Bomb, Freeze (enemies frozen 3 s) and, last, +1 Treat - then back to the arena center.",
+			}
+			-- Kaitun-style checklist under the toggle: click a check to skip that pickup, or the "All" check for all of them (kept as a field: no new local)
+			grabToggle.card = {
+				type = "checkcard", name = "Drop Boosts", noSave = true, master = grabToggle, skip = {},
+				title = "What Auto Collect Drop Boosts picks up",
+				sub = "Only while Pet Defense is fighting. Goes in this order.",
+				items = {
+					{ key = "sugar",  title = "Sugar Rush", l1 = "2x damage for a while.", l2 = "" },
+					{ key = "candy",  title = "Candy Bomb", l1 = "Blasts the opponents.", l2 = "" },
+					{ key = "freeze", title = "Freeze",     l1 = "Freezes the enemies for 3 seconds.", l2 = "" },
+					{ key = "treat",  title = "+1 Treat",   l1 = "Picked up last.", l2 = "" },
+				},
+				tip = "Tip: click a check to skip that pickup (X) - click it again to turn it back on. \"All\" switches every pickup.",
 			}
 			local PU_RADIUS   = 250   -- studs from ARENA_CENTER: pickups further away are ignored (other events also have \"Treat\" texts)
 			local PU_LIFT     = 2     -- studs above the pickup the character is put at
@@ -9631,6 +10344,7 @@ local function buildLogic()
 				for lbl in pairs(puLabels) do
 					if lbl.Parent then
 						local k = puKind(lbl.Text)
+						if k and grabToggle.card.skip[k] then k = nil end   -- switched off in the Drop Boosts checklist
 						local p = k and puPos(lbl)
 						if p and (p - ARENA_CENTER.Position).Magnitude <= PU_RADIUS then pts[#pts + 1] = { k = k, p = p } end
 					else
@@ -9701,7 +10415,7 @@ local function buildLogic()
 
 			table.insert(cleanupHooks, function() runId = runId + 1 pd.run = false end)
 
-			return { toggle = toggle, mode = modeEntry, info = infoEntry, grab = grabToggle }
+			return { toggle = toggle, mode = modeEntry, info = infoEntry, grab = grabToggle, grabcard = grabToggle.card }
 		end)
 		if okP then HG.petdef = resP else warn("[WORST Hub] Pet Defense failed to load: " .. tostring(resP)) end
 	end
@@ -10449,6 +11163,7 @@ local function buildLogic()
 		petdef = HG.petdef,
 		dig = HG.dig,
 		balloon = HG.balloon,
+		quest30 = HG.quest30,
 		islands = islandTools,
 		priority = HG, kaitun = HG.kaitun,
 		hatchRestart = function() if HA.restart then HA.restart() end end,
@@ -16639,6 +17354,7 @@ local TAB_SCRIPTS = {
 			},
 		},
 		{ name = "Islands", entries = Logic and Logic.islands and { Logic.islands.toggle, Logic.islands.pick, Logic.islands.go } or {} },
+		{ name = "30M Event", entries = Logic and Logic.quest30 and Logic.quest30.entries or {} },
 	} },
 	-- the Pets tab has its own pages (buttons at the top of the tab): Crafting, Enchanting, Auto Equip, Auto Delete (inventory)
 	Pets = Logic and { pages = {
@@ -16691,7 +17407,7 @@ local TAB_SCRIPTS = {
 			if Logic.dig then entries[#entries + 1] = Logic.dig.toggle end
 			return entries
 		end)() },
-		{ name = "Auto Pet Defense", entries = Logic.petdef and { Logic.petdef.toggle, Logic.petdef.mode, Logic.petdef.grab, Logic.petdef.info } or {} },
+		{ name = "Auto Pet Defense", entries = Logic.petdef and { Logic.petdef.toggle, Logic.petdef.mode, Logic.petdef.grab, Logic.petdef.grabcard, Logic.petdef.info } or {} },
 		{ name = "Halloween", entries = Logic.halloween and {
 			Logic.halloween.treat, Logic.halloween.boss,
 			Logic.halloween.shop, Logic.halloween.items,
@@ -16778,6 +17494,28 @@ local TAB_SCRIPTS = {
 			callback = function(on) record.debugMode = on == true end,
 		},
 		{
+			-- TOGGLE "Auto Close Ui": closes every game window that pops up (machines, Balloon Luck, shops...) so it can't block auto hatch.
+			type = "toggle", name = "Auto Close Ui", icon = "✖", default = true,
+			desc = "Closes every game window that pops up (machines, Balloon Luck, shops...) the moment it opens, so it can't block auto hatch. Never touches the Inventory, trades or the HUD. Turn it off if you want to use the game's windows yourself.",
+			callback = function(on) env.WORST_AUTOCLOSE_UI = on == true end,
+		},
+		(function()
+			-- SLIDER "FPS": sets the game's FPS cap (needs an executor with setfpscap). Only applied once you move the slider.
+			local DEF_FPS, touched = 60, false
+			table.insert(cleanupHooks, function()
+				if touched and typeof(setfpscap) == "function" then pcall(setfpscap, DEF_FPS) end
+			end)
+			return {
+				type = "slider", name = "FPS", icon = "🎞", min = 5, max = 240, default = DEF_FPS, step = 1,
+				desc = "Sets the FPS cap (60 = normal). Lower it to save CPU / GPU while you farm. Needs an executor with setfpscap. Only applied once you move the slider; unloading the hub puts it back to 60.",
+				callback = function(v)
+					v = math.floor(tonumber(v) or DEF_FPS)
+					if v ~= DEF_FPS then touched = true end
+					if touched and typeof(setfpscap) == "function" then pcall(setfpscap, v) end
+				end,
+			}
+		end)(),
+		{
 			type = "button", name = "Mini Ui", icon = "📱", noSave = true,
 			desc = "Shrinks the hub away and opens the small Mini Ui (Kaitun Hatch + Kaitun Stats switch on; Kaitun Events only if you switch it on). It does not change the FPS or 3D rendering; its [-] button hides the toggles. Use its Full UI button, or the minimize key, to come back.",
 			run = function()
@@ -16831,7 +17569,7 @@ end
 -- the Settings tab has two pages. Ui = the entries listed here (in this order), General = everything else.
 -- (Reset Script is not a row any more: it is a button at the top right of the tab, see buildScriptPage.)
 do
-	local PAGE2 = { "Animated Background", "Minimize Keybind", "Auto Save Configuration", "Show Status", "Mini Ui", "Disable 3D Rendering", "Auto Rejoin", "Anti AFK", "Save Configuration", "Configuration List" }
+	local PAGE2 = { "Animated Background", "Minimize Keybind", "Auto Save Configuration", "Show Status", "Mini Ui", "Disable 3D Rendering", "FPS", "Auto Rejoin", "Anti AFK", "Save Configuration", "Configuration List" }
 	local isP2, byName, p1, p2 = {}, {}, {}, {}
 	for _, n in ipairs(PAGE2) do isP2[n] = true end
 	for _, e in ipairs(TAB_SCRIPTS.Settings) do
@@ -20857,6 +21595,159 @@ local function buildSellList(row, entry)
 	refresh()
 end
 
+---------------------------------------------------------------- Kaitun-style info cards (Events > Auto Pet Defense)
+-- Config.checkCard: numbered checklist, click a check to switch that item off (entry.skip[key] = true); the "All" check switches every item.
+-- Config.ringCardInfo: the same look for the Current Ring (name + four live stats). Both are fields of Config so no new locals are added.
+function Config.cardFrame(host)
+	local card = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = C.card, BackgroundTransparency = 0.35, BorderSizePixel = 0 }, host)
+	corner(card, UDim.new(0, 14))
+	stroke(card, C.stroke, 1)
+	return card
+end
+function Config.cardReadable(card)   -- same readability pass the Kaitun card gets
+	for _, d in ipairs(card:GetDescendants()) do
+		if d:IsA("TextLabel") and d.Text ~= "✓" and d.Text ~= "X" then
+			if d.Font == Enum.Font.Gotham then d.Font = Enum.Font.GothamMedium end
+			if d.TextColor3 == C.sub then d.TextColor3 = Color3.fromRGB(205, 205, 205) end
+			d.TextStrokeColor3 = Color3.new(0, 0, 0)
+			d.TextStrokeTransparency = 0.55
+		end
+	end
+end
+function Config.checkCard(host, entry)
+	host.Size = UDim2.fromOffset(1066, 300)
+	local card = Config.cardFrame(host)
+	frame(card, 0, 90, 1066, 1, C.stroke)
+	frame(card, 533, 112, 1, 150, C.stroke)
+	label(card, entry.title or entry.name, 28, 34, 24, C.text, Enum.Font.GothamMedium)
+	label(card, entry.sub or "", 28, 62, 16, C.sub, Enum.Font.Gotham)
+	label(card, entry.tip or "", 28, 280, 14, C.sub, Enum.Font.Gotham)
+	local recs = {}
+	local function isOn() return entry.master and entry.master._get and entry.master._get() == true end
+	local function paint(rec, on)
+		local sk = rec.key and entry.skip[rec.key] == true
+		if rec.key == nil then   -- the "All" check: crossed out only when every item is off
+			sk = true
+			for _, it in ipairs(entry.items) do if entry.skip[it.key] ~= true then sk = false break end end
+		end
+		rec.frame.BackgroundColor3 = (on and not sk) and Color3.fromRGB(70, 160, 90) or OFF_COLOR
+		rec.glyph.Text = sk and "X" or "✓"
+		if rec.title then rec.title.TextColor3 = sk and Color3.fromRGB(105, 105, 105) or C.text end
+	end
+	local function check(cx, cy, key, titleLbl)
+		local c = new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(cx, cy), Size = UDim2.fromOffset(26, 26), BackgroundColor3 = OFF_COLOR, BorderSizePixel = 0 }, card)
+		corner(c, UDim.new(1, 0))
+		local glyph = new("TextLabel", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "✓", TextColor3 = Color3.new(1, 1, 1), TextSize = 17, Font = Enum.Font.GothamBold }, c)
+		local rec = { frame = c, glyph = glyph, title = titleLbl, key = key }
+		recs[#recs + 1] = rec
+		local ring = stroke(c, Color3.new(1, 1, 1), 1.5, 1)
+		local btn = new("TextButton", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "", AutoButtonColor = false }, c)
+		btn.MouseEnter:Connect(function() tween(ring, { Transparency = 0.25 }) end)
+		btn.MouseLeave:Connect(function() tween(ring, { Transparency = 1 }) end)
+		btn.MouseButton1Click:Connect(function()
+			if key then
+				entry.skip[key] = (entry.skip[key] ~= true) or nil
+			else
+				local anyOn = false
+				for _, it in ipairs(entry.items) do if entry.skip[it.key] ~= true then anyOn = true break end end
+				for _, it in ipairs(entry.items) do entry.skip[it.key] = anyOn or nil end   -- some on -> all off, all off -> all on
+			end
+			for _, r in ipairs(recs) do paint(r, isOn()) end
+		end)
+	end
+	-- "All" check in the top right corner of the card
+	label(card, "All", 1010, 48, 16, C.sub, Enum.Font.Gotham, Enum.TextXAlignment.Right)
+	check(1037, 48, nil, nil)
+	for n, it in ipairs(entry.items) do
+		local x, cx = (n <= 2) and 28 or 583, (n <= 2) and 500 or 1037
+		local y = 112 + ((n - 1) % 2) * 80
+		label(card, n .. ".)", x, y + 12, 19, C.sub, Enum.Font.GothamMedium)
+		local t = label(card, it.title, x + 44, y + 12, 19, C.text, Enum.Font.GothamMedium)
+		label(card, it.l1 or "", x + 44, y + 36, 16, C.sub, Enum.Font.Gotham)
+		if it.l2 and it.l2 ~= "" then label(card, it.l2, x + 44, y + 58, 16, C.sub, Enum.Font.Gotham) end
+		check(cx, y + 12, it.key, t)
+	end
+	Config.cardReadable(card)
+	task.spawn(function()
+		while alive and card.Parent do
+			local on = isOn()
+			for _, r in ipairs(recs) do paint(r, on) end
+			task.wait(0.25)
+		end
+	end)
+end
+function Config.ringCardInfo(host, entry)
+	host.Size = UDim2.fromOffset(1066, 250)
+	local card = Config.cardFrame(host)
+	frame(card, 0, 90, 1066, 1, C.stroke)
+	frame(card, 533, 112, 1, 90, C.stroke)
+	label(card, "Your Current Ring", 28, 34, 24, C.text, Enum.Font.GothamMedium)
+	local subLbl = label(card, "Looking for your ring...", 28, 62, 16, C.sub, Enum.Font.Gotham)
+	label(card, "Shows the ring you own right now. Updates by itself.", 28, 228, 14, C.sub, Enum.Font.Gotham)
+	local vals, ringName = {}, nil
+	for n = 1, 4 do
+		local x, vx = (n <= 2) and 28 or 583, (n <= 2) and 510 or 1050
+		local y = 112 + ((n - 1) % 2) * 50
+		label(card, n .. ".)", x, y + 12, 19, C.sub, Enum.Font.GothamMedium)
+		local t = label(card, "-", x + 44, y + 12, 19, C.text, Enum.Font.GothamMedium)
+		local v = label(card, "-", vx, y + 12, 20, Color3.new(1, 1, 1), Enum.Font.GothamBold, Enum.TextXAlignment.Right)
+		v.Size = UDim2.fromOffset(200, 28)
+		vals[n] = { name = t, value = v }
+	end
+	Config.cardReadable(card)
+	task.spawn(function()
+		while alive and card.Parent do
+			local ok, name, stats = pcall(entry.get)
+			if ok and type(stats) == "table" then
+				subLbl.Text = "Ring: " .. tostring(name)
+				for n = 1, 4 do
+					local st = stats[n]
+					vals[n].name.Text = st and tostring(st.name) or "-"
+					vals[n].value.Text = st and tostring(st.value) or "-"
+				end
+			end
+			task.wait(3)
+		end
+	end)
+end
+
+-- Quest Status: the same card look as "Your Current Ring" (title, header line, two numbered columns with the value on the right).
+-- entry.get() returns (header text, list of { name, value }). Up to 6 quests are shown, 3 per column.
+function Config.questCardInfo(host, entry)
+	host.Size = UDim2.fromOffset(1066, 300)
+	local card = Config.cardFrame(host)
+	frame(card, 0, 90, 1066, 1, C.stroke)
+	frame(card, 533, 112, 1, 140, C.stroke)
+	label(card, "30M Event - Luck Quests", 28, 34, 24, C.text, Enum.Font.GothamMedium)
+	local subLbl = label(card, "Reading the Luck Quests...", 28, 62, 16, C.sub, Enum.Font.Gotham)
+	label(card, "Shows every Luck Quest and how far you are. Updates by itself.", 28, 278, 14, C.sub, Enum.Font.Gotham)
+	local vals = {}
+	for n = 1, 6 do
+		local x, vx = (n <= 3) and 28 or 583, (n <= 3) and 510 or 1050
+		local y = 112 + ((n - 1) % 3) * 50
+		label(card, n .. ".)", x, y + 12, 19, C.sub, Enum.Font.GothamMedium)
+		local t = label(card, "-", x + 44, y + 12, 19, C.text, Enum.Font.GothamMedium)
+		local v = label(card, "-", vx, y + 12, 20, Color3.new(1, 1, 1), Enum.Font.GothamBold, Enum.TextXAlignment.Right)
+		v.Size = UDim2.fromOffset(200, 28)
+		vals[n] = { name = t, value = v }
+	end
+	Config.cardReadable(card)
+	task.spawn(function()
+		while alive and card.Parent do
+			local ok, head, stats = pcall(entry.get)
+			if ok and type(stats) == "table" then
+				subLbl.Text = tostring(head)
+				for n = 1, 6 do
+					local st = stats[n]
+					vals[n].name.Text = st and tostring(st.name) or "-"
+					vals[n].value.Text = st and tostring(st.value) or "-"
+				end
+			end
+			task.wait(3)
+		end
+	end)
+end
+
 ---------------------------------------------------------------- page builder
 local builders = {
 	button = buildButton, toggle = buildToggle, slider = buildSlider, dropdown = buildDropdown,
@@ -20877,6 +21768,12 @@ local function buildScriptPage(tabName, entries)
 				entry._id = idPrefix .. "/" .. tostring(entry.name or i)
 				local okGrid, errGrid = pcall(Config.enchantGrid, gridHost, entry)
 				if not okGrid then warn("[WORST Hub] Enchanting page failed: " .. tostring(errGrid)) end
+			elseif entry.type == "checkcard" or entry.type == "ringinfo" or entry.type == "questinfo" then
+				-- Kaitun-style info card instead of a normal row
+				local host = new("Frame", { LayoutOrder = i, Size = UDim2.fromOffset(1066, 300), BackgroundTransparency = 1, BorderSizePixel = 0 }, list)
+				entry._id = idPrefix .. "/" .. tostring(entry.name or i)
+				local okC, errC = pcall(entry.type == "checkcard" and Config.checkCard or (entry.type == "questinfo" and Config.questCardInfo or Config.ringCardInfo), host, entry)
+				if not okC then warn("[WORST Hub] " .. tostring(entry.name) .. " card failed: " .. tostring(errC)) end
 			else
 			local row = new("Frame", {
 				LayoutOrder = i, Size = UDim2.fromOffset(1066, 84), BackgroundColor3 = C.card, BackgroundTransparency = CARD_T, BorderSizePixel = 0,
@@ -21875,7 +22772,7 @@ do
 		function checksL.paint(e, masterOn)
 			local sk = checksL.skipped(e.key)
 			e.frame.BackgroundColor3 = (masterOn and not sk) and Color3.fromRGB(70, 160, 90) or OFF_COLOR
-			e.glyph.Text = sk and "✕" or "✓"          -- ✕ = this part is switched off (click the check to switch it back on)
+			e.glyph.Text = sk and "X" or "✓"          -- X = this part is switched off (click the check to switch it back on)
 			e.title.TextColor3 = sk and Color3.fromRGB(105, 105, 105) or C.text
 		end
 		-- Returns whether a group is on.
@@ -21928,7 +22825,7 @@ do
 			end)
 		end
 
-		label(card, "Tip: click a check to switch that part off (✕) - click it again to switch it back on.", 28, 440, 14, C.sub, Enum.Font.Gotham)
+		label(card, "Tip: click a check to switch that part off (X) - click it again to switch it back on.", 28, 440, 14, C.sub, Enum.Font.Gotham)
 
 		-- left: Kaitun Hatch
 		label(card, "What Kaitun Hatch does", 28, 34, 24, C.text, Enum.Font.GothamMedium)
@@ -21961,7 +22858,7 @@ do
 		-- Heavier font, brighter grey and a soft dark outline for every text in this card.
 		;(function()
 			for _, d in ipairs(card:GetDescendants()) do
-				if d:IsA("TextLabel") and d.Text ~= "✓" and d.Text ~= "✕" then
+				if d:IsA("TextLabel") and d.Text ~= "✓" and d.Text ~= "X" then
 					if d.Font == Enum.Font.Gotham then d.Font = Enum.Font.GothamMedium end
 					if d.TextColor3 == C.sub then d.TextColor3 = Color3.fromRGB(205, 205, 205) end
 					d.TextStrokeColor3 = Color3.new(0, 0, 0)
