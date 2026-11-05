@@ -1651,7 +1651,11 @@ table.insert(TAB_SCRIPTS.Settings.pages, { name = "General", entries = Extras.ge
 -- Everything here is for gaining / selling / buying / reborning only. Four pages: Lifting, Sell, Buy, Reborn Macro.
 TAB_SCRIPTS.Farming = (function()
 	local RS = game:GetService("ReplicatedStorage")
-	local function fire(...) RS:WaitForChild("RemoteEvent"):FireServer({ ... }) end
+	local function fire(...)
+		-- while the safe-zone teleport runs (sell disabled), no script feature may sell the player's muscle
+		if (...) == "SellMuscle" and env.WORSTSellHold then return end
+		RS:WaitForChild("RemoteEvent"):FireServer({ ... })
+	end
 
 	-- every loop remembers the "generation" it was started in, so switching a feature off and on again never leaves two copies running
 	local gens = {}
@@ -2261,29 +2265,91 @@ TAB_SCRIPTS.Farming = (function()
 		},
 		{
 			type = "toggle", name = "Auto Body Alter", icon = "🔁", default = false,
-			desc = "Auto buy new Body Alter (Stage).",
+			desc = "Buys the next Body Alter (Stage) the moment you have enough cash (for example right after Sell If Enough). One purchase try, no waiting loop.",
 			callback = function(on)
 				env.BuyAlter = on == true
 				if not on then Status.set("alter", nil) return end
 				local my = newGen("alter")
 				task.spawn(function()
-					while env.BuyAlter and gens.alter == my do
-						local before = stageValue()
-						Status.set("alter", "Trying to buy the next stage")
-						for i = 1, 30 do
-							if not env.BuyAlter or gens.alter ~= my then break end
-							fire("BuyItem", "Rebirth_Item", "Rebirth1", i)
-							task.wait(0.1)
-						end
-						task.wait(1)
-						if not env.BuyAlter or gens.alter ~= my then break end
+					local cN, cPrice, cAt = nil, nil, -1e9      -- the next Body Alter (stage number, price), re-read about once a second
+					local lastTryCash, lastTryAt = -1, -1e9     -- after a refused try, only try again when the cash has grown (or after 10s)
+					local lastBlind = -1e9
+					-- did the purchase of stage cN go through? The Stage stat is the main proof; the shop screen is only used when the stat can't be read
+					local function wasBought(before, cN)
 						local after = stageValue()
-						if before and after and after > before then
-							Status.set("alter", "Bought stage " .. after)
-						else
-							Status.set("alter", "Waiting for enough coins")
+						if before and after then return after > before end
+						local nn = readNextBodyAlter()
+						local nextN = nn and tonumber(tostring(nn):match("(%d+)$"))
+						return nextN ~= nil and nextN > cN
+					end
+					while env.BuyAlter and gens.alter == my do
+						local now = os.clock()
+						if now - cAt > 1 then
+							local nm, pr = readNextBodyAlter()
+							cN, cPrice, cAt = nm and tonumber(tostring(nm):match("(%d+)$")), pr, now
 						end
-						task.wait(4)
+						local cash = readCash()
+						if not cPrice or not cN then
+							-- can't see a price: either every stage is owned, or the Body Alter screen isn't readable -> old blind sweep, slowly
+							local stage = stageValue()
+							if stage and stage >= 30 then
+								Status.set("alter", "All Body Alter stages owned")
+							else
+								Status.set("alter", "Can't read the next Body Alter price - trying blind")
+								if now - lastBlind > 5 then
+									lastBlind = now
+									local before = stage
+									for i = 1, 30 do
+										if not env.BuyAlter or gens.alter ~= my then break end
+										fire("BuyItem", "Rebirth_Item", "Rebirth1", i)
+										task.wait(0.05)
+									end
+									local after = stageValue()
+									if before and after and after > before then Status.set("alter", "Bought stage " .. after) cAt = -1e9 end
+								end
+							end
+							task.wait(0.5)
+						elseif not cash then
+							Status.set("alter", "Can't read your cash")
+							task.wait(0.5)
+						elseif cash < cPrice then
+							Status.set("alter", ("Stage %d costs %s - waiting for cash (have %s)"):format(cN, fmtNum(cPrice), fmtNum(cash)))
+							task.wait(0.1)
+						elseif cash <= lastTryCash * 1.002 and now - lastTryAt < 10 then
+							-- enough cash, but the last try was refused at about the same cash: wait for the next sale instead of spamming
+							Status.set("alter", ("Stage %d refused at this cash - waiting for the next sale"):format(cN))
+							task.wait(0.2)
+						else
+							-- enough cash: ONE purchase try, then check it worked
+							Status.set("alter", ("Buying Body Alter stage %d"):format(cN))
+							lastTryCash, lastTryAt = cash, now
+							local before = stageValue()
+							fire("BuyItem", "Rebirth_Item", "Rebirth1", cN)
+							local bought = false
+							local t0 = os.clock()
+							while os.clock() - t0 < 1.2 do   -- return the moment it shows as bought
+								task.wait(0.05)
+								if wasBought(before, cN) then bought = true break end
+							end
+							if not bought and cash >= cPrice * 1.02 and env.BuyAlter and gens.alter == my then
+								-- clearly enough cash but the stage number didn't match the shop index: sweep the indexes once
+								for i = 1, 30 do
+									if not env.BuyAlter or gens.alter ~= my then break end
+									fire("BuyItem", "Rebirth_Item", "Rebirth1", i)
+									task.wait(0.05)
+								end
+								task.wait(0.3)
+								bought = wasBought(before, cN)
+							end
+							cAt = -1e9   -- re-read the next stage right away
+							if bought then
+								Status.set("alter", "Bought stage " .. tostring(stageValue() or (cN)))
+								lastTryCash = -1
+							else
+								Status.set("alter", ("Stage %d refused - waiting for the next sale"):format(cN))
+							end
+							task.wait(0.05)
+						end
 					end
 					if gens.alter == my then Status.set("alter", nil) end
 				end)
@@ -2456,7 +2522,7 @@ TAB_SCRIPTS.Farming = (function()
 				task.spawn(function()
 					while env.EnableSell and gens.sellon == my do
 						-- off -> switch it on again; nothing heard yet (we may have joined after the game sent it) -> try a few times
-						if sellState == false or (sellState == nil and tries < 10) then
+						if not env.WORSTSellHold and (sellState == false or (sellState == nil and tries < 10)) then
 							tries = tries + 1
 							fire("ChangeSetting", "SellEnabled", true)   -- explicit value: it can never switch Sell off
 						end
@@ -2467,6 +2533,38 @@ TAB_SCRIPTS.Farming = (function()
 			end,
 		},
 	}
+
+	-- ---------------------------------------------------------------- WORST TOGGLE: the whole macro in one switch
+	do
+		local function findEntry(list, name)
+			for _, en in ipairs(list) do if type(en) == "table" and en.name == name then return en end end
+		end
+		local function setTo(en, v)
+			if en and en._setUI then pcall(en._setUI, v) end
+		end
+		table.insert(macro, 1, {
+			type = "toggle", name = "WORST TOGGLE", icon = "👑", default = false,
+			desc = "One switch for the whole macro: Auto Enable Sell, Sell If Enough, Gain Muscle (fast, no rollback), Smart Weight, Auto Body Alter, Auto Reborn. Also switches Anti AFK and Auto Rejoin on if they are off. Turning it off stops the macro features (Anti AFK / Auto Rejoin stay on).",
+			callback = function(on)
+				local list = {
+					findEntry(macro, "Auto Enable Sell"),
+					findEntry(macro, "Auto Sell Muscle (Sell If Enough)"),
+					findEntry(macro, "Auto Gain Muscle (Fast, No Rollback)"),
+					findEntry(rest, "Smart Weight"),
+					findEntry(rest, "Auto Body Alter"),
+					findEntry(macro, "Auto Reborn"),
+				}
+				if on then
+					for _, en in ipairs(list) do setTo(en, true) end
+					-- Anti AFK / Auto Rejoin are normally ON from the start: only switch them on if they were turned off in Settings
+					if Extras and Extras.antiAfk and Extras.antiAfk._get and not Extras.antiAfk._get() then setTo(Extras.antiAfk, true) end
+					if Extras and Extras.autoRejoin and Extras.autoRejoin._get and not Extras.autoRejoin._get() then setTo(Extras.autoRejoin, true) end
+				else
+					for _, en in ipairs(list) do setTo(en, false) end
+				end
+			end,
+		})
+	end
 
 	-- ---------------------------------------------------------------- the pages
 	-- entries: 1 = lift dropdown, 2 = Auto Lift, 3 = sell dropdown, 4 = Auto Sell; rest = Auto Buy Weight, Auto Body Alter, Smart Weight, Smart DNA
@@ -2990,7 +3088,8 @@ TAB_SCRIPTS.Miscellaneous = (function()
 		{ "Auto Buy Weight", "Buys the most expensive weight you can afford and skips the cheaper ones in between, so after a new stage you climb back fast: lift, sell, buy the best one you can afford, repeat. Smart Weight has priority if both are on.", "ℹ" },
 		{ "Smart Weight", "Same skipping as Auto Buy Weight, but never buys above what the current stage needs (saves coins). Pauses Auto Buy Weight while it is on.", "ℹ" },
 		{ "Smart DNA", "Will ONLY buy the DNA needed to reach the next stage, in order to save coins. It never buys weights.", "ℹ" },
-		{ "Auto Body Alter",              "Auto buys the new Body Alter (Stage).",                                                             "ℹ" },
+		{ "Auto Body Alter",              "Buys the next Body Alter (Stage) as soon as you have enough cash, one purchase try right after Sell If Enough sells. No waiting between tries.", "ℹ" },
+		{ "Reborn Macro: WORST TOGGLE",  "Switches the whole macro on or off in one click: Auto Enable Sell, Sell If Enough, fast no-rollback lifting, Smart Weight, Auto Body Alter, Auto Reborn. Anti AFK and Auto Rejoin are switched on too if they were off.", "ℹ" },
 		{ "Auto Rejoin", "Starts by itself when the script is executed. Rejoins the same server after a kick / disconnect (it can't get back in if that server is closed or full). Fill in Rejoin Loader so the hub starts again by itself.", "ℹ" },
 		{ "Reborn Macro: Gain + Sell",    "Fast no-rollback lifting plus Sell If Enough, in one place.",                                       "ℹ" },
 		{ "Reborn Macro: Auto Reborn",    "Reborns at stage 30 once you have 1 Sxtg coins. Reborning resets your progress.",                   "ℹ" },
@@ -5933,10 +6032,21 @@ end)
 -- Runs once per execution (not on respawn). Waits for the character, moves it instantly, then checks once that the game didn't move it back.
 do
 	local SAFE_ZONE = CFrame.new(-634.5390625, -46.80387878417969, 1859.409912109375, 1, -5.058507834831971e-09, -1.065684931115694e-14, 5.058507834831971e-09, 1, 1.044710700170981e-07, 1.0128382067233193e-14, -1.044710700170981e-07, 1)
+	local SafeRS = game:GetService("ReplicatedStorage")
+	-- the game's own Sell setting: ON = standing in the sell zone sells your muscle. Explicit value, so it can never toggle by accident.
+	local function setGameSell(on)
+		pcall(function()
+			SafeRS:WaitForChild("RemoteEvent", 10):FireServer({ "ChangeSetting", "SellEnabled", on })
+		end)
+	end
 	task.spawn(function()
+		-- 1) script executed: hold every sell feature and switch the game's Sell OFF before moving
+		env.WORSTSellHold = true
+		setGameSell(false)
 		local char = player.Character or player.CharacterAdded:Wait()
 		local hrp = char:WaitForChild("HumanoidRootPart", 15)
-		if not hrp or not alive then return end
+		if not hrp or not alive then env.WORSTSellHold = false return end
+		task.wait(0.5)   -- give the server a moment to apply "Sell OFF" before we touch the sell zone
 		local function goToSafeZone()
 			local c = player.Character
 			local root = c and c:FindFirstChild("HumanoidRootPart")
@@ -5947,12 +6057,17 @@ do
 				root.CFrame = SAFE_ZONE
 			end)
 		end
+		-- 2) teleport
 		goToSafeZone()
 		-- the game sometimes puts the character at its spawn right after loading: if we got moved away, go back once
 		task.wait(1.5)
-		if not alive then return end
-		local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-		if root and (root.Position - SAFE_ZONE.Position).Magnitude > 20 then goToSafeZone() end
+		if alive then
+			local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+			if root and (root.Position - SAFE_ZONE.Position).Magnitude > 20 then goToSafeZone() task.wait(1) end
+		end
+		-- 3) teleport finished: switch the game's Sell back ON and let the sell features work again
+		env.WORSTSellHold = false
+		if alive then setGameSell(true) end
 	end)
 end
 
