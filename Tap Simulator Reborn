@@ -103,19 +103,32 @@
 --// Kaitun tab   : two toggles only. "Kaitun Hatch" = MASTER toggle: switches every other feature toggle off and runs auto delete Common-Legendary, auto hatch the latest detected egg,
 --//                  auto craft (Golden at the "Craft When Storage Is" slider, which shows up under it while it is on, + Diamond/Rainbow) + collect, Anti AFK, Auto Rejoin, Show Status (Priority tab order),
 --//                  Kaitun Hatch does NOT touch your pets: Auto Rebirth (Best) and Auto Equip (Luckiest while hatching, Richest right before each rebirth) are run by "Kaitun Stats" (needs Kaitun Hatch), together with the enchanting.
---//                  "Kaitun Events" = switches Auto Chest Coins, Auto Trick or Treat, Auto Kill Hallow Boss and Auto Purchase Items (shop checked once an hour, Buy All)
+--//                  "Kaitun Events" = switches Auto Chest Coins + every [30M Event] page toggle (Quest Hatch, Quest Protect, Quest Craft, Auto Inflate); each one has its own green check on the Kaitun tab (the Halloween event is over)
 --//                  on by itself and shows live numbers. The window and the tabs never change.
---// Events tab   : page [General] -> "Auto Claim Lucky Ducky"; page [Halloween] -> "Auto Halloween Trick or Treat" (travels to the Halloween island, jumps in each house's circle, waits for the houses to refill, repeats); one lap per 4-hour refill with a countdown; "Auto Kill Boss" (Hallow Lord) and "Auto Purchase Items" (+ Items to Buy dropdown)
+--// Events tab   : page [General] -> "Auto Claim Lucky Ducky"; page [Halloween] -> CLOSED (shows a "This event no longer exists" popup and does not open); old notes: "Auto Halloween Trick or Treat" (travels to the Halloween island, jumps in each house's circle, waits for the houses to refill, repeats); one lap per 4-hour refill with a countdown; "Auto Kill Boss" (Hallow Lord) and "Auto Purchase Items" (+ Items to Buy dropdown)
 --// Events tab   : page [Balloons] -> "Auto Balloons" (teleports to each balloon of the Balloon Party and pops it, then goes back; Kaitun Hatch/Events no longer switch it on)
 --//                  page [Dig] -> "Auto Dig" (Autumn dig spot, hits the timing bar by itself, max 10 digs per hour; Kaitun Hatch/Events no longer switch it on)
 --// Trade tab    : "Choose Pets" dropdown ("+  pet  -" rows: left click = +1, right click = -1, + / - buttons for touch) + "Tokens They Must Pay" + "Auto Trade (Pay First)" -> accepts requests, offers exactly those pets and only Locks / Confirms once the other player's offer reaches the amount
 --// Priority tab : Double Jump first; Craft, Auto Balloons, Auto Trick or Treat, Auto Kill Hallow Lord, Auto Dig and Hatch (saved in WORST/priority.txt)
---// LITE MODE   : if nothing was toggled by hand since execute and the hub is left alone for 60 s, the hub shrinks away and the small Mini Ui opens by itself (Kaitun Hatch + Kaitun Stats
+--// LITE MODE   : if nothing was toggled by hand since execute and the hub is left alone for 60 s, the hub shrinks away and the small Mini Ui opens by itself (it keeps whatever Kaitun toggles were already on; it switches none on. Old note: Kaitun Hatch + Kaitun Stats
 --//                  switched on; Kaitun Events is yours to switch on). It does not touch the FPS or 3D rendering. Time: IDLE_SECS near the end of the file (AUTO_LITE = false turns it off).
 --// Settings tab : two pages (General / Ui). Ui = Animated Background, Minimize Keybind, Auto Save Configuration, Show Status, Auto Rejoin, Anti AFK, Save Configuration, Configuration List;
 --//                  General = everything else. "Reset Script" is a button at the top right of the tab.
 --//                  "Minimize Keybind" -> click it, press any key, that key now minimizes / restores the hub (default Left Ctrl)
 
+
+--============================================================================
+--  1) LOCAL
+--  services, state, cleanup, UI helpers, theme, window shell, effects
+--============================================================================
+
+--  TABLE OF CONTENTS (search for the number + name, e.g. "3) FUNCTIONS")
+--    1) LOCAL       line ~121    services, state, cleanup, UI helpers, theme, window shell, effects
+--    2) TABS        line ~804    sidebar, tab switching, footer
+--    3) FUNCTIONS   line ~1068   storage, config, then every feature (logic) of the hub
+--    4) PAGES       line ~17344  tab contents, control builders, page builder, configurations, Home / Settings pages
+--    5) WINDOW      line ~23138  drag + resize, minimize bubble, close / unload dialog, hotkeys
+--  Order matters in Lua: a local must be declared ABOVE the code that uses it, so the code keeps this order.
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
@@ -251,6 +264,9 @@ for _, parent in ipairs({
 	if old then pcall(function() old:Destroy() end) end
 end
 
+
+-- ---- UI helpers ------------------------------------------------------------
+
 -- True if this input is a left mouse button press.
 local function isPress(input)
 	return input.UserInputType == Enum.UserInputType.MouseButton1
@@ -262,6 +278,9 @@ local function isMove(input)
 	return input.UserInputType == Enum.UserInputType.MouseMovement
 		or input.UserInputType == Enum.UserInputType.Touch
 end
+
+
+-- ---- Theme / constants -----------------------------------------------------
 
 -- Optional: paste Roblox image asset ids ("rbxassetid://123") to replace glyph icons.
 local ICON_IMAGES = {
@@ -400,6 +419,9 @@ local function check(parent, cx, cy)
 		TextColor3 = Color3.new(1, 1, 1), TextSize = 17, Font = Enum.Font.GothamBold,
 	}, c)
 end
+
+
+-- ---- Window shell ----------------------------------------------------------
 
 ------------------------------------------------------------------ ScreenGui
 gui = new("ScreenGui", {
@@ -777,6 +799,12 @@ do -- dark ash border (as thick as the gap around the sidebar) with a light ash 
 end
 
 ------------------------------------------------------------------ Tabs / pages
+
+--============================================================================
+--  2) TABS
+--  sidebar, tab switching, footer
+--============================================================================
+
 local navItems = {
 	{ "Home",          "home",      "⌂", 135 },
 	{ "Kaitun",        "egg",       "⚡", 199 },
@@ -1035,6 +1063,12 @@ end)
 	type = "webhook"  (Webhook tab)
 	Optional on any entry: icon = "⚡", noSave = true
 ]]
+
+--============================================================================
+--  3) FUNCTIONS
+--  storage, config, then every feature (logic) of the hub
+--============================================================================
+
 local HttpService = game:GetService("HttpService")
 local STORE_DIR = "WORST"
 local hasFiles = typeof(writefile) == "function" and typeof(readfile) == "function" and typeof(isfile) == "function"
@@ -1174,6 +1208,9 @@ local controls = {}
 -- It returns the control entries that are placed on the Hatch and Pets tabs.
 -- filled in by the webhook code further down; lets features report to the webhook
 local WebhookBridge = {}
+
+
+-- ---- Main logic: hatch, craft, enchant, events, Kaitun ... -----------------
 
 -- Builds all the feature logic (hatch, craft, delete, events, Kaitun ...) and returns it as the Logic table. Runs once at load.
 local function buildLogic()
@@ -6702,6 +6739,7 @@ local function buildLogic()
 					local idx = r and invRarityIdx(r) or nil
 					local low
 					if idx then low = idx < KW_MYTHICAL else low = KW_COUNT_UNKNOWN end
+					if HG.questProtect and HG.questProtect[g.name] then low = false end   -- kept on purpose by Quest Protect (30M Event): not a failed delete
 					if low then
 						for _, x in ipairs(g.ids) do set[x.id] = true end
 					end
@@ -6758,8 +6796,9 @@ local function buildLogic()
 				local set = {}
 				for _, g in pairs(groups) do
 					local ri = rarityIndex[petRarity[g.name]]
-					if ri and ri >= lo and ri <= hi and inEgg[g.name] and varPick.picked[g.tier] then
-						for _, x in ipairs(g.ids) do set[x.id] = g.name end
+					if ri and ri >= lo and ri <= hi and inEgg[g.name] and varPick.picked[g.tier]
+						and not (HG.questProtect and HG.questProtect[g.name]) then   -- Quest Protect pets are kept on purpose
+						for _, g2 in ipairs(g.ids) do set[g2.id] = g.name end
 					end
 				end
 				return set
@@ -7739,9 +7778,9 @@ local function buildLogic()
 			desc = "MASTER toggle: switches every other feature off and runs your setup (Priority tab order) - auto delete, hatch the latest detected egg, craft + collect, Anti AFK, Auto Rejoin, Show Status. Also runs Auto Rebirth (Auto amount, only with enough coins) and switches on Auto Luck Potion, Auto Coins Potion and Auto Claim Quests. (Pets and Auto Equip are handled by Kaitun Stats.)",
 		}
 		local secondEntry = {
-			-- TOGGLE "Kaitun Events": Starts Auto Chest Coins, Auto Trick or Treat, Auto Kill Hallow Boss and Auto Purchase Items by itself and shows live numbers here (works with Kaitu...
+			-- TOGGLE "Kaitun Events": Starts Auto Chest Coins and every [30M Event] toggle by itself and shows live numbers here (works with Kaitun Hatch on or off).
 			type = "toggle", name = "Kaitun Events", icon = "📊", default = false,
-			desc = "Starts Auto Chest Coins, Auto Trick or Treat, Auto Kill Hallow Boss and Auto Purchase Items by itself and shows live numbers here (works with Kaitun Hatch on or off).",
+			desc = "Starts Auto Chest Coins and every [30M Event] page toggle (Quest Hatch, Quest Protect, Quest Craft, Auto Inflate) by itself and shows live numbers here (works with Kaitun Hatch on or off). Click a green check on the Kaitun tab to leave one of them out.",
 		}
 		local enchantEntry = {
 			-- TOGGLE "Kaitun Stats": needs Kaitun Hatch; runs Auto Equip + Auto Rebirth and, while hatching, enchants your equipped pets with the wanted enchants (Secret Hunter, Four Leaf, Lucky 3).
@@ -7764,9 +7803,9 @@ local function buildLogic()
 		end
 		-- Kaitun tab: clicking a green check switches that part of Kaitun off (and on again). Remembered in WORST/kaitunskip.txt.
 		-- skip[key] = true -> Kaitun leaves that part alone. While its master toggle is running the change is applied at once (hooks).
-		-- keys: delete, hatch, afk, rebirth (Kaitun Hatch) / chest, treat, boss, shop (Kaitun Events)
+		-- keys: delete, hatch, afk, rebirth (Kaitun Hatch) / chest, qprotect, qhatch, qcraft, inflate (Kaitun Events)
 		local skip, hooks = {}, {}
-		local SKIP_KEYS = { "delete", "hatch", "afk", "boosts", "rebirth", "chest", "treat", "boss", "shop" }
+		local SKIP_KEYS = { "delete", "hatch", "afk", "boosts", "rebirth", "chest", "qhatch", "qprotect", "qcraft", "inflate" }
 		do
 			local okR, raw = pcall(function() return hasFiles and Store.read("kaitunskip.txt") or nil end)
 			if okR and type(raw) == "string" then
@@ -8009,7 +8048,7 @@ local function buildLogic()
 	local islandTools = (function()
 		local TWEEN_SPEED = 300   -- studs per second while tweening to a portal
 		local RETRY_WAIT  = 10    -- seconds between purchase attempts (not enough coins etc.)
-		local ISLAND_DELAY = 10   -- seconds to wait after each island is bought + traveled to, before starting on the next one (keep at 10 or more)
+		local ISLAND_DELAY = 5    -- seconds to wait after each island is bought + traveled to, before starting on the next one (the Travel requests themselves are still TRAVEL_GAP apart)
 		local BUY_WAIT    = 3     -- seconds to wait for the server's answer to one purchase request
 		local POPUP_BUY_WAIT = 7  -- seconds to give the portal's purchase popup (green price button) to unlock the island before asking the server directly
 		local SETTLE      = 1.5   -- seconds to wait after Travel (lets the island load)
@@ -8167,6 +8206,56 @@ local function buildLogic()
 				task.wait(0.2)
 			end
 		end)
+		-- Finds the open "unlock island" popup and returns its two buttons: the green price button and the red "No" (nil if no popup is shown).
+		local function islandPopupButtons()
+			local pg = player:FindFirstChildOfClass("PlayerGui")
+			if not pg then return nil end
+			for _, textObj in ipairs(pg:GetDescendants()) do
+				if (textObj:IsA("TextLabel") or textObj:IsA("TextButton")) and not (gui and textObj:IsDescendantOf(gui)) then
+					local msg = purchaseText(textObj.Text)
+					if msg:find("unlock", 1, true) and msg:find("island", 1, true) and shownGui(textObj, pg) then
+						local dialog = textObj.Parent
+						for _ = 1, 8 do
+							if not dialog or dialog == pg then break end
+							local noLabel, amountLabel
+							for _, d in ipairs(dialog:GetDescendants()) do
+								if (d:IsA("TextLabel") or d:IsA("TextButton")) and shownGui(d, pg) then
+									local t = purchaseText(d.Text):gsub("^%s+", ""):gsub("%s+$", "")
+									if t == "no" then noLabel = noLabel or d
+									elseif isAmount(t) then amountLabel = amountLabel or d end
+								end
+							end
+							if noLabel and amountLabel then
+								return buttonFrame(amountLabel, noLabel), buttonFrame(noLabel, amountLabel)
+							end
+							dialog = dialog.Parent
+						end
+					end
+				end
+			end
+			return nil
+		end
+		-- Presses the green price button of the popup right now (at most once every 1.5 s). True if a popup was there and got pressed.
+		local function pressIslandAmount()
+			if os.clock() - lastPress < 1.5 then return false end
+			local amt = islandPopupButtons()
+			if amt and amt.AbsoluteSize.X > 0 and amt.AbsoluteSize.Y > 0 then
+				lastPress, pressedAt = os.clock(), os.clock()
+				pcall(clickCenterOf, amt)
+				return true
+			end
+			return false
+		end
+		-- Presses the red "No" of the popup (used after the island is bought, so the popup does not stay on screen). True if it pressed.
+		local function closeIslandPopup()
+			local _, no = islandPopupButtons()
+			if no and no.AbsoluteSize.X > 0 and no.AbsoluteSize.Y > 0 then
+				lastPress, pressedAt = os.clock(), 0
+				pcall(clickCenterOf, no)
+				return true
+			end
+			return false
+		end
 		local runId, activeTween, pausedHatch = 0, nil, false
 		-- True while this island-travel run is still the current one.
 		local function active(id) return alive and runId == id end
@@ -8433,10 +8522,28 @@ local function buildLogic()
 								-- give that a few seconds; only if the island is still locked ask the server directly as a fallback
 								dismissUntil = os.clock() + 20
 								local pw = os.clock()
-								while active(id) and not owned(step.name) and os.clock() - pw < POPUP_BUY_WAIT do task.wait(0.25) end
-								if owned(step.name) then break end
+								-- now at the portal: press the green price button ourselves (again every 1.5 s while the popup is still open)
+								while active(id) and not owned(step.name) and os.clock() - pw < POPUP_BUY_WAIT do
+									if pressIslandAmount() then status(string.format("%s: pressed the price button (try %d)...", step.name, tries)) end
+									task.wait(0.25)
+								end
+								if owned(step.name) then
+									dismissUntil = 0   -- bought: the watcher must not press the green button again
+									for _ = 1, 6 do   -- the popup can stay on screen after the unlock: close it with "No"
+										if not closeIslandPopup() then break end
+										task.wait(0.5)
+									end
+									break
+								end
 								if not active(id) then break end
-								if buy(step, id) then break end
+								if buy(step, id) then
+									dismissUntil = 0
+									for _ = 1, 6 do   -- bought through the remote: the popup is still open, close it
+										if not closeIslandPopup() then break end
+										task.wait(0.5)
+									end
+									break
+								end
 								status(string.format("%s: not bought yet (try %d) - retrying", step.name, tries))
 								sleep(id, RETRY_WAIT)
 							else
@@ -11208,6 +11315,9 @@ if not okLogic then
 	Logic = nil
 end
 
+
+-- ---- Anti AFK + Auto Rejoin ------------------------------------------------
+
 -- Anti AFK + Auto Rejoin (Settings tab). One table so no extra top-level locals are used.
 local Utility = (function()
 	local TeleportService = game:GetService("TeleportService")
@@ -11638,6 +11748,9 @@ end)()
 
 local drinkGemsBeforeRebirth = function() end -- assigned by Miscellaneous Auto Gems Potion
 
+
+-- ---- Auto Rebirth ----------------------------------------------------------
+
 local AutoRebirth = (function()
 	local RS = game:GetService("ReplicatedStorage")
 	local MAX_INDEX   = 18     -- number of rebirth indexes in the game (RebirthButtonConfig.MaximumLaunchOptions); the real amounts come from RebirthConfig.GetAmountFromIndex (1, 5, 25, 125, 600 ... 150B, 750B)
@@ -11968,6 +12081,9 @@ local AutoRebirth = (function()
 	return { toggle, indexEntry, delayEntry, state = state }
 end)()
 
+
+-- ---- Secret Guard ----------------------------------------------------------
+
 -- SecretGuard: secret pets are never kept equipped (they are kept for trading to the main account).
 -- Auto Equip asks the server for "the best pets" (EquipBest), so the server may pick a secret pet; right afterwards this unequips them again.
 -- Used by both Auto Equip modules (the Auto Equip toggle and Kaitun Events).
@@ -12251,6 +12367,9 @@ local SecretGuard = (function()
 	return M
 end)()
 
+
+-- ---- Auto Equip ------------------------------------------------------------
+
 local AutoEquip = (function()
 	local RS = game:GetService("ReplicatedStorage")
 	-- captured from the game's own buttons:
@@ -12390,6 +12509,9 @@ local webhookBlur = {
 	desc = "Hides your username in webhook messages (Discord shows it blurred until someone clicks it).",
 	callback = function(on) WebhookState.blur = on == true end,
 }
+
+
+-- ---- Trade agent -----------------------------------------------------------
 
 -- ============================================================ TRADE AGENT (was Site_Panel.lua) + Trade tab
 -- One script: the site link (heartbeat / trade jobs from the site) and the Auto Accept / Ready / Confirm toggles.
@@ -16362,24 +16484,42 @@ local TradeAgent = (function()
     return { entries = {}, giveaway = {}, sell = {} }
 end)()
 
+
+-- ---- Auto Skill Points -----------------------------------------------------
+
 -- Skill Points: continuously checks live game definitions, including skills added in updates.
 -- This worker belongs to the hub lifecycle and never switches its toggle off by itself.
 local SkillPoints = (function()
     local RS = game:GetService("ReplicatedStorage")
     local entry = {
-        -- TOGGLE "Auto Skill Points": Buys every affordable skill at the same time.
+        -- TOGGLE "Auto Skill Points": Buys every affordable skill one after the other (free roots first).
         type = "toggle", name = "Auto Skill Points", icon = "🌳", default = false,
-        desc = "Buys every affordable skill at the same time. Nothing left to buy: checks again after 5 min, then 60 min, then 2 hours, then waits until Auto Unlock Islands buys another island. Buying anything starts the 5 min cycle again.",
+        desc = "Reads every skill from the game's own SkillTreeFormula (free skills included) and buys them one at a time: the cheapest skill whose parent is already unlocked and that you can afford, then the next one right after. Nothing affordable: checks again every 15 s. Prints every skill to the console (F9) when switched on.",
     }
     local on, generation = false, 0
-    local retryAt = {}
-    local lastSignature = nil
-    local lastScan = 0
-    local nodes = {}
-    local scanError = nil
+    local SKILL_GAP   = 0.3   -- seconds between two skill purchases
+    local SKILL_IDLE  = 15    -- seconds between checks when nothing is affordable
+    local SKILL_RETRY = 120   -- a refused skill is tried again after this many seconds
+
     -- Sets the status text of this feature.
     local function say(message)
         if entry._desc and entry._desc.Parent then entry._desc.Text = message end
+    end
+    -- Short text form of a value, used in log messages.
+    local function brief(v)
+        if type(v) ~= "table" then return tostring(v) end
+        local parts = {}
+        for k, x in pairs(v) do parts[#parts + 1] = tostring(k) .. "=" .. tostring(x) end
+        return "{" .. table.concat(parts, ", ") .. "}"
+    end
+    -- Formats a big number (1.50K, 2.00M ...).
+    local function fmt(n)
+        n = tonumber(n) or 0
+        local units = { { 1e15, "Qa" }, { 1e12, "T" }, { 1e9, "B" }, { 1e6, "M" }, { 1e3, "K" } }
+        for _, u in ipairs(units) do
+            if n >= u[1] then return string.format("%.2f%s", n / u[1], u[2]) end
+        end
+        return tostring(math.floor(n))
     end
     -- Returns the player data from the controller.
     local function getData(controller)
@@ -16394,208 +16534,96 @@ local SkillPoints = (function()
             end
         end
     end
-    -- Refreshes the scan (at most every 5 minutes unless forced).
-    local function refresh(force)
-        if not force and os.clock() - lastScan < 300 then return end
-        lastScan = os.clock()
-        local ok, result = pcall(function()
+    -- every skill of the game: name, parent, cost, currency, required island (free skills included), cheapest first
+    local function loadNodes()
+        local ok, res = pcall(function()
             local formula = require(RS.Shared.Progression.SkillTreeFormula)
-            local result = {}
+            local list = {}
             for name, node in pairs(formula.Nodes or {}) do
                 local info = type(node) == "table" and node.Data
-                if type(info) == "table" and type(info.Cost) == "number"
-                    and info.Cost > 0 and info.Currency == "Gems" then
-                    result[#result + 1] = {
-                        name = name, cost = info.Cost, parent = node.Parent,
-                        island = info.RequiredIsland,
-                    }
+                if type(info) == "table" then
+                    local cost = tonumber(info.Cost) or 0
+                    if info.Currency == "Gems" or cost == 0 then
+                        list[#list + 1] = { name = name, cost = cost, parent = node.Parent, island = info.RequiredIsland, currency = info.Currency }
+                    end
                 end
             end
-            table.sort(result, function(a, b)
-                return a.cost == b.cost and tostring(a.name) < tostring(b.name) or a.cost < b.cost
+            table.sort(list, function(a, b)
+                if a.cost == b.cost then return tostring(a.name) < tostring(b.name) end
+                return a.cost < b.cost
             end)
-            return result
+            return list
         end)
-        if ok then
-            nodes = result
-            scanError = nil
-            local names = {}
-            for _, n in ipairs(nodes) do names[#names + 1] = tostring(n.name) .. ":" .. tostring(n.cost) end
-            local sig = table.concat(names, "|")
-            if sig ~= lastSignature then
-                retryAt = {} -- New/changed skills get a fresh chance
-                lastSignature = sig
-            end
-        else
-            scanError = tostring(result)
-        end
+        if ok then return res end
+        return nil, tostring(res)
     end
-    -- Finds the machine nearest to the character.
-    local function findNearestMachine()
-        local character = player.Character
-        local root = character and character:FindFirstChild("HumanoidRootPart")
-        if not root then return nil end
-        local best, bestDist
-        local scanned = 0
-        for _, obj in ipairs(workspace:GetDescendants()) do
-            scanned = scanned + 1
-            if scanned % 2000 == 0 then task.wait() end
-            if obj:IsA("BasePart") or obj:IsA("Model") then
-                local name = obj.Name:lower()
-                if name:find("doublejump", 1, true)
-                    or name:find("double jump", 1, true)
-                    or name:find("jumpmachine", 1, true)
-                    or name:find("jump machine", 1, true) then
-                    local pos
-                    if obj:IsA("BasePart") then
-                        pos = obj.Position
-                    else
-                        local part = obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true)
-                        pos = part and part.Position
-                    end
-                    if pos then
-                        local dist = (root.Position - pos).Magnitude
-                        if not bestDist or dist < bestDist then
-                            best, bestDist = pos, dist
-                        end
-                    end
-                end
-            end
+    -- prints every skill to the console (F9 / developer console)
+    local function dumpNodes(nodes, unlocked)
+        local lines = { string.format("[SkillTree] %d skills (name | parent | cost | currency | required island | owned)", #nodes) }
+        for _, n in ipairs(nodes) do
+            lines[#lines + 1] = string.format("  %s | %s | %s | %s | %s | %s", tostring(n.name), brief(n.parent), tostring(n.cost),
+                tostring(n.currency), tostring(n.island), (unlocked and unlocked[n.name] == true) and "yes" or "no")
         end
-        return best
-    end
-    -- Schedule (Auto Skill Points):
-    --   buy EVERY affordable skill at the same time -> 2 s -> again ... until nothing more can be bought
-    --   then wait 5 min -> try again; bought something = 5 min cycle again
-    --   nothing after the 5 min wait -> wait 60 min; nothing after that -> wait 2 h; nothing after that -> wait until Auto Unlock Islands
-    --   buys another island (new skill trees open). An island bought during ANY wait also ends that wait early and starts the cycle again.
-    local AFTER_BUY_GAP = 2
-    local WAITS = { 300, 3600, 7200 }   -- stage 1, 2, 3; stage 4 = wait for a new island
-    -- Formats seconds as a time text.
-    local function fmtTime(t)
-        t = math.max(0, math.floor(t))
-        if t >= 3600 then return string.format("%dh %02dm", t // 3600, (t % 3600) // 60) end
-        return string.format("%d:%02d", t // 60, t % 60)
-    end
-    -- Counts the islands you own.
-    local function islandCount(data)
-        local u = data and type(data.Progression) == "table" and data.Progression.UnlockedIslands
-        if type(u) ~= "table" then return nil end
-        local n = 0
-        for _ in pairs(u) do n = n + 1 end
-        return n
-    end
-    -- Returns the island count signal (used to detect a new island).
-    local function islandSignal(controller)
-        return tonumber(env.WORST_ISLAND_BUYS) or 0, islandCount(getData(controller))
-    end
-
-    -- one buying pass: every affordable skill whose parent is unlocked is requested at the same time.
-    -- returns how many were really unlocked, and how many were requested
-    local function buyAll(controller, remote, id, failed)
-        refresh(true)
-        local data = getData(controller)
-        if not data then return 0, 0, "Waiting for player Skill Tree data..." end
-        if scanError then return 0, 0, "Skill Tree scan failed: " .. scanError end
-        local unlocked = data.SkillTree.Unlocked
-        local left = tonumber(data.Currencies.Gems) or 0
-        local batch = {}
-        for _, skill in ipairs(nodes) do   -- sorted cheapest first = the most skills for your Gems
-            if not unlocked[skill.name] and not failed[skill.name] then
-                local parent = skill.parent
-                if (not parent or unlocked[parent] == true) and left >= skill.cost then
-                    left = left - skill.cost
-                    batch[#batch + 1] = skill
-                end
-            end
+        for i = 1, #lines, 40 do
+            print(table.concat(lines, "\n", i, math.min(i + 39, #lines)))
         end
-        if #batch == 0 then return 0, 0 end
-        say("Buying " .. #batch .. " skill(s) at once...")
-        local pending, replies = #batch, {}
-        for _, skill in ipairs(batch) do
-            task.spawn(function()
-                local sent, response = pcall(function() return remote:InvokeServer({ Name = skill.name }) end)
-                replies[skill.name] = { sent, response }
-                pending = pending - 1
-            end)
-        end
-        local t0 = os.clock()
-        while pending > 0 and os.clock() - t0 < 6 and alive and on and generation == id do task.wait(0.1) end
-        task.wait(1.5)   -- let the replicated data catch up
-        local updated = getData(controller)
-        local bought = 0
-        for _, skill in ipairs(batch) do
-            if updated and updated.SkillTree.Unlocked[skill.name] == true then
-                bought = bought + 1
-            else
-                failed[skill.name] = true   -- not tried again in this session
-                local r = replies[skill.name]
-                warn("[WORST Skill Points] Skipped", skill.name, r and r[1], r and r[2])
-            end
-        end
-        return bought, #batch
-    end
-
-    -- wait `seconds` (nil = until an island is bought). Returns "island" when an island was bought, "off" when switched off, "time" otherwise.
-    local function waitFor(controller, id, seconds, label)
-        local buys0, count0 = islandSignal(controller)
-        local t0, lastSay = os.clock(), -1e9
-        while alive and on and generation == id do
-            local buys, count = islandSignal(controller)
-            if buys > buys0 or (count and count0 and count > count0) then return "island" end
-            local left = seconds and (seconds - (os.clock() - t0))
-            if left and left <= 0 then return "time" end
-            if os.clock() - lastSay >= 5 then
-                lastSay = os.clock()
-                if left then say(label .. " | next check in " .. fmtTime(left))
-                else say(label .. " | waiting for Auto Unlock Islands to buy another island") end
-            end
-            task.wait(0.5)
-        end
-        return "off"
     end
 
     -- Main loop of this feature.
     local function run(id)
+        local function cur() return alive and on and generation == id end
         local ok, controller, remote = pcall(function()
             return require(RS.Controllers.Core.ReplicaController),
                 RS.RemoteServices.SkillTreeService.RF.Unlock
         end)
         if not ok then say("Skill Points unavailable: " .. tostring(controller)); return end
-        local stage, advance = 1, false   -- advance = this session follows a timed wait, so finding nothing moves to the next (longer) wait
-        while alive and on and generation == id do
-            -- ONE SESSION: buy everything, 2 s, buy again ... until nothing more can be bought
-            local failed, total = {}, 0
-            while alive and on and generation == id do
-                local bought, tried, problem = buyAll(controller, remote, id, failed)
-                if problem then say(problem) end
-                if bought > 0 then
-                    total = total + bought
-                    say("Bought " .. bought .. " skill(s) (" .. total .. " this round); checking again in " .. AFTER_BUY_GAP .. "s...")
-                    local t = 0
-                    while t < AFTER_BUY_GAP and alive and on and generation == id do task.wait(0.25) t = t + 0.25 end
-                else
-                    break   -- nothing (more) could be bought
+        local nodes, err = loadNodes()
+        if not nodes then say("Could not read SkillTreeFormula: " .. tostring(err)); return end
+        local d0 = getData(controller)
+        dumpNodes(nodes, d0 and d0.SkillTree.Unlocked)
+
+        local failedUntil, boughtTotal = {}, 0
+        while cur() do
+            local data = getData(controller)
+            if not data then
+                say("Waiting for player data...")
+                task.wait(1)
+            else
+                local unlocked = data.SkillTree.Unlocked
+                local gems = tonumber(data.Currencies.Gems) or 0
+                local pick
+                for _, n in ipairs(nodes) do   -- sorted cheapest first
+                    if unlocked[n.name] ~= true and (failedUntil[n.name] or 0) <= os.clock() and n.cost <= gems then
+                        local p = n.parent
+                        if type(p) ~= "string" or unlocked[p] == true then pick = n break end   -- (a list of parents is left to the server)
+                    end
                 end
-            end
-            if not (alive and on and generation == id) then return end
-
-            if total > 0 then stage = 1
-            elseif advance then stage = math.min(stage + 1, 4) end
-
-            local result
-            if stage <= 3 then
-                local mins = WAITS[stage] / 60
-                result = waitFor(controller, id, WAITS[stage],
-                    (total > 0 and ("Bought " .. total .. " skill(s)") or "Nothing to buy") .. " | waiting " .. (mins >= 60 and (mins / 60 .. " h") or (mins .. " min")))
-            else
-                result = waitFor(controller, id, nil, "Nothing to buy for 2 hours")
-            end
-            if result == "off" then return end
-            if result == "island" then
-                stage, advance = 1, false   -- new island: new skill trees, fresh start
-            else
-                advance = true
+                if pick then
+                    say(string.format("Unlocking %s (%s) | Gems %s", tostring(pick.name), fmt(pick.cost), fmt(gems)))
+                    local sent, res = pcall(function() return remote:InvokeServer({ Name = pick.name }) end)
+                    local got, t0 = false, os.clock()
+                    while cur() and os.clock() - t0 < 2 do
+                        local d = getData(controller)
+                        if d and d.SkillTree.Unlocked[pick.name] == true then got = true break end
+                        task.wait(0.1)
+                    end
+                    if got then
+                        boughtTotal = boughtTotal + 1
+                        task.wait(SKILL_GAP)
+                    elseif cur() then
+                        failedUntil[pick.name] = os.clock() + SKILL_RETRY
+                        warn("[WORST Skill Points] " .. tostring(pick.name) .. " not unlocked: " .. (sent and brief(res) or ("error: " .. tostring(res))))
+                    end
+                else
+                    local owned = 0
+                    for _, n in ipairs(nodes) do if unlocked[n.name] == true then owned = owned + 1 end end
+                    local t0 = os.clock()
+                    while cur() and os.clock() - t0 < SKILL_IDLE do
+                        say(string.format("Nothing to buy | %d/%d owned | %d bought this run | Gems %s | next check in %ds",
+                            owned, #nodes, boughtTotal, fmt(gems), math.ceil(SKILL_IDLE - (os.clock() - t0))))
+                        task.wait(0.5)
+                    end
+                end
             end
         end
     end
@@ -16603,9 +16631,7 @@ local SkillPoints = (function()
         on = value == true
         generation = generation + 1
         if on then
-            lastScan = 0
-            retryAt = {}
-            say("Scanning Skill Tree...")
+            say("Starting...")
             local id = generation
             task.spawn(function() run(id) end)
         else
@@ -16616,30 +16642,38 @@ local SkillPoints = (function()
     return { entry }
 end)()
 
+
+-- ---- Auto Double Jump ------------------------------------------------------
+
 -- Double Jump: purchases the next level and verifies it using replicated data.
 -- Never turns itself off at the current maximum; periodically retries for future updates.
 local DoubleJump = (function()
     local RS = game:GetService("ReplicatedStorage")
     local entry = {
-        -- TOGGLE "Auto Double Jump": Priority #1: travels to the nearest loaded Jump Machine, waits 2 seconds, then buys +1 Jump, one level after the other with no upper limit.
+        -- TOGGLE "Auto Double Jump": buys +1 Jump from where you stand; if the server refuses, uses the Jump Machine.
         type = "toggle", name = "Auto Double Jump", icon = "🐇", default = false,
-        desc = "Priority #1: travels to the nearest loaded Jump Machine, waits 2 seconds, then buys +1 Jump, one level after the other with no upper limit. If a purchase keeps failing once you own 8 or more jumps, that is the limit: it stops buying. Stays enabled.",
+        desc = "Buys +1 Jump one level after the other straight from wherever you stand. If the server does not accept it, it teleports to the nearest Jump Machine, waits 2 s, buys, and teleports you back (and keeps using the machine after that). A refusal that is not about Gems means the max level: it stops buying and checks again later.",
     }
     local on, generation = false, 0
-    local nextRetry = 0
-    local lastAttemptLevel = nil
-    local lastFailure = ""
-    local IDLE_AFTER_REFUSAL = 24 * 60 * 60   -- limit reached: stay idle this long (toggle stays ON), then check again in case an update raised the limit
-    local LIMIT_FROM  = 8    -- the limit is somewhere around 8-10 jumps: from this many owned jumps on, a purchase that keeps failing = limit
-    local LIMIT_FAILS = 3    -- ... after this many refused purchases in a row (the server answered but did not unlock it)
-    local confirmed = 0      -- highest level we know was bought (the replicated data can lag behind a purchase)
-    local failStreak = 0     -- refused purchases in a row for the current level
-    -- Formats a waiting time as text.
-    local function fmtWait(sec)
-        sec = math.max(0, math.ceil(sec))
-        if sec >= 3600 then return string.format("%dh %02dm", math.floor(sec / 3600), math.floor((sec % 3600) / 60)) end
-        if sec >= 60 then return string.format("%dm %02ds", math.floor(sec / 60), sec % 60) end
-        return sec .. "s"
+    local JUMP_GAP         = 0.4   -- seconds between two jump purchases
+    local JUMP_LIMIT_FROM  = 8     -- from this level on, purchases that keep being refused mean "max level"
+    local JUMP_LIMIT_FAILS = 3
+    local JUMP_IDLE_MAX    = 600   -- seconds between checks once the max level looks reached
+    local holding = false          -- true while this feature owns the machine trip
+    local machineCache
+
+    -- Sets the status text of this feature.
+    local function say(message)
+        if entry._desc and entry._desc.Parent then entry._desc.Text = message end
+    end
+    -- Formats a big number (1.50K, 2.00M ...).
+    local function fmt(n)
+        n = tonumber(n) or 0
+        local units = { { 1e15, "Qa" }, { 1e12, "T" }, { 1e9, "B" }, { 1e6, "M" }, { 1e3, "K" } }
+        for _, u in ipairs(units) do
+            if n >= u[1] then return string.format("%.2f%s", n / u[1], u[2]) end
+        end
+        return tostring(math.floor(n))
     end
     -- Short text form of a value, used in log messages.
     local function brief(v)
@@ -16648,12 +16682,9 @@ local DoubleJump = (function()
         for k, x in pairs(v) do parts[#parts + 1] = tostring(k) .. "=" .. tostring(x) end
         return "{" .. table.concat(parts, ", ") .. "}"
     end
-    -- Sets the status text of this feature.
-    local function say(message)
-        if entry._desc and entry._desc.Parent then entry._desc.Text = message end
-    end
+    local controller
     -- Returns the player data from the controller.
-    local function getData(controller)
+    local function getData()
         local replicas = controller and controller._replicas
         if type(replicas) ~= "table" then return nil end
         for _, replica in pairs(replicas) do
@@ -16664,40 +16695,34 @@ local DoubleJump = (function()
             end
         end
     end
-    local holding = false   -- true while this feature owns the machine trip (so switching it off can always give the trip back)
-    local machineCache
     -- Returns the position of a machine object.
     local function machinePos(obj)
         if obj:IsA("BasePart") then return obj.Position end
         local part = obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true)
         return part and part.Position
     end
-    -- nearest LOADED Jump Machine. A machine found before is reused while it is still loaded, so the whole workspace is not walked again for every purchase.
-    local function findNearestMachine()
+    -- nearest LOADED Jump Machine (a machine found before is reused while it is still loaded)
+    local function findMachine()
         local character = player.Character
         local root = character and character:FindFirstChild("HumanoidRootPart")
         if not root then return nil end
         if machineCache and machineCache:IsDescendantOf(workspace) then
-            local cached = machinePos(machineCache)
-            if cached then return cached end
+            local p = machinePos(machineCache)
+            if p then return p end
         end
         local best, bestDist, bestObj
         local scanned = 0
         for _, obj in ipairs(workspace:GetDescendants()) do
             scanned = scanned + 1
-            if scanned % 2000 == 0 then task.wait() end   -- spread over frames: one big loop is a visible freeze
+            if scanned % 2000 == 0 then task.wait() end
             if obj:IsA("BasePart") or obj:IsA("Model") then
                 local name = obj.Name:lower()
-                if name:find("doublejump", 1, true)
-                    or name:find("double jump", 1, true)
-                    or name:find("jumpmachine", 1, true)
-                    or name:find("jump machine", 1, true) then
+                if name:find("doublejump", 1, true) or name:find("double jump", 1, true)
+                    or name:find("jumpmachine", 1, true) or name:find("jump machine", 1, true) then
                     local pos = obj.Parent and machinePos(obj)
                     if pos then
                         local dist = (root.Position - pos).Magnitude
-                        if not bestDist or dist < bestDist then
-                            best, bestDist, bestObj = pos, dist, obj
-                        end
+                        if not bestDist or dist < bestDist then best, bestDist, bestObj = pos, dist, obj end
                     end
                 end
             end
@@ -16705,129 +16730,130 @@ local DoubleJump = (function()
         machineCache = bestObj
         return best
     end
+    local function jumpLevel()
+        local d = getData()
+        return d and (tonumber(d.PhysicalUpgrades.DoubleJump) or 0) or 0
+    end
+    -- sends one purchase and waits (up to 2.5 s) for the replicated level to reach `index`
+    local function tryBuyJump(remote, index, cur)
+        local sent, res = pcall(function() return remote:InvokeServer({ Upgrade = "+1 Jump", Index = index }) end)
+        local t0 = os.clock()
+        while cur() and os.clock() - t0 < 2.5 do
+            if jumpLevel() >= index then return true, res end
+            task.wait(0.1)
+        end
+        if jumpLevel() >= index then return true, res end
+        if sent then return false, res end
+        return false, "error: " .. tostring(res)
+    end
+    -- teleports to the Jump Machine, buys, and goes back to where you were
+    local function buyAtMachine(remote, index, cur)
+        local priority = Logic and Logic.priority
+        local held
+        if priority and priority.acquireTrip then
+            held = priority.acquireTrip("DoubleJump", cur, say)   -- pauses Hatch and lower-priority trips while we travel
+        else
+            held = cur()
+        end
+        if not held then return false, "stopped" end
+        holding = true
+        local ok, res = false, "stopped"
+        local okTrip, tripErr = pcall(function()
+            local character = player.Character
+            local root = character and character:FindFirstChild("HumanoidRootPart")
+            local target = findMachine()
+            if not (root and target) then
+                res = "no Jump Machine loaded (go to the island that has it)"
+                return
+            end
+            local home = root.CFrame
+            pcall(function() character:PivotTo(CFrame.new(target + Vector3.new(0, 4, 0))) end)
+            task.wait(2)
+            if cur() then ok, res = tryBuyJump(remote, index, cur) end
+            task.wait(0.3)
+            local c2 = player.Character
+            if c2 and c2.Parent then pcall(function() c2:PivotTo(home) end) end
+        end)
+        if not okTrip then
+            ok, res = false, "error: " .. tostring(tripErr)
+            warn("[WORST Double Jump] trip error:", tripErr)
+        end
+        if priority and priority.releaseTrip then priority.releaseTrip("DoubleJump") end
+        holding = false
+        return ok, res
+    end
+    -- the server's refusal reason (lower case), or nil when it gave none
+    local function reasonOf(res)
+        if type(res) == "table" and res.Reason ~= nil then return tostring(res.Reason):lower() end
+        return nil
+    end
+    local function hasWord(t, words)
+        for _, w in ipairs(words) do if t:find(w, 1, true) then return true end end
+        return false
+    end
+    -- a refusal with a reason that is NOT about Gems (and not a plain timing/busy answer) = max level reached
+    local function isMaxLevelReason(res)
+        local reason = reasonOf(res)
+        if not reason then return false end
+        if hasWord(reason, { "gem", "fund", "afford", "enough", "currency", "insufficient", "cost", "coin", "money" }) then return false end
+        if hasWord(reason, { "cooldown", "rate", "wait", "busy", "again" }) then return false end
+        return true
+    end
+
     -- Main loop of this feature.
     local function run(id)
-        local ok, controller, remote = pcall(function()
+        local function cur() return alive and on and generation == id end
+        local okR, c, remote = pcall(function()
             return require(RS.Controllers.Core.ReplicaController),
                 RS.RemoteServices.PhysicalUpgradeService.RF.Purchase
         end)
-        if not ok then say("Double Jump unavailable: " .. tostring(controller)); return end
-        while alive and on and generation == id do
-            local data = getData(controller)
+        if not okR then say("Double Jump unavailable: " .. tostring(c)); return end
+        controller = c
+        local needMachine, failStreak, bought = false, 0, 0
+        while cur() do
+            local data = getData()
             if not data then
-                say("Waiting for Double Jump player data...")
+                say("Waiting for player data...")
+                task.wait(1)
             else
-                local level = math.max(tonumber(data.PhysicalUpgrades.DoubleJump) or 0, confirmed)   -- missing key = level 0
+                local level = tonumber(data.PhysicalUpgrades.DoubleJump) or 0
+                local index = level + 1
                 local gems = tonumber(data.Currencies.Gems) or 0
-                if lastAttemptLevel ~= level then
-                    nextRetry = 0
-                    lastAttemptLevel = level
+                say(string.format("Jump %d | buying +1 Jump %d | Gems %s", level, index, fmt(gems)))
+                local ok, res = false, nil
+                if not needMachine then
+                    ok, res = tryBuyJump(remote, index, cur)
+                    if not ok and cur() then needMachine = true end   -- not accepted from here: use the machine from now on
                 end
-                if os.clock() >= nextRetry then
-                    local index = level + 1
-                    say("Trying +1 Jump " .. tostring(index) .. " | Gems: " .. tostring(gems))
-                    -- Reserve travel before moving; pause Hatch and lower-priority trips.
-                    local priority = Logic and Logic.priority
-                    local held = false
-                    -- True while this run is still the current one (and the trip is held).
-                    local function active() return alive and on and generation == id end
-                    if priority and priority.acquireTrip then
-                        held = priority.acquireTrip("DoubleJump", active, say)
-                    else
-                        held = active()
-                    end
-                    if not held then break end
-                    holding = true
-                    local sent, response = false, "No Jump Machine is loaded in the workspace (go to the island that has it, it can be streamed out)"
-                    local okTrip, tripErr = pcall(function()
-                        local target = findNearestMachine()
-                        local character = player.Character
-                        if target and character and active() then
-                            say("Jump " .. tostring(level) .. " | Teleporting to Jump Machine...")
-                            local moved, moveErr = pcall(function()
-                                character:PivotTo(CFrame.new(target + Vector3.new(0, 4, 0)))
-                            end)
-                            if moved then
-                                task.wait(2)
-                                if active() then
-                                    say("Buying +1 Jump " .. tostring(index) .. "...")
-                                    sent, response = pcall(function()
-                                        return remote:InvokeServer({ Upgrade = "+1 Jump", Index = index })
-                                    end)
-                                end
-                            else
-                                response = tostring(moveErr)
-                            end
-                        end
-                    end)
-                    if not okTrip then
-                        sent, response = false, "Error: " .. tostring(tripErr)
-                        warn("[WORST Double Jump] trip error:", tripErr)
-                    end
-                    task.wait(1.5)
-                    if priority and priority.releaseTrip then
-                        priority.releaseTrip("DoubleJump")
-                    end
-                    holding = false
-                    if not (alive and on and generation == id) then break end
-                    -- the server's answer: success flag, or the level shows up in the replicated data (can take a few seconds)
-                    local function readLevel()
-                        local d = getData(controller)
-                        return d and (tonumber(d.PhysicalUpgrades.DoubleJump) or 0)
-                    end
-                    local serverOK = response == true
-                        or (type(response) == "table" and (response.Success == true or response.Unlocked == true))
-                    local newLevel = readLevel()
-                    local tWait = os.clock()
-                    while sent and not (type(newLevel) == "number" and newLevel >= index)
-                        and not serverOK and os.clock() - tWait < 6 and alive and on and generation == id do
-                        task.wait(0.5)
-                        newLevel = readLevel()
-                    end
-                    if not (alive and on and generation == id) then break end
-                    local bought = (type(newLevel) == "number" and newLevel >= index) or (sent and serverOK)
-                    if bought then
-                        confirmed = math.max(confirmed, index)
-                        failStreak = 0
-                        nextRetry = 0
-                        lastAttemptLevel = confirmed
-                        lastFailure = ""
-                        say("Double Jump upgraded to " .. tostring(confirmed) .. "; buying the next level...")
-                    elseif sent then
-                        -- the server answered but did not unlock it
-                        failStreak = failStreak + 1
-                        local text = brief(response):lower()
-                        if level >= LIMIT_FROM and (failStreak >= LIMIT_FAILS or text:find("max", 1, true)) then
-                            -- stopped after 8-10 jumps = that is the limit: stop purchasing
-                            nextRetry = os.clock() + IDLE_AFTER_REFUSAL
-                            lastFailure = "Limit reached: " .. tostring(level) .. " jumps"
-                            failStreak = 0
-                            say("Jump " .. tostring(level) .. " | " .. lastFailure .. " | Purchasing stopped, next check in " .. fmtWait(IDLE_AFTER_REFUSAL))
-                            print("[WORST Double Jump] limit reached at " .. tostring(level) .. " jumps; last answer: " .. brief(response))
-                        else
-                            -- below the limit zone (or not sure yet): keep trying, slowly backing off (e.g. not enough Gems yet)
-                            local delay = math.min(5 * failStreak, 60)
-                            nextRetry = os.clock() + delay
-                            lastFailure = "Server refused +1 Jump " .. tostring(index) .. " (try " .. tostring(failStreak) .. ")"
-                            say("Jump " .. tostring(level) .. " | " .. lastFailure .. " | Retry in " .. fmtWait(delay))
-                            warn("[WORST Double Jump] index " .. tostring(index) .. " not unlocked (try " .. tostring(failStreak) .. "). Response: " .. brief(response))
-                        end
-                    else
-                        -- machine not loaded / remote error: back off briefly instead of spamming (does not count towards the limit)
-                        nextRetry = os.clock() + 45
-                        local detail = "Remote error: " .. brief(response)
-                        lastFailure = detail
-                        say("Jump " .. tostring(level) .. " | " .. detail .. " | Retry in 45s")
-                        warn("[WORST Double Jump]", detail)
-                    end
+                if not ok and cur() then
+                    say(string.format("Jump %d | at the Jump Machine, buying %d...", level, index))
+                    ok, res = buyAtMachine(remote, index, cur)
+                    if ok then needMachine = true end
+                end
+                if not cur() then break end
+                if ok then
+                    failStreak, bought = 0, bought + 1
+                    say(string.format("Jump %d bought | %d bought this run | Gems %s", index, bought, fmt(((getData() or data).Currencies.Gems))))
+                    task.wait(JUMP_GAP)
                 else
-                    say("Jump " .. tostring(level) .. " | " .. lastFailure .. " | Next check in " .. fmtWait(nextRetry - os.clock()))
+                    failStreak = failStreak + 1
+                    local waitSecs
+                    if isMaxLevelReason(res) then
+                        -- refused for a reason that is not Gems: that is the max level
+                        waitSecs = JUMP_IDLE_MAX
+                        say(string.format("Jump %d | max level reached (%s) | next check in %ds", level, brief(res), waitSecs))
+                        print("[WORST Double Jump] max level at " .. tostring(level) .. " jumps; last answer: " .. brief(res))
+                    elseif level >= JUMP_LIMIT_FROM and failStreak >= JUMP_LIMIT_FAILS then
+                        waitSecs = JUMP_IDLE_MAX
+                        say(string.format("Jump %d | refused %d times - probably max level. Next check in %ds", level, failStreak, waitSecs))
+                    else
+                        waitSecs = math.min(10 * failStreak, 60)
+                        say(string.format("Jump %d | refused (%s) | retry in %ds", level, brief(res), waitSecs))
+                    end
+                    warn("[WORST Double Jump] index " .. index .. " not bought: " .. brief(res))
+                    local t0 = os.clock()
+                    while cur() and os.clock() - t0 < waitSecs do task.wait(0.25) end
                 end
-            end
-            local elapsed = 0
-            while alive and on and generation == id and elapsed < 3 do
-                task.wait(0.25)
-                elapsed = elapsed + 0.25
             end
         end
     end
@@ -16835,11 +16861,7 @@ local DoubleJump = (function()
         on = value == true
         generation = generation + 1
         if on then
-            nextRetry = 0
-            lastAttemptLevel = nil
-            lastFailure = ""
-            confirmed, failStreak = 0, 0
-            say("Scanning Double Jump upgrades...")
+            say("Starting...")
             local id = generation
             task.spawn(function() run(id) end)
         else
@@ -16853,6 +16875,9 @@ local DoubleJump = (function()
     table.insert(cleanupHooks, function() on = false; generation = generation + 1 end)
     return entry
 end)()
+
+
+-- ---- Coin chests -----------------------------------------------------------
 
 -- Coin chests: Sky Island first, then Desert. Each has its own server cooldown.
 local DesertChest = (function()
@@ -16973,6 +16998,9 @@ local DesertChest = (function()
     table.insert(cleanupHooks, function() on = false; generation = generation + 1 end)
     return entry
 end)()
+
+
+-- ---- Miscellaneous tab features --------------------------------------------
 
 -- Miscellaneous tab: server hopping / rejoin / join by Job ID / join a low-population server / walk + jump speed
 local Miscellaneous = (function()
@@ -17310,8 +17338,74 @@ local Miscellaneous = (function()
         end
     end)
 
-    return { hop, rejoin, jobId, low, speed, jump, potions[1].entry, potions[2].entry, potions[3].entry, quest.entry }
+    -- =====================================================================================
+    -- SHRINE: dropdown (Luck / Golden / AutoClicker) + toggle "Auto Shrine".
+    -- Sends ShrineService.RF.Choose:InvokeServer("<choice>"). While the toggle is on it is sent right away and then again every
+    -- SHRINE_EVERY seconds (the server refuses it while the shrine is not ready, the answer is shown in the description).
+    -- =====================================================================================
+    local shrine = { on = false, gen = 0, choice = "Luck", sent = 0 }
+    local SHRINE_OPTIONS = { "Luck", "Golden", "AutoClicker" }
+    local SHRINE_EVERY = 10
+    shrine.pick = {
+        type = "dropdown", name = "Shrine", icon = "⛩", width = 240,
+        desc = "Which shrine blessing Auto Shrine chooses: Luck, Golden or AutoClicker.",
+        options = SHRINE_OPTIONS, default = "Luck",
+        callback = function(option)
+            for _, o in ipairs(SHRINE_OPTIONS) do
+                if o == option then shrine.choice = o end
+            end
+        end,
+    }
+    local function shrineSay(message)
+        local l = shrine.toggle._desc
+        if l and l.Parent and l.Text ~= message then l.Text = message end
+    end
+    local function shrineRun(id)
+        local function cur() return alive and shrine.on and shrine.gen == id end
+        while cur() do
+            local okR, remote = pcall(function() return RSv.RemoteServices.ShrineService.RF.Choose end)
+            if not okR or not remote then
+                shrineSay("ShrineService.RF.Choose was not found (is the shrine island loaded?). Retrying...")
+            else
+                local choice = shrine.choice
+                local sent, res = pcall(function() return remote:InvokeServer(choice) end)
+                if sent and not (type(res) == "table" and res.Success == false) then
+                    shrine.sent = shrine.sent + 1
+                    shrineSay("Chose " .. choice .. " (" .. shrine.sent .. " accepted so far). Checking again in " .. SHRINE_EVERY .. "s.")
+                else
+                    local reason = sent and (type(res) == "table" and tostring(res.Reason or "refused") or tostring(res)) or tostring(res)
+                    shrineSay("Shrine " .. choice .. " not taken: " .. reason .. ". Retrying in " .. SHRINE_EVERY .. "s.")
+                end
+            end
+            local t0 = os.clock()
+            while cur() and os.clock() - t0 < SHRINE_EVERY do task.wait(0.25) end
+        end
+    end
+    shrine.toggle = {
+        type = "toggle", name = "Auto Shrine", icon = "⛩", default = false,
+        desc = "Off. Chooses the blessing picked in the Shrine dropdown (ShrineService.RF.Choose).",
+        callback = function(on)
+            shrine.on = on == true
+            shrine.gen = shrine.gen + 1
+            if shrine.on then
+                shrineSay("Starting...")
+                local id = shrine.gen
+                task.spawn(function() shrineRun(id) end)
+            else
+                shrineSay("Off.")
+            end
+        end,
+    }
+    table.insert(cleanupHooks, function() shrine.on = false; shrine.gen = shrine.gen + 1 end)
+
+    return { hop, rejoin, jobId, low, speed, jump, potions[1].entry, potions[2].entry, potions[3].entry, quest.entry, shrine.pick, shrine.toggle }
 end)()
+
+
+--============================================================================
+--  4) PAGES
+--  tab contents, control builders, page builder, configurations, Home / Settings pages
+--============================================================================
 
 local TAB_SCRIPTS = {
 	Home = {},   -- the Home tab is drawn by hand further down
@@ -17356,7 +17450,7 @@ local TAB_SCRIPTS = {
 		{ name = "Islands", entries = Logic and Logic.islands and { Logic.islands.toggle, Logic.islands.pick, Logic.islands.go } or {} },
 		{ name = "30M Event", entries = Logic and Logic.quest30 and Logic.quest30.entries or {} },
 	} },
-	-- the Pets tab has its own pages (buttons at the top of the tab): Crafting, Enchanting, Auto Equip, Auto Delete (inventory)
+	-- the Pets tab has its own pages (buttons at the top of the tab): Crafting, Enchanting, Multi Enchanting, Auto Equip, Delete Pets
 	Pets = Logic and { pages = {
 		{
 			name = "Crafting",
@@ -17368,9 +17462,8 @@ local TAB_SCRIPTS = {
 				Logic.collect,
 			},
 		},
-		{ name = "Enchanting", entries = { { type = "enchantgrid", name = "Enchanting" } } },
 		{
-			name = "Auto Enchant",
+			name = "Enchanting",   -- page 2 (was "Auto Enchant")
 			entries = (Logic.enchant and {
 				Logic.enchant.pet,
 				Logic.enchant.target, Logic.enchant.slot,
@@ -17384,6 +17477,7 @@ local TAB_SCRIPTS = {
 				},
 			},
 		},
+		{ name = "Multi Enchanting", entries = { { type = "enchantgrid", name = "Multi Enchanting" } } },   -- page 3 (was "Enchanting": the pet card grid)
 		{ name = "Auto Equip", entries = AutoEquip },
 		{
 			name = "Delete Pets",
@@ -17399,7 +17493,7 @@ local TAB_SCRIPTS = {
 			},
 		},
 	} } or {},
-	-- All non-Halloween event controls now live together on General.
+	-- All event controls live together on General (the Halloween page is closed).
 	Events = Logic and { pages = {
 		{ name = "General", entries = (function()
 			local entries = { Logic.priority.duck, SkillPoints[1], DoubleJump, DesertChest }
@@ -17408,10 +17502,7 @@ local TAB_SCRIPTS = {
 			return entries
 		end)() },
 		{ name = "Auto Pet Defense", entries = Logic.petdef and { Logic.petdef.toggle, Logic.petdef.mode, Logic.petdef.grab, Logic.petdef.grabcard, Logic.petdef.info } or {} },
-		{ name = "Halloween", entries = Logic.halloween and {
-			Logic.halloween.treat, Logic.halloween.boss,
-			Logic.halloween.shop, Logic.halloween.items,
-		} or {} },
+		{ name = "Halloween", closed = true, closedMsg = "This event no longer exists", entries = {} },   -- event is over: the page button shows "Closed" and only opens a popup
 	} } or {},
 	Trade = { pages = {
 		{ name = "General", entries = TradeAgent.entries },
@@ -17517,7 +17608,7 @@ local TAB_SCRIPTS = {
 		end)(),
 		{
 			type = "button", name = "Mini Ui", icon = "📱", noSave = true,
-			desc = "Shrinks the hub away and opens the small Mini Ui (Kaitun Hatch + Kaitun Stats switch on; Kaitun Events only if you switch it on). It does not change the FPS or 3D rendering; its [-] button hides the toggles. Use its Full UI button, or the minimize key, to come back.",
+			desc = "Shrinks the hub away and opens the small Mini Ui (keeps whatever Kaitun toggles were already on in the full UI; it switches nothing on by itself). It does not change the FPS or 3D rendering; its [-] button hides the toggles. Use its Full UI button, or the minimize key, to come back.",
 			run = function()
 				local f = record.miniUi
 				if not f then return false, "Mini Ui isn't available (the Kaitun controls were not found)" end
@@ -17585,7 +17676,7 @@ end
 ---------------------------------------------------------------- KAITUN HATCH + KAITUN STATS
 -- Kaitun Hatch (master): switches every other feature toggle off, then runs delete / hatch latest detected egg / craft + collect / Anti AFK / Auto Rejoin /
 --   Show Status itself, in the order of the Priority tab.
--- Kaitun Stats (needs Kaitun Hatch) runs Auto Rebirth + Auto Equip and the enchanting; Kaitun Hatch itself no longer touches your pets. Kaitun Events: switches Auto Chest Coins, Auto Trick or Treat, Auto Kill Hallow Boss and Auto Purchase Items
+-- Kaitun Stats (needs Kaitun Hatch) runs Auto Rebirth + Auto Equip and the enchanting; Kaitun Hatch itself no longer touches your pets. Kaitun Events: switches Auto Chest Coins + the [30M Event] toggles
 --   on BY ITSELF and shows live numbers. It works with Kaitun Hatch on or off. Settings / Webhook toggles are not touched.
 do
 	local K = Logic and Logic.kaitun
@@ -17596,7 +17687,6 @@ do
 		local kOn = false          -- Kaitun Hatch
 		local stOn = false         -- Kaitun Stats
 		local statsOn = false      -- Kaitun Events
-		local hw = Logic.halloween
 
 		-- fixed settings Kaitun Events uses (there are no rows for them any more)
 		local REBIRTH_AMOUNT = AutoRebirth[2].default   -- "Best" = the most expensive rebirth you can afford
@@ -17677,56 +17767,39 @@ do
 			end
 		end
 
-		---------------------------------------------------------------- Auto Events (run by Kaitun Events): chest coins, Trick or Treat, Hallow boss, shop
-		-- one event feature at a time (the green checks on the Kaitun tab can switch each of them off)
+		---------------------------------------------------------------- Auto Events (run by Kaitun Events): chest coins + the [30M Event] page toggles
+		-- each part has its own green check on the Kaitun tab (K.skip[key]); the 30M entries are looked up by name on Logic.quest30
+		K.q30Names = { qprotect = "Quest Protect", qhatch = "Quest Hatch", qcraft = "Quest Craft", inflate = "Auto Inflate" }
+		K.eventKeys = { "chest", "qprotect", "qhatch", "qcraft", "inflate" }   -- start order (Protect first, so the pets are safe before hatching / crafting)
+		function K.q30Entry(key)
+			local q = Logic.quest30
+			for _, e in ipairs(q and q.entries or {}) do
+				if e.name == K.q30Names[key] then return e end
+			end
+			return nil
+		end
 		function K.eventPart(key, on)
 			if key == "chest" then
 				flipU(DesertChest, on)   -- Auto Chest Coins
-			elseif not hw then
-				return
-			elseif key == "treat" then
-				flipU(hw.treat, on)
-			elseif key == "boss" then
-				flipU(hw.boss, on)
-			elseif key == "shop" then
-				if on then
-					local want = {}
-					for _, l in ipairs(hw.items.options) do want[#want + 1] = l end   -- Buy All
-					if not override(hw.items, table.concat(want, "|")) then
-						note("events", "[Debug] Items to Buy isn't ready yet - it uses its own list")
-					else
-						note("events", nil)
-					end
-					flipU(hw.shop, true)
-				else
-					flipU(hw.shop, false)
-					release(hw.items)
-					note("events", nil)
-				end
+			elseif K.q30Names[key] then
+				local e = K.q30Entry(key)
+				if e then flipU(e, on)
+				elseif on then note("events", "[Debug] The 30M Event logic did not load - " .. K.q30Names[key] .. " not started") end
 			end
 		end
 		-- Turns the Kaitun Events features on or off.
 		local function eventsApply(on)
 			if on then
-				if not K.skip.chest then K.eventPart("chest", true) end   -- Auto Chest Coins runs with the other events
-				if not hw then
-					note("events", "[Debug] The Halloween logic did not load - no events")
-					return
-				end
-				for _, key in ipairs({ "treat", "boss", "shop" }) do
+				note("events", nil)
+				for _, key in ipairs(K.eventKeys) do
 					if not K.skip[key] then K.eventPart(key, true) end
 				end
 			else
-				flipU(DesertChest, false)
-				if not hw then return end
-				flipU(hw.treat, false)
-				flipU(hw.boss, false)
-				flipU(hw.shop, false)
-				release(hw.items)
+				for i = #K.eventKeys, 1, -1 do K.eventPart(K.eventKeys[i], false) end
 				note("events", nil)
 			end
 		end
-		for _, key in ipairs({ "chest", "treat", "boss", "shop" }) do
+		for _, key in ipairs(K.eventKeys) do
 			K.hooks[key] = {
 				active = function() return statsOn end,
 				on = function() K.eventPart(key, true) end,
@@ -17894,7 +17967,7 @@ do
 			-- the rows of the other tabs have to exist (right after the hub loads a saved configuration they may not yet)
 			for _ = 1, 40 do
 				if not (alive and statsOn and stats.run == my) then return end
-				if (not DesertChest or DesertChest._setUI) and (not hw or (hw.treat and hw.treat._setUI)) then break end
+				if (not DesertChest or DesertChest._setUI) and (not Logic.quest30 or (K.q30Entry("qhatch") and K.q30Entry("qhatch")._setUI)) then break end
 				task.wait(0.25)
 			end
 			task.wait(0.4)
@@ -18541,6 +18614,9 @@ do
 		Config.kaitunStorage = Logic.storage
 	end
 end
+
+
+-- ---- Control builders (button / toggle / slider / dropdown / input / keybind) ----
 
 -- Calls fn safely (an error in it never breaks the hub).
 local function safe(fn, ...)
@@ -20734,6 +20810,9 @@ local function buildKeybind(row, entry)
 	})
 end
 
+
+-- ---- Webhook helpers -------------------------------------------------------
+
 ---------------------------------------------------------------- webhook (input + Test Webhook + Save Webhook)
 local BOT_NAME = "WORST • Tap simulator"
 local BOT_AVATAR = "https://static.vecteezy.com/system/resources/previews/004/891/075/non_2x/the-initials-w-logo-is-simple-and-modern8868-free-vector.jpg"
@@ -21763,11 +21842,11 @@ local function buildScriptPage(tabName, entries)
 	local function buildRows(list, rowEntries, idPrefix)
 		for i, entry in ipairs(rowEntries) do
 			if entry.type == "enchantgrid" then
-				-- Pets > Enchanting: a whole page of its own (pet card grid), not a single row
+				-- Pets > Multi Enchanting: a whole page of its own (pet card grid), not a single row
 				local gridHost = new("Frame", { LayoutOrder = i, Size = UDim2.fromOffset(1066, 580), BackgroundTransparency = 1, BorderSizePixel = 0 }, list)
 				entry._id = idPrefix .. "/" .. tostring(entry.name or i)
 				local okGrid, errGrid = pcall(Config.enchantGrid, gridHost, entry)
-				if not okGrid then warn("[WORST Hub] Enchanting page failed: " .. tostring(errGrid)) end
+				if not okGrid then warn("[WORST Hub] Multi Enchanting page failed: " .. tostring(errGrid)) end
 			elseif entry.type == "checkcard" or entry.type == "ringinfo" or entry.type == "questinfo" then
 				-- Kaitun-style info card instead of a normal row
 				local host = new("Frame", { LayoutOrder = i, Size = UDim2.fromOffset(1066, 300), BackgroundTransparency = 1, BorderSizePixel = 0 }, list)
@@ -21842,6 +21921,36 @@ local function buildScriptPage(tabName, entries)
 
 		local PILL_W, PILL_H = 176, 38
 		local subLists, subButtons, subStrokes = {}, {}, {}
+		-- small centered popup (click anywhere or OK to close, also closes by itself after 4 s)
+		local function closedPopup(msg)
+			local old = gui:FindFirstChild("EventClosedPopup")
+			if old then old:Destroy() end
+			local shade = new("TextButton", {
+				Name = "EventClosedPopup", Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(0, 0, 0),
+				BackgroundTransparency = 0.5, Text = "", AutoButtonColor = false, ZIndex = 900,
+			}, gui)
+			local box = new("Frame", {
+				AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(380, 170),
+				BackgroundColor3 = C.card, BorderSizePixel = 0, ZIndex = 901,
+			}, shade)
+			corner(box, UDim.new(0, 16))
+			stroke(box, C.stroke, 1)
+			new("TextLabel", {
+				Position = UDim2.fromOffset(20, 22), Size = UDim2.fromOffset(340, 70), BackgroundTransparency = 1,
+				Text = "\u{1F512}  " .. tostring(msg), TextColor3 = C.text, TextSize = 21, Font = Enum.Font.GothamMedium,
+				TextWrapped = true, ZIndex = 902,
+			}, box)
+			local ok = new("TextButton", {
+				AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 106), Size = UDim2.fromOffset(120, 38),
+				BackgroundColor3 = SEL_BG, AutoButtonColor = true, Text = "OK", TextColor3 = Color3.new(1, 1, 1),
+				TextSize = 17, Font = Enum.Font.GothamMedium, ZIndex = 902,
+			}, box)
+			corner(ok, UDim.new(0, 12))
+			local function close() if shade.Parent then shade:Destroy() end end
+			shade.MouseButton1Click:Connect(close)
+			ok.MouseButton1Click:Connect(close)
+			task.delay(4, close)
+		end
 		local curIdx, slideId = 1, 0
 		local SLIDE_W = 1084
 		-- Shows one sub-page of a tab.
@@ -21917,9 +22026,15 @@ local function buildScriptPage(tabName, entries)
 			}, bar)
 			corner(btn, UDim.new(0, 14))
 			subStrokes[i] = stroke(btn, (i == 1) and Color3.fromRGB(205, 205, 205) or C.stroke, 1)
+			if sp.closed then   -- closed page: greyed out "Closed" label, never opens
+				btn.Text = (sp.name or "Page") .. " (Closed)"
+				btn.TextColor3 = Color3.fromRGB(110, 110, 110)
+				btn.TextSize = 15
+			end
 			btn.MouseEnter:Connect(function() if curIdx ~= i then tween(btn, { BackgroundColor3 = FIELD_HOVER }, 0.12) end end)
 			btn.MouseLeave:Connect(function() if curIdx ~= i then tween(btn, { BackgroundColor3 = FIELD }, 0.12) end end)
 			btn.MouseButton1Click:Connect(function()
+				if sp.closed then closedPopup(sp.closedMsg or "This event no longer exists") return end
 				showPage(i)
 				-- a button that is half outside the row slides fully into view
 				local bx, cur = BAR_PAD + (i - 1) * (PILL_W + 10), bar.CanvasPosition.X
@@ -21934,7 +22049,7 @@ local function buildScriptPage(tabName, entries)
 		end
 	else
 		local SUBTITLES = {
-			Kaitun = "Kaitun Hatch runs your setup, Kaitun Events runs chests, Trick or Treat, the boss and the shop, Kaitun Stats equips, rebirths and enchants.",
+			Kaitun = "Kaitun Hatch runs your setup, Kaitun Events runs the coin chests and the 30M Event toggles, Kaitun Stats equips, rebirths and enchants.",
 			Farming = "Hatch eggs and rebirth automatically.",
 		}
 		label(page, SUBTITLES[tabName] or "Press a button to run its script.", 322, 149, 19, C.sub, Enum.Font.Gotham)
@@ -22105,11 +22220,11 @@ for _, old in ipairs({ "Settings/Eggs Per Hatch", "Settings/Page 1/Eggs Per Hatc
 	ID_ALIAS[old] = "Farming/Hatch/Hatch Amount"
 end
 
--- Pets > Enchanting became the pet card grid; the old enchant controls moved to Pets > Auto Enchant (old saves still load)
+-- Pets > "Auto Enchant" page was renamed "Enchanting" (and the pet card grid is now "Multi Enchanting"): old saves still load
 for _, pgE in ipairs((TAB_SCRIPTS.Pets and TAB_SCRIPTS.Pets.pages) or {}) do
-	if pgE.name == "Auto Enchant" then
+	if pgE.name == "Enchanting" then
 		for _, e in ipairs(pgE.entries) do
-			if e.name then ID_ALIAS["Pets/Enchanting/" .. e.name] = "Pets/Auto Enchant/" .. e.name end
+			if e.name then ID_ALIAS["Pets/Auto Enchant/" .. e.name] = "Pets/Enchanting/" .. e.name end
 		end
 	end
 end
@@ -22839,9 +22954,10 @@ do
 		label(card, "What Kaitun Events does", 583, 34, 24, C.text, Enum.Font.GothamMedium)
 		label(card, "Starts these by itself and shows live numbers.", 583, 62, 16, C.sub, Enum.Font.Gotham)
 		item(checksR, "chest", 583, 1037, 112, 1, "Auto Chest Coins", "Claims the Sky Island and Desert coin", "chests whenever they are ready.")
-		item(checksR, "treat", 583, 1037, 192, 2, "Auto Trick or Treat", "Collects every house on the Halloween island,", "then waits for the houses to refill.")
-		item(checksR, "boss", 583, 1037, 272, 3, "Auto Kill Hallow Boss", "Fights the Hallow Lord when it shows up.", "")
-		item(checksR, "shop", 583, 1037, 352, 4, "Auto Purchase Items", "Buys every Halloween shop item,", "checking the shop once every hour.")
+		item(checksR, "qhatch", 583, 1037, 176, 2, "Quest Hatch [30M Event]", "Hatches the 30M egg for the open Luck Quests.", "")
+		item(checksR, "qprotect", 583, 1037, 240, 3, "Quest Protect [30M Event]", "Keeps the quest pets out of every auto delete.", "")
+		item(checksR, "qcraft", 583, 1037, 304, 4, "Quest Craft [30M Event]", "Crafts the active Luck Quest.", "")
+		item(checksR, "inflate", 583, 1037, 368, 5, "Auto Inflate [30M Event]", "Inflates the Balloon Luck balloon.", "")
 
 		-- middle, below both columns: Kaitun Stats
 		frame(card, 0, 462, 1066, 1, C.stroke)
@@ -23078,6 +23194,12 @@ end
 
 -- start on the default tab (no animation)
 setTab(DEFAULT_TAB, true)
+
+
+--============================================================================
+--  5) WINDOW
+--  drag + resize, minimize bubble, close / unload dialog, hotkeys
+--============================================================================
 
 ------------------------------------------------------------------ Drag + Resize
 local MIN_SCALE, MAX_SCALE = 0.3, 1.6
@@ -24194,7 +24316,7 @@ end
 
 ------------------------------------------------------------------ LITE MODE
 -- Only while NOTHING has been toggled by hand since the script was executed (record.userToggled stays false):
---   hub left alone for IDLE_SECS (60 s)  ->  the hub shrinks away and a small window opens with Kaitun Hatch + Kaitun Stats (both switched on; Kaitun Events is not)
+--   hub left alone for IDLE_SECS (60 s)  ->  the hub shrinks away and a small window opens that keeps whatever Kaitun toggles were already on in the full UI (nothing is switched on by it)
 -- Any press / scroll on the hub, minimizing, or an open dialog counts as activity. Toggling anything yourself (also in the
 -- Lite window) turns this watcher off for good. The Lite window does not touch the FPS or 3D rendering. It has a "Full UI" button (or press the minimize key) to go back.
 -- Everything lives inside one function so it does not use up the script's local-variable limit.
@@ -24435,10 +24557,9 @@ task.spawn(function()
 		else
 			liteScale.Scale = 1
 		end
-		pcall(function() if kt.main._setUI then kt.main._setUI(true) end end)     -- no-op when it is already on
-		pcall(function() if kt.enchant and kt.enchant._setUI then kt.enchant._setUI(true) end end)   -- Kaitun Events stays as it is: switch it on yourself if you want it
+		-- the Kaitun toggles are NOT touched here: the Mini Ui keeps exactly what was on in the full UI (Hatch / Events / Stats), nothing is switched on
 		paintAll()
-		print("[WORST Hub] Lite mode: idle, switched to the small window (Kaitun Hatch + Kaitun Stats on).")
+		print("[WORST Hub] Lite mode: idle, switched to the small window (Kaitun toggles left as they were).")
 	end
 	record.exitLite = function()
 		if not record.liteActive then return end
