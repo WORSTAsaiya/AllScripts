@@ -40,18 +40,19 @@ local function parseShortNumber(text)
 	end
 	return tonumber(num) * mult
 end
--- returns muscle (number or nil), and where it came from ("leaderstats" / "hud")
+-- returns muscle (number or nil), and where it came from ("hud" / "leaderstats")
+-- HUD FIRST: it always shows your REAL muscle. leaderstats.Muscle can be 0 (Conceal) OR a fake value (Muscle Reveal slider, e.g. 5.36T),
+-- and trusting that fake value made Auto Sell think you had almost no muscle.
 local function getMuscle()
-	local ls = player:FindFirstChild("leaderstats")
-	local mv = ls and ls:FindFirstChild("Muscle")
-	local v = mv and tonumber(mv.Value)
-	if v and v > 0 then return v, "leaderstats" end
 	local ok, t = pcall(function() return player.PlayerGui.Main_Gui.DataMenu_Frame.Muscle.Status.Text end)
 	if ok and type(t) == "string" then
 		local cur = t:match("^%s*([^/]+)")
 		local n = cur and parseShortNumber(cur)
-		if n then return n, "hud" end
+		if n and n > 0 then return n, "hud" end
 	end
+	local ls = player:FindFirstChild("leaderstats")
+	local mv = ls and ls:FindFirstChild("Muscle")
+	local v = mv and tonumber(mv.Value)
 	return v, "leaderstats"
 end
 
@@ -2031,12 +2032,32 @@ TAB_SCRIPTS.Farming = (function()
 	local X2_COINS_PASS = 946852149
 	local hasX2Coins = false
 	local lastPassCheck = -1e9
+	-- backup check: the in-game Shop card "X2 Coins" shows "Owned" when you have it (works even if the API call fails in your executor)
+	local function shopShowsX2Owned()
+		local ok, res = pcall(function()
+			for _, d in ipairs(player.PlayerGui:GetDescendants()) do
+				if d:IsA("TextLabel") and tostring(d.Text):lower():match("^%s*x2 coins%s*$") then
+					local c = d.Parent
+					for _ = 1, 3 do
+						if not c or c == player.PlayerGui then break end
+						for _, e in ipairs(c:GetDescendants()) do
+							if e:IsA("TextLabel") and tostring(e.Text):lower():find("owned") then return true end
+						end
+						c = c.Parent
+					end
+				end
+			end
+			return false
+		end)
+		return ok and res == true
+	end
 	local function refreshX2Coins()
 		lastPassCheck = os.clock()
 		local ok, owns = pcall(function()
 			return game:GetService("MarketplaceService"):UserOwnsGamePassAsync(player.UserId, X2_COINS_PASS)
 		end)
 		if ok and type(owns) == "boolean" then hasX2Coins = owns end   -- on any error it keeps the old answer (default: no pass = safe)
+		if not hasX2Coins and shopShowsX2Owned() then hasX2Coins = true end   -- API said no / failed, but the shop says Owned
 	end
 	pcall(function()   -- bought while playing: take it into account right away
 		game:GetService("MarketplaceService").PromptGamePassPurchaseFinished:Connect(function(plr, id, bought)
