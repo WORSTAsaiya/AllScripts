@@ -105,7 +105,7 @@
 --//                  Kaitun Hatch does NOT touch your pets: Auto Rebirth (Best) and Auto Equip (Luckiest while hatching, Richest right before each rebirth) are run by "Kaitun Stats" (needs Kaitun Hatch), together with the enchanting.
 --//                  "Kaitun Events" = switches Auto Chest Coins + every [30M Event] page toggle (Quest Hatch, Quest Protect, Quest Craft, Auto Inflate); each one has its own green check on the Kaitun tab (the Halloween event is over)
 --//                  on by itself and shows live numbers. The window and the tabs never change.
---// Events tab   : page [General] -> "Auto Claim Lucky Ducky"; page [Halloween] -> CLOSED (shows a "This event no longer exists" popup and does not open); old notes: "Auto Halloween Trick or Treat" (travels to the Halloween island, jumps in each house's circle, waits for the houses to refill, repeats); one lap per 4-hour refill with a countdown; "Auto Kill Boss" (Hallow Lord) and "Auto Purchase Items" (+ Items to Buy dropdown)
+--// Events tab   : page [General] -> (Auto Claim Lucky Ducky now lives in Miscellaneous, below Auto Shrine); page [Halloween] -> CLOSED (shows a "This event no longer exists" popup and does not open); old notes: "Auto Halloween Trick or Treat" (travels to the Halloween island, jumps in each house's circle, waits for the houses to refill, repeats); one lap per 4-hour refill with a countdown; "Auto Kill Boss" (Hallow Lord) and "Auto Purchase Items" (+ Items to Buy dropdown)
 --// Events tab   : page [Balloons] -> "Auto Balloons" (teleports to each balloon of the Balloon Party and pops it, then goes back; Kaitun Hatch/Events no longer switch it on)
 --//                  page [Dig] -> "Auto Dig" (Autumn dig spot, hits the timing bar by itself, max 10 digs per hour; Kaitun Hatch/Events no longer switch it on)
 --// Trade tab    : "Choose Pets" dropdown ("+  pet  -" rows: left click = +1, right click = -1, + / - buttons for touch) + "Tokens They Must Pay" + "Auto Trade (Pay First)" -> accepts requests, offers exactly those pets and only Locks / Confirms once the other player's offer reaches the amount
@@ -505,7 +505,7 @@ new("UIGradient", {
 icon(window, "logo", "", 56, 52, 60) -- only shows if an image id is set
 
 label(window, 'WORST •<font color="rgb(170,170,170)">Tap Simulator</font>', 108, 39, 33, C.text, Enum.Font.GothamBold)
-label(window, "Free Version", 108, 72, 19, C.sub, Enum.Font.Gotham)
+label(window, "By: Uron", 108, 72, 19, C.sub, Enum.Font.Gotham)
 
 local minLabel = label(window, "—", 1347, 37, 20, C.text, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
 minLabel.Size = UDim2.fromOffset(40, 30)
@@ -7044,13 +7044,13 @@ local function buildLogic()
 		end
 	end
 
-	-------------------------------------------------------------------------- Events > General: Auto Claim Lucky Ducky
+	-------------------------------------------------------------------------- Miscellaneous: Auto Claim Lucky Ducky (on by default)
 	-- Confirmed capture: RE.Spawn({Id = UUID, Lifetime = 10}). The duck is now pressed in the world instead of calling RF.Claim.
 	HG.duck = (function()
 		local entry = {
-			-- TOGGLE "Auto Claim Lucky Ducky": When a Lucky Ducky spawns, finds the duck in the world and presses it (click on the duck).
-			type = "toggle", name = "Auto Claim Lucky Ducky", icon = "🦆", default = false,
-			desc = "When a Lucky Ducky spawns, finds the duck in the world and presses it (click on the duck). It keeps re-aiming at the duck while it moves, for the duck's whole lifetime.",
+			-- TOGGLE "Auto Claim Lucky Ducky": When a Lucky Ducky spawns, presses the duck that floats on the screen (simulated mouse click on it).
+			type = "toggle", name = "Auto Claim Lucky Ducky", icon = "🦆", default = true,
+			desc = "When a Lucky Ducky spawns, finds the duck that floats on your screen and presses it like a real mouse click (on its centre, re-aimed every 0.1 s while it moves) until it is gone. If there is no duck picture on the screen it falls back to a duck object in the world.",
 		}
 		local on, hooked, count = false, false, 0
 		local seen, busy = {}, {}
@@ -7076,20 +7076,58 @@ local function buildLogic()
 			end
 			return byName
 		end
-		-- The duck can also be a 2D picture on the screen (a GUI button / image named "duck"): find it and click its middle.
+		-- true when a GUI object is really on screen (it and every parent up to its ScreenGui are visible and the ScreenGui is enabled)
+		local function guiShown(o)
+			local q = o
+			while q and not q:IsA("ScreenGui") do
+				if q:IsA("GuiObject") and not q.Visible then return false end
+				q = q.Parent
+			end
+			return q ~= nil and q.Enabled
+		end
+		-- true when the object or one of its parents (up to the ScreenGui) has "duck" in its name
+		local function nameHasDuck(o)
+			local q = o
+			while q and q ~= game do
+				if q.Name:lower():find("duck", 1, true) then return true end
+				if q:IsA("ScreenGui") then break end
+				q = q.Parent
+			end
+			return false
+		end
+		-- pictures that can be the duck: buttons first, then a 3D viewport, then a plain image
+		local PIC = { ImageButton = 3, TextButton = 3, ViewportFrame = 2, ImageLabel = 1 }
+		local baseline = {}   -- every GUI object that existed before the duck spawned (so a NEW picture can be told apart)
+		local function snapshotGui()
+			local set, root = {}, lp:FindFirstChildOfClass("PlayerGui")
+			if root then for _, d in ipairs(root:GetDescendants()) do set[d] = true end end
+			return set
+		end
+		-- The Lucky Ducky floats on the SCREEN as a picture. Found by its name first; when the game named it something else, it is the
+		-- picture that appeared on the screen since before the spawn. Returns the object or nil.
 		local function findGuiDuck()
 			local root = lp:FindFirstChildOfClass("PlayerGui")
 			if not root then return nil end
+			local cam = workspace.CurrentCamera
+			local vp = cam and cam.ViewportSize or Vector2.new(1920, 1080)
+			local function score(d) local a2 = d.AbsoluteSize return (PIC[d.ClassName] or 0) * 1e8 + a2.X * a2.Y end
+			local named, new
 			for _, d in ipairs(root:GetDescendants()) do
-				if d:IsA("GuiObject") and d.Visible and d.Name:lower():find("duck", 1, true)
-					and (d:IsA("ImageButton") or d:IsA("ImageLabel") or d:IsA("TextButton") or d:IsA("ViewportFrame"))
-					and d.AbsoluteSize.X > 4 and d.AbsoluteSize.Y > 4 then
-					local sg = d
-					while sg and not sg:IsA("ScreenGui") do sg = sg.Parent end
-					if sg and sg.Enabled and sg ~= gui then return d, sg end
+				if PIC[d.ClassName] then
+					local sz = d.AbsoluteSize
+					if sz.X >= 12 and sz.Y >= 12 and sz.X < vp.X * 0.7 and sz.Y < vp.Y * 0.7 and guiShown(d) then
+						local sg = d:FindFirstAncestorWhichIsA("ScreenGui")
+						if sg and sg ~= gui then
+							if nameHasDuck(d) then
+								if not named or score(d) > score(named) then named = d end
+							elseif not baseline[d] then
+								if not new or score(d) > score(new) then new = d end
+							end
+						end
+					end
 				end
 			end
-			return nil
+			return named or new
 		end
 		-- Sends a mouse click at screen position x,y.
 		local function clickXY(x, y)
@@ -7127,47 +7165,156 @@ local function buildLogic()
 			end
 			return did
 		end
-		-- Presses the duck's button on screen.
-		local function pressGuiDuck(d, sg)
-			local off = sg.IgnoreGuiInset and Vector2.new(0, 0) or GuiService:GetGuiInset()
-			local pos = d.AbsolutePosition + d.AbsoluteSize / 2
-			clickXY(pos.X + off.X, pos.Y + off.Y)
+		-- The hub window can sit on top of the duck and take the click: while it covers the spot the hub is hidden (given back after the duck).
+		local hubHidden = false
+		local function hubBack()
+			if not hubHidden then return end
+			hubHidden = false
+			pcall(function() gui.Enabled = true end)
+			record.guiSuspended = false
+		end
+		local function hubCover(x, y)
+			if hubHidden or not gui.Enabled or not window.Visible then return end
+			local wp, ws = window.AbsolutePosition, window.AbsoluteSize
+			if x >= wp.X and x <= wp.X + ws.X and y >= wp.Y and y <= wp.Y + ws.Y then
+				hubHidden = true
+				record.guiSuspended = true
+				pcall(function() gui.Enabled = false end)
+				task.wait(0.05)
+			end
+		end
+		table.insert(cleanupHooks, hubBack)
+		-- true when a click at x,y (GUI coordinates) would reach `target` and not some other button / panel lying on top of it
+		-- (the duck floats over the chat, the Height widget, the Shop button ... a click on those would not catch it)
+		local function reachable(target, x, y)
+			local root = lp:FindFirstChildOfClass("PlayerGui")
+			if not root then return true end
+			local okL, list = pcall(function() return root:GetGuiObjectsAtPosition(x, y) end)
+			if not okL or type(list) ~= "table" then return true end
+			for _, o in ipairs(list) do   -- topmost first
+				if o == target or o:IsDescendantOf(target) or target:IsDescendantOf(o) then return true end
+				if not o:IsDescendantOf(gui) and (o:IsA("GuiButton") or o:IsA("TextBox") or o.Active) then return false end
+			end
 			return true
 		end
-		-- Claims one duck (teleports / clicks) if it was not claimed yet.
-		local function claim(id, lifetime)
-			if not on or seen[id] or busy[id] then return end
-			busy[id] = true
-			-- Keep looking and pressing for the duck's whole lifetime (10 s): every 0.1 s the duck is found again and the click is
-			-- re-aimed at its current position. It counts as caught when the duck disappears after being pressed.
-			local t0, life = os.clock(), tonumber(lifetime) or 10
-			local target, presses = nil, 0
-			while alive and on and os.clock() - t0 < life + 1 do
-				if target and not target.Parent then break end        -- it vanished after a press: caught
-				target = target and target.Parent and target or findDuck(id)
-				if target then
-					if pressDuck(target) then presses = presses + 1 end
-				else
-					local gd, sg = findGuiDuck()
-					if gd then
-						pressGuiDuck(gd, sg)
-						presses = presses + 1
-						target = gd
+		-- the point of the duck to click: its centre, or - when something lies on top of the centre - the nearest free spot of the picture
+		local function aimPoint(d)
+			local pos, size = d.AbsolutePosition, d.AbsoluteSize
+			local cam = workspace.CurrentCamera
+			local vp = cam and cam.ViewportSize or Vector2.new(1920, 1080)
+			local cx, cy = pos.X + size.X / 2, pos.Y + size.Y / 2
+			if reachable(d, cx, cy) then return cx, cy, true end
+			for _, fy in ipairs({ 0.5, 0.35, 0.65, 0.2, 0.8 }) do
+				for _, fx in ipairs({ 0.5, 0.35, 0.65, 0.2, 0.8 }) do
+					local x, y = pos.X + size.X * fx, pos.Y + size.Y * fy
+					if x >= 0 and y >= 0 and x <= vp.X and y <= vp.Y and reachable(d, x, y) then return x, y, true end
+				end
+			end
+			return cx, cy, false
+		end
+		-- Presses the duck picture like a user would: a real mouse click on a free spot of it, re-aimed on every press because the duck floats.
+		local function pressGuiDuck(d)
+			local sg = d:FindFirstAncestorWhichIsA("ScreenGui")
+			if not sg then return false end
+			local off = sg.IgnoreGuiInset and Vector2.new(0, 0) or GuiService:GetGuiInset()
+			local px, py, free = aimPoint(d)
+			local x, y = px + off.X, py + off.Y
+			hubCover(x, y)
+			if d:IsA("GuiButton") then   -- a button also gets its own click signals, like the click would give it
+				local gc = getconnections or get_signal_cons
+				if type(gc) == "function" then
+					for _, sig in ipairs({ "MouseButton1Click", "Activated" }) do
+						pcall(function() for _, c in ipairs(gc(d[sig])) do c:Fire() end end)
 					end
 				end
-				task.wait(0.1)
 			end
-			if target and not target.Parent and presses > 0 then
-				pressed[target] = true
+			clickXY(x, y)
+			return true, free
+		end
+		-- Console report when no duck picture is found: what is new on the screen and what is called "duck" (so it can be fixed for sure).
+		local function diag()
+			print("[Ducky] no duck picture found. GUI objects that are new on the screen since before the spawn:")
+			local root, n = lp:FindFirstChildOfClass("PlayerGui"), 0
+			if root then
+				for _, d in ipairs(root:GetDescendants()) do
+					if d:IsA("GuiObject") and not baseline[d] and guiShown(d) and d.AbsoluteSize.X > 4 then
+						n = n + 1
+						if n <= 25 then print(string.format("[Ducky]   new: %s (%s) size %dx%d", d:GetFullName(), d.ClassName, d.AbsoluteSize.X, d.AbsoluteSize.Y)) end
+					end
+				end
+				for _, d in ipairs(root:GetDescendants()) do
+					if d.Name:lower():find("duck", 1, true) then print("[Ducky]   named duck (GUI): " .. d:GetFullName() .. " (" .. d.ClassName .. ")") end
+				end
+			end
+			local w = 0
+			for _, d in ipairs(workspace:GetDescendants()) do
+				if d.Name:lower():find("duck", 1, true) then
+					w = w + 1
+					if w <= 10 then print("[Ducky]   named duck (world): " .. d:GetFullName() .. " (" .. d.ClassName .. ")") end
+				end
+			end
+			print(string.format("[Ducky]   %d new GUI object(s), %d world object(s) named duck", n, w))
+		end
+		-- Claims one duck: keeps pressing it for its whole lifetime. It counts as caught when it disappears after being pressed.
+		local function claim(id, lifetime)
+			if not on or seen[id] or busy[id] or next(busy) ~= nil then return end   -- one duck at a time
+			busy[id] = true
+			local gTarget, wTarget, presses, caught, blocked = nil, nil, 0, false, 0
+			status("Duck spawned - looking for it...")
+			local ok, err = pcall(function()
+				local t0, life, lastScan, diagDone = os.clock(), tonumber(lifetime) or 10, -1, false
+				while alive and on and os.clock() - t0 < life + 1 do
+					if gTarget and (not gTarget.Parent or not guiShown(gTarget)) then      -- the picture is gone
+						if presses > 0 then caught = true break end
+						gTarget = nil
+					end
+					if wTarget and not wTarget.Parent then
+						if presses > 0 then caught = true break end
+						wTarget = nil
+					end
+					if not gTarget and not wTarget and os.clock() - lastScan >= 0.4 then
+						lastScan = os.clock()
+						gTarget = findGuiDuck()
+						if gTarget then
+							print("[Ducky] pressing the duck picture: " .. gTarget:GetFullName() .. " (" .. gTarget.ClassName .. ")")
+						else
+							wTarget = findDuck(id)   -- no picture on the screen: a duck object in the world
+							if wTarget then print("[Ducky] pressing the world duck: " .. wTarget:GetFullName()) end
+						end
+						if not gTarget and not wTarget and not diagDone and os.clock() - t0 > 1.5 then
+							diagDone = true
+							diag()
+						end
+					end
+					if gTarget then
+						local pressedOk, free = pressGuiDuck(gTarget)
+						if pressedOk then presses = presses + 1 end
+						if free == false then blocked = blocked + 1 end
+						status(string.format("Pressing the duck (%s) | %d presses%s", gTarget.Name, presses, blocked > 0 and " | something lies over it" or ""))
+					elseif wTarget then
+						if pressDuck(wTarget) then presses = presses + 1 end
+						status(string.format("Pressing the world duck (%s) | %d presses", wTarget.Name, presses))
+					else
+						status("Duck spawned - no duck picture found yet (see F9 console)")
+					end
+					task.wait(0.1)
+				end
+			end)
+			hubBack()
+			if not ok then warn("[Ducky] error: " .. tostring(err)) end
+			if caught then
+				if wTarget then pressed[wTarget] = true end
 				seen[id] = true
 				count = count + 1
 				print("[Ducky] caught after " .. presses .. " press(es)")
 				status("On | ducks pressed: " .. count .. " | last: " .. os.date("%H:%M:%S"))
 			else
-				print("[Ducky] not caught: target=" .. tostring(target and target:GetFullName()) .. " presses=" .. presses)
-				status("On | missed the last duck (see console) | ducks pressed: " .. count)
+				local t = gTarget or wTarget
+				print("[Ducky] not caught: target=" .. tostring(t and t:GetFullName()) .. " presses=" .. presses)
+				status("On | missed the last duck (see F9 console) | ducks pressed: " .. count)
 			end
 			busy[id] = nil
+			baseline = snapshotGui()
 		end
 		-- Connects the listener that tells when a duck spawns.
 		local function hook()
@@ -7185,12 +7332,45 @@ local function buildLogic()
 				task.spawn(claim, id, data.Lifetime)
 			end)
 		end
+		local guiHooked = false
+		local function hookGui()
+			if guiHooked then return end
+			local root = lp:FindFirstChildOfClass("PlayerGui")
+			if not root then return end
+			guiHooked = true
+			connect(root.DescendantAdded, function(d)
+				if not on or not PIC[d.ClassName] then return end
+				task.defer(function()
+					if not on or next(busy) ~= nil or not d.Parent then return end
+					if nameHasDuck(d) and guiShown(d) then task.spawn(claim, "gui-" .. tostring(os.clock()), 11) end
+				end)
+			end)
+		end
+		local baseGen = 0
+		-- keeps the "before the duck spawned" picture of the screen fresh while the toggle is on (and no duck is being pressed)
+		local function startBaseline()
+			baseGen = baseGen + 1
+			local my = baseGen
+			task.spawn(function()
+				while alive and on and baseGen == my do
+					if next(busy) == nil then baseline = snapshotGui() end
+					for _ = 1, 30 do
+						if not (alive and on and baseGen == my) then return end
+						task.wait(0.5)
+					end
+				end
+			end)
+		end
 		entry.callback = function(v)
 			on = v == true
 			if on then
 				hook()
+				hookGui()
+				startBaseline()
 				if hooked then status("On | waiting for Spawn | claims sent: " .. count) end
 			else
+				baseGen = baseGen + 1
+				hubBack()
 				status("Off | claims sent: " .. count)
 			end
 		end
@@ -9492,7 +9672,7 @@ local function buildLogic()
 	end
 
 	-------------------------------------------------------------------------- EVENTS > PET DEFENSE (Colosseum wave defense)
-	-- Teleport straight to the start spot (no island travel), press "Play" on the Pet Defense popup, attack every opponent the moment it spawns, repeat.
+	-- Travel to the island, teleport to the start spot, press "Play" on the Pet Defense popup, attack every opponent the moment it spawns, repeat.
 	-- Reward claim is confirmed: ClaimMinigameReward("keep"/"replace"). ReturnFromArena is attempted without arguments.
 	do
 		local okP, resP = pcall(function()
@@ -9502,10 +9682,10 @@ local function buildLogic()
 			local COOLDOWN_SECS = 1800   -- length of the cooldown after a run: 30 min (Data.Colosseum.Cooldown holds the time it STARTED; compare the status line with the game's "Come back in" timer and change this if it is off)
 			local PRESS_INTERVAL = 0.1   -- seconds between two screen presses while a run is on
 			local PRESS_HOLD     = 0.05  -- how long each press is held down
-			local POPUP_DELAY  = 3     -- seconds to wait after arriving before looking for the popup / pressing Play
+			local POPUP_DELAY  = 3     -- (no longer used: the popup watcher starts before the teleport)
 			local POPUP_WAIT   = 60      -- seconds to keep re-checking for the Pet Defense popup after arriving at the start spot
 			local START_WAIT   = 8       -- seconds to wait for the first opponent after starting
-			local POPUP_RECHECK = 10     -- seconds between two checks for the Play button once on the start spot
+			local POPUP_RECHECK = 10     -- (no longer used: the watcher checks every 0.1 s)
 			local ARENA_CENTER_DELAY = 2 -- seconds after the battle starts before going to the arena center
 			local ARENA_CENTER = CFrame.new(-226.18292236328125, 2026.308837890625, -1793.7020263671875, 0.13348408043384552, 9.956330870863894e-09, 0.9910509586334229, 6.328140500500012e-08, 1, -1.8569570769955135e-08, -0.9910509586334229, 6.519383788372579e-08, 0.13348408043384552)
 			local CLAIM_REMOTE = { "RF", "ClaimMinigameReward" }
@@ -9517,7 +9697,7 @@ local function buildLogic()
 			local svc = find(RS, { "RemoteServices", "ColosseumService" })
 			assert(svc, "ColosseumService not found")
 
-			local DESC = "Teleports straight to the Pet Defense spot (no island travel), presses Play on the Pet Defense popup to start the Colosseum wave defense and taps the middle of the screen repeatedly to fight, then starts the next run (waits and retries while it is on cooldown)."
+			local DESC = "Travels to the island first (the game's own Travel), then teleports to the Pet Defense spot, presses Play on the Pet Defense popup to start the Colosseum wave defense and taps the middle of the screen repeatedly to fight, then starts the next run (waits and retries while it is on cooldown)."
 			local toggle = {
 				-- TOGGLE "Auto Pet Defense": plays the Pet Defense event and handles the new ring by the chosen mode (Keep / Replace / Better).
 				type = "toggle", name = "Auto Pet Defense", icon = "🛡", default = false,
@@ -9876,7 +10056,7 @@ local function buildLogic()
 			-- Looks for the Pet Defense dialog and returns its "Play" button (or its label if no button object wraps it), or nil.
 			-- It starts from every "Play" text on screen and walks up until it reaches a frame that also holds a "Not now" text and
 			-- mentions Pet Defense, so it does not depend on the exact GUI path or on how the title is built.
-			local function findPlayButton()
+			local function findPlayButton(quiet, only)   -- quiet: no diagnostics | only: scan just this ScreenGui (fast)
 				if playBtn and playBtn.Parent and isShown(playBtn) then return playBtn end
 				playBtn = nil
 				if os.clock() - lastIntroScan < 1 then return nil end
@@ -9884,7 +10064,7 @@ local function buildLogic()
 				local pg = player and player:FindFirstChild("PlayerGui")
 				if not pg then return nil end
 				local n, scanned, seen = 0, 0, {}
-				for _, sg in ipairs(pg:GetChildren()) do
+				for _, sg in ipairs(only and { only } or pg:GetChildren()) do
 					if sg ~= gui and (not sg:IsA("ScreenGui") or sg.Enabled) then   -- never the hub's own UI; folders / other containers are searched too
 						for _, node in ipairs(sg:GetDescendants()) do
 							n = n + 1
@@ -9933,12 +10113,44 @@ local function buildLogic()
 						end
 					end
 				end
-				if os.clock() - lastDiag > 8 then
+				if not quiet and os.clock() - lastDiag > 8 then
 					lastDiag = os.clock()
 					if #seen > 0 then
 						for _, line in ipairs(seen) do print("[PetDefense] popup search: 'Play' text rejected: " .. line) end
 					else
 						popupDiag(pg, scanned)
+					end
+				end
+				return nil
+			end
+
+			-- The popup of the game shows "Come back in 00:20:49!" while the cooldown is still running. Returns the seconds left when that text is
+			-- on screen (so the popup HAS arrived, only the reset is missing), otherwise nil.
+			local function comeBackLeft(only)
+				local pg = player and player:FindFirstChild("PlayerGui")
+				if not pg then return nil end
+				local n = 0
+				for _, sg in ipairs(only and { only } or pg:GetChildren()) do
+					if sg ~= gui and (not sg:IsA("ScreenGui") or sg.Enabled) then
+						for _, node in ipairs(sg:GetDescendants()) do
+							n = n + 1
+							if n % 1500 == 0 then task.wait() end
+							if node:IsA("TextLabel") or node:IsA("TextButton") then
+								local t = norm(node.Text)
+								if t:find("come back", 1, true) and isShown(node) then
+									local h, m, sec = t:match("(%d+):(%d+):(%d+)")
+									if h then return tonumber(h) * 3600 + tonumber(m) * 60 + tonumber(sec) end
+									m, sec = t:match("(%d+):(%d+)")
+									if m then return tonumber(m) * 60 + tonumber(sec) end
+									local total, found = 0, false
+									for num, unit in t:gmatch("(%d+)%s*([hms])") do
+										found = true
+										total = total + tonumber(num) * (unit == "h" and 3600 or unit == "m" and 60 or 1)
+									end
+									return found and total or 1   -- text without a readable time: still a countdown, keep waiting
+								end
+							end
+						end
 					end
 				end
 				return nil
@@ -10073,6 +10285,29 @@ local function buildLogic()
 			end
 
 			-- ---- the loop
+			-- Auto Close Ui would shut the Pet Defense popup the moment it opens, so it is switched off while a start is running and switched
+			-- back on afterwards - but only if it was on before. What is SAVED for the toggle stays what you had.
+			local acHeld = false
+			local function autoCloseOff()
+				if acHeld or env.WORST_AUTOCLOSE_UI ~= true then return end
+				acHeld = true
+				local e = Config and Config.autoCloseEntry
+				if e and e._id then Config.override[e._id] = true end
+				if e and e._setUI then pcall(e._setUI, false) end
+				env.WORST_AUTOCLOSE_UI = false
+				tr("Auto Close Ui switched off for Pet Defense")
+			end
+			local function autoCloseBack()
+				if not acHeld then return end
+				acHeld = false
+				local e = Config and Config.autoCloseEntry
+				if e and e._id then Config.override[e._id] = nil end
+				if e and e._setUI then pcall(e._setUI, true) end
+				env.WORST_AUTOCLOSE_UI = true
+				tr("Auto Close Ui switched back on")
+			end
+			table.insert(cleanupHooks, autoCloseBack)
+
 			local function loop(id)
 				while active(id) do
 					do   -- still on cooldown: wait here (no trip held, no travelling) and show when it is available again
@@ -10094,6 +10329,7 @@ local function buildLogic()
 					say("Waiting for its turn (another feature is on a trip)...")
 					if not acquireTrip("PetDefense", function() return active(id) end, say) then tr("acquireTrip gave up (run no longer active)") return end
 					tr("trip acquired")
+					autoCloseOff()   -- the start begins now: Auto Close Ui must not shut the popup
 					local started = false
 					local ok, err
 					-- Two tries while still holding the trip: when the first start fails, Auto Hatch must NOT come back in between
@@ -10109,70 +10345,87 @@ local function buildLogic()
 							tr(string.format("attempt %d: hatch settled (F panel open=%s)", attempt, tostring(sessionPanelOpen())))
 							if not active(id) then return end
 						end
-						if attempt > 1 then   -- second try: let the game bring you to the island first (it also loads the area around the popup)
-							say("Second try - traveling to " .. ISLAND .. " first...")
+						-- ALWAYS let the game bring you to the island first (also on the first try). A straight teleport from another island made the
+						-- popup show up and Play get pressed, but no opponent ever spawned: the start only worked on the retry, which travels first
+						-- (the game's own Travel sets up the island for you and loads the area around the popup before the teleport).
+						do
+							say((attempt > 1 and "Second try - traveling to " or "Traveling to ") .. ISLAND .. " first...")
 							pcall(function() travelRemote:InvokeServer({ Source = "Menu", Island = ISLAND }) end)
 							sleep(id, 4)
 							if not active(id) then return end
 						end
-						-- first try: teleport straight to the Pet Defense spot (the loop below checks that we are really there and retries)
-						say("Teleporting to the Pet Defense spot...")
-						if not teleportTo(SPOT) then
-							say("Could not teleport (no character yet) - retrying")
-							return
-						end
-                        -- the popup search only starts once the character is really standing on the start spot
-                        do
-                            local a0, lastTp = os.clock(), 0
-                            while active(id) and not isNear(SPOT, 12) and os.clock() - a0 < 15 do
-                                if os.clock() - lastTp >= 1.5 then
-                                    lastTp = os.clock()
-                                    say("Moving to the Colosseum spot...")
-                                    teleportTo(SPOT)
-                                end
-                                task.wait(0.2)
-                            end
-                            if not active(id) then return end
-                            if not isNear(SPOT, 12) then
-                                say("Not at Colosseum CFrame - retrying")
-                                return
-                            end
-                        end
-						tr("arrived at the spot") say("Arrived - waiting 2 s for the Pet Defense popup to appear...")
-						sleep(id, 2)   -- 2 s after teleporting, before the popup search starts (the popup needs a moment to show)
-						if not active(id) then return end
+						-- The popup watcher is started BEFORE the teleport and keeps looking while the character travels and stands on the spot: the
+						-- popup appears after the teleport and Play is pressed the moment it shows (no fixed waits, no late first search).
 						pd.over, pd.claimed, pd.wave, pd.spawned, pd.logN = nil, false, 1, 0, 0
 						pd.waveStarted = false
 						pd.run = true
 						pd.fight = false   -- screen presses only start after Play was pressed (they would hit the popup otherwise)
-						say("Waiting for the Pet Defense popup...")
-						sleep(id, POPUP_DELAY)
-						-- on the spot: look for the Play button now, then re-check every POPUP_RECHECK seconds (until POPUP_WAIT is over)
-						local btn
-						local w0 = os.clock()
-						local checks = 0
-						while active(id) and not btn and os.clock() - w0 < POPUP_WAIT do
-							if not isNear(SPOT, 12) then
-								-- left the spot: go back and restart, the wait only counts while standing on the spot
-								say("Not on the Colosseum spot - going back...")
-								teleportTo(SPOT)
-								sleep(id, 1)
-								w0, checks = os.clock(), 0
-							else
-								checks = checks + 1
-								lastIntroScan = 0   -- force a fresh scan on every check
-								btn = findPlayButton()
-								if btn then break end
-								local nextAt = os.clock() + POPUP_RECHECK
-								while active(id) and os.clock() < nextAt and os.clock() - w0 < POPUP_WAIT and isNear(SPOT, 12) do
-									say(string.format("Play button not found (check %d) - checking again in %ds", checks, math.max(0, math.ceil(nextAt - os.clock()))))
-									task.wait(0.5)
+						local watch = { btn = nil, cd = nil, stop = false }
+						task.spawn(function()
+							local fullAt = 0
+							while active(id) and not watch.stop and not watch.btn do
+								-- the game's own dialog window is checked every tick (fast); every other ScreenGui once a second
+								local pgW = player:FindFirstChild("PlayerGui")
+								local tabsW = pgW and pgW:FindFirstChild("Tabs")
+								local msgW = tabsW and tabsW:FindFirstChild("Message")
+								local only = (msgW and msgW:IsA("ScreenGui") and msgW.Enabled) and msgW or nil
+								local full = false
+								if not only and os.clock() - fullAt >= 1 then full = true fullAt = os.clock() end
+								if only or full then
+									local okW = pcall(function()
+										watch.cd = comeBackLeft(only)   -- "Come back in ..." on the open popup = the reset is still missing
+										if not watch.cd then
+											lastIntroScan = 0
+											watch.btn = findPlayButton(true, only)
+										end
+									end)
+									if not okW then task.wait(0.5) end
 								end
+								task.wait(0.1)
 							end
+						end)
+						say("Teleporting to the Pet Defense spot (watching for the popup)...")
+						if not teleportTo(SPOT) then
+							watch.stop = true
+							say("Could not teleport (no character yet) - retrying")
+							return
 						end
+						-- on the spot the popup shows up by itself. Until the watcher has the Play button: keep standing on the spot (back to it when
+						-- pushed away), and while the popup still counts down ("Come back in ...") keep waiting for the reset - no give-up timer then.
+						local a0, w0, lastTp, lastMsg = os.clock(), nil, 0, nil
+						while active(id) and not watch.btn do
+							local msg
+							if not isNear(SPOT, 12) then
+								if w0 then w0 = nil a0 = os.clock() end   -- left the spot: the wait only counts while standing on it
+								if os.clock() - a0 >= 15 then
+									watch.stop = true
+									say("Not at Colosseum CFrame - retrying")
+									return
+								end
+								if os.clock() - lastTp >= 1.5 then
+									lastTp = os.clock()
+									teleportTo(SPOT)
+								end
+								msg = "Moving to the Colosseum spot (watching for the popup)..."
+							else
+								if not w0 then w0 = os.clock() tr("arrived at the spot") end
+								if watch.cd then
+									w0 = os.clock()   -- the popup HAS arrived, only the reset is missing: no timeout while it counts down
+									msg = string.format("Pet Defense popup is open | cooldown resets in %s - pressing Play right after", fmtT(watch.cd))
+								else
+									msg = string.format("On the spot - waiting for the Pet Defense popup (%ds)...", math.max(0, math.ceil(POPUP_WAIT - (os.clock() - w0))))
+								end
+								if os.clock() - w0 >= POPUP_WAIT then break end
+							end
+							if msg ~= lastMsg then lastMsg = msg say(msg) end
+							task.wait(0.1)
+						end
+						watch.stop = true
+						if not active(id) then return end
+						local btn = watch.btn
 						if not btn then
 							pd.run = false
-							if active(id) then say("Pet Defense popup did not appear (cooldown?) - retrying in " .. RETRY_WAIT .. " s") end
+							say("Pet Defense popup did not appear (cooldown?) - retrying in " .. RETRY_WAIT .. " s")
 							return
 						end
 						say('Pressing "Play"...')
@@ -10246,6 +10499,7 @@ local function buildLogic()
 					tr(string.format("releasing the trip | started=%s ok=%s stillActive=%s last status: %s", tostring(started), tostring(ok), tostring(active(id)), tostring(pd.lastSay)))
 					if started then HG.pdHoldUntil = 0 end   -- the run is over: let hatching and the other features come back right away
 					releaseTrip("PetDefense")
+					autoCloseBack()   -- defense over (or the start failed): Auto Close Ui is back to what it was
 					if not ok then warn("[PetDefense] error: " .. tostring(err)) end
 					if not started and active(id) then print("[PetDefense] could not start - last status: " .. tostring(pd.lastSay)) end
 					if active(id) then
@@ -10283,6 +10537,7 @@ local function buildLogic()
 					pd.run = false
 					HG.pdHoldUntil = 0
 					releaseTrip("PetDefense")
+					autoCloseBack()
 					restoreDof()
 					say(DESC)
 				end
@@ -17345,7 +17600,11 @@ local Miscellaneous = (function()
     -- =====================================================================================
     local shrine = { on = false, gen = 0, choice = "Luck", sent = 0 }
     local SHRINE_OPTIONS = { "Luck", "Golden", "AutoClicker" }
-    local SHRINE_EVERY = 10
+    local SHRINE_EVERY  = 99999999   -- seconds between two tries (every try is a trip there and back, so not too often)
+    local SHRINE_ISLAND = "Autumn"   -- island the shrine is on: the game's own Travel brings you there first, then the CFrame teleport
+    local SHRINE_TRAVEL = 1          -- seconds to let the island load after traveling, before the teleport to the shrine
+    local SHRINE_SETTLE = 1    -- seconds on the shrine spot before choosing (the area loads and the server sees you there)
+    local SHRINE_CF = CFrame.new(64.55879974365234, 906.5479736328125, -1834.6710205078125, 0.9761638641357422, 1.1356758733427341e-07, 0.21703483164310455, -9.793430422178062e-08, 1, -8.278696839170152e-08, -0.21703483164310455, 5.955849147198933e-08, 0.9761638641357422)
     shrine.pick = {
         type = "dropdown", name = "Shrine", icon = "⛩", width = 240,
         desc = "Which shrine blessing Auto Shrine chooses: Luck, Golden or AutoClicker.",
@@ -17363,27 +17622,65 @@ local Miscellaneous = (function()
     local function shrineRun(id)
         local function cur() return alive and shrine.on and shrine.gen == id end
         while cur() do
-            local okR, remote = pcall(function() return RSv.RemoteServices.ShrineService.RF.Choose end)
-            if not okR or not remote then
-                shrineSay("ShrineService.RF.Choose was not found (is the shrine island loaded?). Retrying...")
+            local choice = shrine.choice
+            local priority = Logic and Logic.priority
+            -- the teleport is a normal trip: Auto Hatch pauses and other trips wait while the shrine is visited
+            local held
+            if priority and priority.acquireTrip then
+                held = priority.acquireTrip("Shrine", cur, shrineSay)
             else
-                local choice = shrine.choice
-                local sent, res = pcall(function() return remote:InvokeServer(choice) end)
-                if sent and not (type(res) == "table" and res.Success == false) then
-                    shrine.sent = shrine.sent + 1
-                    shrineSay("Chose " .. choice .. " (" .. shrine.sent .. " accepted so far). Checking again in " .. SHRINE_EVERY .. "s.")
-                else
-                    local reason = sent and (type(res) == "table" and tostring(res.Reason or "refused") or tostring(res)) or tostring(res)
-                    shrineSay("Shrine " .. choice .. " not taken: " .. reason .. ". Retrying in " .. SHRINE_EVERY .. "s.")
-                end
+                held = cur()
             end
+            if not held then break end   -- switched off while waiting for its turn
+            local message
+            local okTrip, tripErr = pcall(function()
+                local character = player.Character
+                local root = character and character:FindFirstChild("HumanoidRootPart")
+                if not (cur() and root) then message = cur() and "No character yet - retrying..." or "Off." return end
+                local home = root.CFrame   -- where you are now: you are brought back here afterwards
+                -- first to the island (the game's own Travel), then to the exact shrine spot
+                shrineSay("Traveling to " .. SHRINE_ISLAND .. " first...")
+                pcall(function() RSv.RemoteServices.IslandService.RF.Travel:InvokeServer({ Source = "Menu", Island = SHRINE_ISLAND }) end)
+                local t0 = os.clock()
+                while cur() and os.clock() - t0 < SHRINE_TRAVEL do task.wait(0.1) end
+                shrineSay("Teleporting to the shrine...")
+                local cTrip = player.Character   -- the travel can give you a fresh character
+                if cur() and cTrip and cTrip.Parent then pcall(function() cTrip:PivotTo(SHRINE_CF) end) end
+                t0 = os.clock()
+                while cur() and os.clock() - t0 < SHRINE_SETTLE do task.wait(0.1) end
+                if cur() then
+                    local okR, remote = pcall(function() return RSv.RemoteServices.ShrineService.RF.Choose end)
+                    if not okR or not remote then
+                        message = "ShrineService.RF.Choose was not found. Retrying in " .. SHRINE_EVERY .. "s."
+                    else
+                        shrineSay("Choosing " .. choice .. "...")
+                        local sent, res = pcall(function() return remote:InvokeServer(choice) end)
+                        if sent and not (type(res) == "table" and res.Success == false) then
+                            shrine.sent = shrine.sent + 1
+                            message = "Chose " .. choice .. " (" .. shrine.sent .. " accepted so far). Back at your spot. Next try in " .. SHRINE_EVERY .. "s."
+                        else
+                            local reason = sent and (type(res) == "table" and tostring(res.Reason or "refused") or tostring(res)) or tostring(res)
+                            message = "Shrine " .. choice .. " not taken: " .. reason .. ". Back at your spot. Retrying in " .. SHRINE_EVERY .. "s."
+                        end
+                    end
+                end
+                task.wait(0.3)
+                local c2 = player.Character
+                if c2 and c2.Parent then pcall(function() c2:PivotTo(home) end) end   -- back to where you were
+            end)
+            if priority and priority.releaseTrip then priority.releaseTrip("Shrine") end
+            if not okTrip then
+                message = "Shrine trip error: " .. tostring(tripErr)
+                warn("[WORST Shrine] " .. tostring(tripErr))
+            end
+            if message then shrineSay(message) end
             local t0 = os.clock()
             while cur() and os.clock() - t0 < SHRINE_EVERY do task.wait(0.25) end
         end
     end
     shrine.toggle = {
         type = "toggle", name = "Auto Shrine", icon = "⛩", default = false,
-        desc = "Off. Chooses the blessing picked in the Shrine dropdown (ShrineService.RF.Choose).",
+        desc = "Off. Travels to Autumn, teleports to the shrine, chooses the blessing picked in the Shrine dropdown (ShrineService.RF.Choose) and teleports you back to where you were.",
         callback = function(on)
             shrine.on = on == true
             shrine.gen = shrine.gen + 1
@@ -17398,7 +17695,9 @@ local Miscellaneous = (function()
     }
     table.insert(cleanupHooks, function() shrine.on = false; shrine.gen = shrine.gen + 1 end)
 
-    return { hop, rejoin, jobId, low, speed, jump, potions[1].entry, potions[2].entry, potions[3].entry, quest.entry, shrine.pick, shrine.toggle }
+    local list = { hop, rejoin, jobId, low, speed, jump, potions[1].entry, potions[2].entry, potions[3].entry, quest.entry, shrine.pick, shrine.toggle }
+    if Logic and Logic.priority and Logic.priority.duck then list[#list + 1] = Logic.priority.duck end   -- Auto Claim Lucky Ducky (on by default)
+    return list
 end)()
 
 
@@ -17496,7 +17795,7 @@ local TAB_SCRIPTS = {
 	-- All event controls live together on General (the Halloween page is closed).
 	Events = Logic and { pages = {
 		{ name = "General", entries = (function()
-			local entries = { Logic.priority.duck, SkillPoints[1], DoubleJump, DesertChest }
+			local entries = { SkillPoints[1], DoubleJump, DesertChest }
 			if Logic.balloon then entries[#entries + 1] = Logic.balloon.toggle end
 			if Logic.dig then entries[#entries + 1] = Logic.dig.toggle end
 			return entries
@@ -17584,12 +17883,16 @@ local TAB_SCRIPTS = {
 			desc = "DO NOT ENABLE!!",
 			callback = function(on) record.debugMode = on == true end,
 		},
-		{
+		(function()
+		local acEntry = {
 			-- TOGGLE "Auto Close Ui": closes every game window that pops up (machines, Balloon Luck, shops...) so it can't block auto hatch.
 			type = "toggle", name = "Auto Close Ui", icon = "✖", default = true,
 			desc = "Closes every game window that pops up (machines, Balloon Luck, shops...) the moment it opens, so it can't block auto hatch. Never touches the Inventory, trades or the HUD. Turn it off if you want to use the game's windows yourself.",
 			callback = function(on) env.WORST_AUTOCLOSE_UI = on == true end,
-		},
+		}
+		Config.autoCloseEntry = acEntry   -- Auto Pet Defense switches this off while it starts (the popup would be closed) and gives it back after
+		return acEntry
+		end)(),
 		(function()
 			-- SLIDER "FPS": sets the game's FPS cap (needs an executor with setfpscap). Only applied once you move the slider.
 			local DEF_FPS, touched = 60, false
