@@ -1830,10 +1830,44 @@ TAB_SCRIPTS.Farming = (function()
 	local liftToggle
 	local curLiftChoice   -- the lift speed that is running right now
 
+	-- Real lift rate: every lift that is actually sent is time-stamped, and the rate is the number of lifts in the last 60 s
+	-- divided by the time covered (so lag, a slow executor and the short pauses are all counted, nothing is hard coded).
+	local LIFT_WINDOW, LIFT_MIN_SPAN = 180, 5   -- 3 minutes of lifts: FPS / ping wobble averages out
+	local LIFT_HOLD, LIFT_HOLD_AFTER = 0.02, 30  -- after 30 s of data the shown rate only changes when the measurement moves more than 2%
+	local liftShown = nil
+	local liftStamps, liftHead, liftN, liftStarted = {}, 1, 0, nil   -- liftN = last used index (explicit, no # on a table with holes)
+	local function noteLift()
+		local now = os.clock()
+		liftN = liftN + 1
+		liftStamps[liftN] = now
+		while liftHead <= liftN and liftStamps[liftHead] < now - LIFT_WINDOW do liftHead = liftHead + 1 end
+		if liftHead > 512 then   -- compact now and then so the table doesn't grow forever at max speed
+			local t, k = {}, 0
+			for i = liftHead, liftN do k = k + 1 t[k] = liftStamps[i] end
+			liftStamps, liftHead, liftN = t, 1, k
+		end
+	end
+	-- measured lifts per second, or nil while there isn't enough data yet (the first few seconds after Auto Lift starts)
+	local function measuredLiftRate()
+		if not liftStarted then return nil end
+		local now = os.clock()
+		local from = math.max(liftStarted, now - LIFT_WINDOW)
+		local span = now - from
+		if span < LIFT_MIN_SPAN then return nil end
+		local n = 0
+		for i = liftHead, liftN do if liftStamps[i] >= from then n = n + 1 end end
+		if n < 2 then return nil end
+		local raw = n / span
+		-- hold the number steady: per minute / hour / day must not flutter with every FPS or ping wobble
+		if not liftShown or span < LIFT_HOLD_AFTER or math.abs(raw - liftShown) > liftShown * LIFT_HOLD then liftShown = raw end
+		return liftShown
+	end
+
 	local function stopLift()
 		env.gain = false
 		newGen("gain")
 		Status.set("lift", nil)
+		liftStarted = nil
 	end
 	local function startLift(choice)   -- choice = a LIFT_* speed, or nothing = whatever the Lifting page dropdown says
 		stopLift()
@@ -1843,9 +1877,10 @@ TAB_SCRIPTS.Farming = (function()
 		curLiftChoice = c
 		local delay = LIFT_DELAY[c]
 		Status.set("lift", "Lifting - " .. (LIFT_SHORT[c] or tostring(c)))
+		liftStamps, liftHead, liftN, liftStarted, liftShown = {}, 1, 0, os.clock(), nil
 		task.spawn(function()
 			while env.gain and gens.gain == my do
-				if not env.WORSTLiftPause then fire("GainMuscle") end   -- paused for a moment while the Home page measures one single lift
+				if not env.WORSTLiftPause then fire("GainMuscle") noteLift() end   -- paused for a moment while the Home page measures one single lift
 				if delay then task.wait(delay) else task.wait() end
 			end
 		end)
@@ -2116,7 +2151,9 @@ TAB_SCRIPTS.Farming = (function()
 			local running = env.gain == true
 			local c = (running and curLiftChoice) or LIFT_FAST_SAFE
 			local d = LIFT_DELAY[c]
-			return d and (1 / d) or 60, LIFT_SHORT[c] or "", running
+			-- measured rate (real lifts in the last 60 s) while Auto Lift runs; nominal 1/delay only until enough data exists
+			local rate = running and measuredLiftRate() or nil
+			return rate or (d and (1 / d) or 60), LIFT_SHORT[c] or "", running
 		end,
 	}
 	-- backup check: the in-game Shop card "X2 Coins" shows "Owned" when you have it (works even if the API call fails in your executor)
@@ -2617,6 +2654,21 @@ TAB_SCRIPTS.Farming = (function()
 		},
 	}
 
+	-- Smart Weight, Auto Body Alter and Smart DNA (only present without the Infinite Size gamepass) live on the Reborn Macro page,
+	-- right after Auto Sell and before Auto Reborn. They are moved, not copied, so there is only one switch for each.
+	do
+		local at = 3
+		for _, nm in ipairs({ "Smart Weight", "Auto Body Alter", "Smart DNA" }) do
+			for k = #rest, 1, -1 do
+				if rest[k].name == nm then
+					table.insert(macro, at, table.remove(rest, k))
+					at = at + 1
+					break
+				end
+			end
+		end
+	end
+
 	-- ---------------------------------------------------------------- WORST TOGGLE: the whole macro in one switch
 	do
 		local function findEntry(list, name)
@@ -2627,15 +2679,16 @@ TAB_SCRIPTS.Farming = (function()
 		end
 		table.insert(macro, 1, {
 			type = "toggle", name = "WORST TOGGLE", icon = "👑", default = false,
-			desc = "One switch for the whole macro: Auto Enable Sell, Sell If Enough, Gain Muscle (fast, no rollback), Smart Weight, Auto Body Alter, Auto Reborn. Also switches Anti AFK and Auto Rejoin on if they are off. Turning it off stops the macro features (Anti AFK / Auto Rejoin stay on).",
+			desc = "One switch for the whole macro: Auto Enable Sell, Sell If Enough, Gain Muscle (fast, no rollback), Smart Weight, Auto Body Alter, Smart DNA (only without the Infinite Size gamepass), Auto Reborn. Also switches Anti AFK and Auto Rejoin on if they are off. Turning it off stops the macro features (Anti AFK / Auto Rejoin stay on).",
 			callback = function(on)
 				local list = {
 					findEntry(macro, "Auto Enable Sell"),
 					findEntry(macro, "Auto Sell Muscle (Sell If Enough)"),
 					findEntry(macro, "Auto Gain Muscle (Fast, No Rollback)"),
-					findEntry(rest, "Smart Weight"),
-					findEntry(rest, "Auto Body Alter"),
+					findEntry(macro, "Smart Weight"),
+					findEntry(macro, "Auto Body Alter"),
 					findEntry(macro, "Auto Reborn"),
+					findEntry(macro, "Smart DNA"),   -- keep LAST: it is nil with the Infinite Size gamepass (no entry), and ipairs stops at a nil
 				}
 				if on then
 					for _, en in ipairs(list) do setTo(en, true) end
