@@ -344,7 +344,7 @@ new("UIGradient", {
 icon(window, "logo", "", 56, 52, 60) -- only shows if an image id is set
 
 label(window, 'WORST •<font color="rgb(170,170,170)">No Limit Lifting Simulator</font>', 108, 39, 33, C.text, Enum.Font.GothamBold)
-label(window, "Free Version", 108, 72, 19, C.sub, Enum.Font.Gotham)
+label(window, "Ultimate", 108, 72, 19, C.sub, Enum.Font.Gotham)
 
 local minLabel = label(window, "—", 1347, 37, 20, C.text, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
 minLabel.Size = UDim2.fromOffset(40, 30)
