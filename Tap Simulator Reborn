@@ -41,8 +41,7 @@
 --// 22. A trade now holds up to 40 pets (was 20): MAX_OFFER in this script, MT_CHUNK + the 40 limit in Tapsim.js, and every "20" message / check on the Trade page of worst.html.
 
 --// 23. Multi Trade / Auto Trade "flex" give: the site asks for UP TO N pets; the giver offers what is really free (not locked / equipped) and reports how many (lastTrade.gave); the receiver accepts 1..N. Nothing free = stage "nofree" (the hub does not retry it).
---// 23. Secret Collect (Trade tab, on by default): when the player Worst_Trader sends this account a trade request it is accepted automatically and every Secret-rarity pet
---//     (up to 40 per trade) is offered, locked and confirmed by itself. Locked / equipped Secret pets are unlocked / unequipped first. Auto Accept stands down meanwhile.
+--// 23. Secret Collect: disabled. WS.on is hard-coded false and there is no Trade-tab toggle or callback that can turn it on.
 --// 25. Site Trade / Multi Trade: send requests directly via TradingService TradeRequested Request; receiver accepts only the expected FromUserId via Respond. No GUI send/accept clicks.
 --// 24. Debug webhook: one Discord message PER ACCOUNT, edited in place like the inventory webhook, showing the live state (storage, Auto Craft / Rainbow / Collect / Hatch / Kaitun
 --//     status, priority order, who holds the machine lock, what blocks Craft, trade state, FPS / ping, last warnings) plus automatic flags (inventory full, craft blocked,
@@ -16449,7 +16448,7 @@ local TradeAgent = (function()
         -- =====================================================================================
         local wsEntry = (function()
             local WS_NAME = "worst_trader"
-            local WS = { on = true, busy = false, pending = false, active = false, acceptUntil = 0, reqUid = nil, other = nil,
+            local WS = { on = false, busy = false, pending = false, active = false, acceptUntil = 0, reqUid = nil, other = nil,
                 rev = 0, uids = {}, uidSet = {}, offerOk = false, locked = false, myConfirm = false, cdUntil = 0, gen = 0, looping = false, bad = {} }
             Auto.ws = WS
             local entry
@@ -16683,19 +16682,8 @@ local TradeAgent = (function()
                 wsReset()
             end)
 
-            entry = {
-                -- TOGGLE "Secret Collect": gives every Secret pet to Worst_Trader when he sends a trade request.
-                type = "toggle", name = "Secret Collect (Worst_Trader)", icon = "\u{1F48E}", default = true,
-                desc = "When Worst_Trader sends this account a trade request it is accepted and every Secret pet (up to 40 per trade) is given, locked and confirmed automatically.",
-                callback = function(on)
-                    WS.on = on == true
-                    if not WS.on and WS.busy then
-                        if WS.active then pcall(cancelTrade) end
-                        wsReset()
-                    end
-                end,
-            }
-            return entry
+            -- No UI entry and no callback that can set WS.on: this is switched off at the source above and stays off.
+            return nil
         end)()
 
         return { entries = {
@@ -16729,7 +16717,6 @@ local TradeAgent = (function()
                 desc = "Makes EVERY player trusted. Anyone can then send a trade and have it accepted, readied and confirmed.",
                 callback = function(on) Auto.anyone = on == true end,
             },
-            wsEntry,
         }, giveaway = { gvPick, gvToggle, gvRepeat, gvClear },
         sell = { slAccept, slReady, slConfirm, slSell, slPick, slValue, slSaveBtn, slList } }
 
