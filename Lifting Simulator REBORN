@@ -666,9 +666,10 @@ local navItems = {
 	{ "Farming",    "farming",    "⚡", 199 },
 	{ "Bloodline & Islands", "bloodline", "⚔", 262 },
 	{ "Players",    "players",    "👥", 325 },
-	{ "Webhook",    "webhook",    "✉", 388 },
-	{ "Miscellaneous", "misc",    "ℹ", 451 },
-	{ "Settings",   "settings",   "⚙", 514 },   -- next tab = previous y + 63
+	{ "Events",     "events",     "★", 388 },
+	{ "Webhook",    "webhook",    "✉", 451 },
+	{ "Miscellaneous", "misc",    "ℹ", 514 },
+	{ "Settings",   "settings",   "⚙", 577 },   -- next tab = previous y + 63
 }
 
 local content = new("Frame", {
@@ -807,6 +808,10 @@ for _, item in ipairs(navItems) do
 	}, NAV.scroll)
 	btn.MouseButton1Click:Connect(function() flame(sel, 0.7); setTab(name) end)
 end
+
+-- Start on the default tab: the highlight (sel) is drawn at the second tab's spot by default, so without this the sidebar
+-- showed "Farming" selected while the Home page was on screen.
+setTab(DEFAULT_TAB, true)
 
 -- footer: Roblox avatar + username + how long the script has been running
 local foot = frame(window, 18, 764, 258, 84, Color3.fromRGB(8, 8, 8), 0.3)
@@ -1935,7 +1940,9 @@ FX.ShopBuy = (function()
 	end
 	local function ensureOpen()
 		if uiState("weight") ~= "closed" then
-			if weOpened and HIDDEN then applyHide(true) end
+			-- the shop is already open: left over from the previous run (re-execute) or opened by hand. Take it over so it gets hidden
+			-- and put away like our own, instead of staying on screen forever (weOpened was false, so it was never hidden).
+			if HIDDEN then weOpened = true applyHide(true) end
 			return true
 		end
 		if forceOpen() then weOpened = true return true end
@@ -2114,6 +2121,8 @@ FX.ShopBuy = (function()
 				busy = true
 				pcall(closeShop)
 				busy = false
+			elseif weOpened and HIDDEN then
+				pcall(applyHide, true)   -- keep it hidden: the game (or the previous run's cleanup) may have moved it back on screen
 			end
 		end
 	end)
@@ -2131,6 +2140,170 @@ end)()
 -- NOTE: weights / DNA / stages are now bought by clicking the shop UI (FX.ShopBuy, hidden off-screen), not with these remotes.
 -- Prices, names and counts come from the game's own config modules (ReplicatedStorage.Configs), state from ReplicatedStorage.Data (HUD / leaderstats as fallback).
 -- Set DEBUG = false to silence the [WORST Hub] lines in the console.
+------------------------------------------------------------------ EVENTS (multipliers: x20 muscle, x10 coins ...)
+-- FX.Events.muscle / FX.Events.coins are the multipliers the estimates use. They come from the game's "Game Event" window
+-- (Auto Detect Events) or from the boxes on the Events tab. Everything that depends on them reads FX.Events live.
+FX.Events = { muscle = 1, coins = 1, auto = true, found = false }
+TAB_SCRIPTS.Events = (function()
+	local Ev = FX.Events
+	local muscleBox, coinsBox, infoRow
+	local lastScan = "not scanned yet"
+
+	local function clean(t) return (tostring(t or ""):gsub("<[^>]->", ""):gsub("\195\151", "x"):gsub("^%s+", ""):gsub("%s+$", "")) end
+	local function titleKind(low)
+		if low:find("muscle%s*multiplier") then return "muscle" end
+		if low:find("coins?%s*multiplier") then return "coins" end
+	end
+	-- looks inside one container for the "xNN" value (and an active / inactive note) that belongs to ONE multiplier
+	-- returns value, status ("on" / "off" / nil), or nil, "mixed" when the container also holds the other multiplier's title
+	local function readIn(container, kind, own)
+		local val, status
+		for _, d in ipairs(container:GetDescendants()) do
+			if d:IsA("TextLabel") or d:IsA("TextButton") then
+				local low = clean(d.Text):lower()
+				local k = titleKind(low)
+				if k and k ~= kind then return nil, "mixed" end
+				if d ~= own then
+					local n = low:match("^x%s*(%d+%.?%d*)$")
+					if n and not val then val = tonumber(n) end
+					if low:find("in%-?active") or low:find("not%s+active") or low:find("expired") or low:find("ended") or low:find("off") and #low < 12 then status = "off"
+					elseif low:find("active") then status = status or "on" end
+				end
+			end
+		end
+		return val, status
+	end
+
+	-- scans PlayerGui for the Game Event window. returns { muscle = {value, status}, coins = {...} }
+	local function scan()
+		local found = {}
+		local pg = player:FindFirstChild("PlayerGui")
+		if not pg then return found end
+		local n = 0
+		for _, d in ipairs(pg:GetDescendants()) do
+			n = n + 1
+			if n % 800 == 0 then task.wait() end
+			if (d:IsA("TextLabel") or d:IsA("TextButton")) and not found[1] then
+				local low = clean(d.Text):lower()
+				local kind = titleKind(low)
+				if kind and not found[kind] then
+					-- "Muscle Multiplier x20" in one label?
+					local inline = low:match("multiplier%s*x%s*(%d+%.?%d*)")
+					local val, status = inline and tonumber(inline), nil
+					if not val then
+						local node = d.Parent
+						for _ = 1, 3 do
+							if not node or node == pg then break end
+							local v, st = readIn(node, kind, d)
+							if st == "mixed" then break end
+							if v then val, status = v, st break end
+							node = node.Parent
+						end
+					end
+					if not val then   -- flat window (all labels side by side): take the closest "xNN" label under this title
+						local gui = d:FindFirstAncestorOfClass("ScreenGui")
+						if gui then
+							local tc = d.AbsolutePosition + d.AbsoluteSize / 2
+							local bestV, bestD
+							for _, e in ipairs(gui:GetDescendants()) do
+								if e:IsA("TextLabel") then
+									local nn = clean(e.Text):lower():match("^x%s*(%d+%.?%d*)$")
+									if nn then
+										local ec = e.AbsolutePosition + e.AbsoluteSize / 2
+										if ec.Y >= tc.Y - 2 then
+											local dist = math.abs(ec.X - tc.X) * 2 + (ec.Y - tc.Y)
+											if not bestD or dist < bestD then bestV, bestD = tonumber(nn), dist end
+										end
+									end
+								end
+							end
+							val = bestV
+						end
+					end
+					if val then found[kind] = { val, status } end
+				end
+			end
+		end
+		return found
+	end
+
+	local function show(m, c)
+		if muscleBox and muscleBox._setText then muscleBox._setText(m) end
+		if coinsBox and coinsBox._setText then coinsBox._setText(c) end
+	end
+	local function refreshInfo()
+		if infoRow and infoRow._desc then
+			infoRow._desc.Text = ("Using: Muscle x%s, Coins x%s.  %s"):format(tostring(Ev.muscle), tostring(Ev.coins), lastScan)
+		end
+	end
+
+	-- one detection round; true when at least one multiplier was found
+	local function detect()
+		local ok, res = pcall(scan)
+		if not ok then lastScan = "Detection failed: " .. tostring(res) refreshInfo() return false end
+		local m, c = res.muscle, res.coins
+		if not m and not c then
+			Ev.found = false
+			lastScan = "Game Event window not found - using your numbers."
+			refreshInfo()
+			return false
+		end
+		Ev.found = true
+		if m then Ev.muscle = (m[2] == "off") and 1 or m[1] end
+		if c then Ev.coins = (c[2] == "off") and 1 or c[1] end
+		show(Ev.muscle, Ev.coins)
+		lastScan = "Detected from the game's Game Event window."
+		refreshInfo()
+		return true
+	end
+
+	task.spawn(function()
+		task.wait(3)
+		while alive do
+			if Ev.auto then pcall(detect) end
+			for _ = 1, 10 do if not alive then return end task.wait(1) end
+		end
+	end)
+
+	local function numberCallback(key)
+		return function(v)
+			v = tonumber(v)
+			if v and v > 0 then Ev[key] = v refreshInfo() end
+		end
+	end
+
+	muscleBox = {
+		type = "input", name = "Muscle Multiplier", icon = "💪", numeric = true, default = "1", placeholder = "1 = no event",
+		desc = "The muscle multiplier of the running event (x20 = type 20). Auto Detect overwrites it; turn that off to keep your own number.",
+		callback = numberCallback("muscle"),
+	}
+	coinsBox = {
+		type = "input", name = "Coins Multiplier", icon = "🪙", numeric = true, default = "1", placeholder = "1 = no event",
+		desc = "The coins multiplier of the running event (x10 = type 10). Used for the coins per muscle and every time estimate.",
+		callback = numberCallback("coins"),
+	}
+	infoRow = { type = "info", name = "Event Status", icon = "ℹ", desc = "Waiting for the first detection..." }
+
+	return {
+		{
+			type = "toggle", name = "Auto Detect Events", icon = "📡", default = true,
+			desc = "Reads the game's Game Event window every 10 seconds and fills the two boxes below by itself.",
+			callback = function(on)
+				Ev.auto = on == true
+				if Ev.auto then task.spawn(function() pcall(detect) end) else lastScan = "Auto detect is off - using your numbers." refreshInfo() end
+			end,
+		},
+		muscleBox,
+		coinsBox,
+		{
+			type = "button", name = "Detect Now", icon = "🔍", btnText = "Detect",
+			desc = "Reads the Game Event window right now.",
+			run = function() return detect() end,
+		},
+		infoRow,
+	}
+end)()
+
 TAB_SCRIPTS.Farming = (function()
 	local RS = game:GetService("ReplicatedStorage")
 	local Events = RS:WaitForChild("Events", 10)
@@ -2302,6 +2475,7 @@ TAB_SCRIPTS.Farming = (function()
 	------------------------------------------------------------ sell (shared by every sell mode)
 	local selling = false
 	local measuredRate   -- coins per muscle, measured from real sales (includes the x10 event, the 2x pass, ...)
+	local measuredMult   -- the Events tab coins multiplier at the time of that measurement
 	local function doSell(reason)
 		if selling then return false end
 		selling = true
@@ -2312,8 +2486,17 @@ TAB_SCRIPTS.Farming = (function()
 		task.wait(0.3)
 		fire("quitSafeZone")   -- back out, so lifting works again
 		local m1, c1 = readMuscle(), readCash()
-		if m0 and m1 and c0 and c1 and m0 - m1 >= 1 and c1 > c0 then
-			measuredRate = (c1 - c0) / (m0 - m1)
+		if m0 and m1 and m0 - m1 >= 1 then
+			-- SellMuscle returns the coins the sale really paid. Use that first: the cash difference is wrong when a buy loop
+			-- (Smart Weight / Smart DNA) spends coins during the 0.5 s wait above, which made the rate read ~0.5 instead of 10.
+			local gained = tonumber(r)
+			if gained and gained > 0 then
+				measuredRate = gained / (m0 - m1)
+				measuredMult = FX.Events.coins or 1
+			elseif c0 and c1 and c1 > c0 then
+				measuredRate = (c1 - c0) / (m0 - m1)
+				measuredMult = FX.Events.coins or 1
+			end
 		end
 		dbg(("SellMuscle (%s) -> %s | muscle %s -> %s | cash %s -> %s"):format(tostring(reason), tostring(r), tostring(m0), tostring(m1), tostring(c0), tostring(c1)))
 		selling = false
@@ -2327,20 +2510,56 @@ TAB_SCRIPTS.Farming = (function()
 	local LIFT_DELAY = { [LIFT_FAST] = 0.43, [LIFT_NORMAL] = 0.7, [LIFT_MAX] = false }   -- false = no delay at all. Not tuned for this game yet.
 	local LIFT_SHORT = { [LIFT_FAST] = "fast", [LIFT_NORMAL] = "normal speed", [LIFT_MAX] = "no delay (unsafe)" }
 	local liftChoice = LIFT_NORMAL
+	local curLiftChoice   -- the speed that is really running (the Macro page can start Fast while the dropdown says Normal)
 	local liftToggle
+
+	-- Real lift rate: every lift that is actually sent is time-stamped; the rate is the lifts of the last 3 minutes divided by the time
+	-- they covered (selling pauses, lag and FPS / ping wobble are all counted, nothing is hard coded).
+	local LIFT_WINDOW, LIFT_MIN_SPAN = 180, 5
+	local LIFT_HOLD, LIFT_HOLD_AFTER = 0.02, 30   -- after 30 s of data the shown rate only changes when the measurement moves more than 2%
+	local liftStamps, liftHead, liftN, liftStarted, liftShown = {}, 1, 0, nil, nil   -- liftN = last used index (no # on a table with holes)
+	local function noteLift()
+		local now = os.clock()
+		liftN = liftN + 1
+		liftStamps[liftN] = now
+		while liftHead <= liftN and liftStamps[liftHead] < now - LIFT_WINDOW do liftHead = liftHead + 1 end
+		if liftHead > 512 then   -- compact now and then so the table doesn't grow forever at max speed
+			local t, k = {}, 0
+			for i = liftHead, liftN do k = k + 1 t[k] = liftStamps[i] end
+			liftStamps, liftHead, liftN = t, 1, k
+		end
+	end
+	-- measured lifts per second, or nil while there isn't enough data yet (the first seconds after Auto Lift starts)
+	local function measuredLiftRate()
+		if not liftStarted then return nil end
+		local now = os.clock()
+		local from = math.max(liftStarted, now - LIFT_WINDOW)
+		local span = now - from
+		if span < LIFT_MIN_SPAN then return nil end
+		local n = 0
+		for i = liftHead, liftN do if liftStamps[i] >= from then n = n + 1 end end
+		if n < 2 then return nil end
+		local raw = n / span
+		-- hold the number steady: per minute / hour / day must not flutter with every FPS or ping wobble
+		if not liftShown or span < LIFT_HOLD_AFTER or math.abs(raw - liftShown) > liftShown * LIFT_HOLD then liftShown = raw end
+		return liftShown
+	end
 
 	local function stopLift()
 		env.gain = false
 		newGen("gain")
 		Status.set("lift", nil)
+		liftStarted = nil
 	end
 	local function startLift(choice)   -- choice = a LIFT_* speed, or nothing = whatever the Lifting page dropdown says
 		stopLift()
 		env.gain = true
 		local my = newGen("gain")
 		local c = choice or liftChoice
+		curLiftChoice = c
 		local delay = LIFT_DELAY[c]
 		Status.set("lift", "Lifting - " .. (LIFT_SHORT[c] or tostring(c)))
+		liftStamps, liftHead, liftN, liftStarted, liftShown = {}, 1, 0, os.clock(), nil
 		task.spawn(function()
 			fire("quitSafeZone")   -- the server only counts lifts outside the safe zone
 			while env.gain and gens.gain == my do
@@ -2348,6 +2567,7 @@ TAB_SCRIPTS.Farming = (function()
 					task.wait(0.05)
 				else
 					fire("l")
+					noteLift()
 					if delay then task.wait(delay) else task.wait() end
 				end
 			end
@@ -2365,27 +2585,31 @@ TAB_SCRIPTS.Farming = (function()
 	local sellToggle
 	local SELL_RATE = 1.0           -- cash per muscle sold (2x with the DoubleCoin pass). Not measured in this game yet: the console line after every sale shows the real value.
 	local function sellRate()   -- coins per muscle, and true when it was measured from a real sale
-		if measuredRate then return measuredRate, true end
-		return SELL_RATE * (owns("DoubleCoin") and 2 or 1), false
+		-- the event multiplier is part of every measured sale: if it changes afterwards (event over, number typed), the rate follows
+		if measuredRate then return measuredRate * ((FX.Events.coins or 1) / (measuredMult or 1)), true end
+		return SELL_RATE * (owns("DoubleCoin") and 2 or 1) * (FX.Events.coins or 1), false
 	end
 	local ENOUGH_MARGIN = 1.02      -- needs 2% more than the price, so a small error in the estimate doesn't waste a sale
 	local FULL_AT = 0.98            -- storage this full = sell anyway, so lifting is never wasted
 
 	-- the next things the buy loops want: { name, price }. Only the buy toggles that are ON count (all of them when none is on).
+	local SmartWants = {}   -- filled in by the Smart Weight / Smart DNA section below: would that loop really buy this one?
 	local function targets()
 		local list = {}
-		local anyOn = env.BuyWeight or env.BuyDnk or env.BuyStage
-		local function add(on, kind, cfg, nextId, label)
-			if anyOn and not on then return end
+		local anyOn = env.BuyWeight or env.BuyDnk or env.BuyStage or env.SmartWeight or env.SmartDNA
+		local function add(on, kind, cfg, nextId, label, smartOn, smartKey)
+			if anyOn and not (on or smartOn) then return end
 			local i = Shop.info(kind)
 			if i and i.done then return end
 			local r = (i and i.row) or rowOf(cfg, nextId)   -- the shop's own "next for sale" when it has been read
 			if r and (r.donate or skipRow(r)) then r = nil end
+			-- Smart Weight / Smart DNA only buy what their own rules allow: never sell for something they would refuse to buy
+			if r and not on and smartOn and SmartWants[smartKey] and not SmartWants[smartKey](i and i.id or nextId, r) then r = nil end
 			local p = r and tonumber(r.Price)
 			if p then list[#list + 1] = { name = label .. " " .. tostring(r.Name or nextId), price = p } end
 		end
-		add(env.BuyWeight, "weight", WEIGHTS, bestWeight() + 1, "weight")
-		if not FX.infiniteSize then add(env.BuyDnk, "dna", DNKS, bestDnk() + 1, "DNA") end
+		add(env.BuyWeight, "weight", WEIGHTS, bestWeight() + 1, "weight", env.SmartWeight, "weight")
+		if not FX.infiniteSize then add(env.BuyDnk, "dna", DNKS, bestDnk() + 1, "DNA", env.SmartDNA, "dna") end
 		add(env.BuyStage, "alter", STAGES, (stageValue() or 0) + 1, "stage")
 		return list
 	end
@@ -2397,6 +2621,7 @@ TAB_SCRIPTS.Farming = (function()
 		task.spawn(function()
 			local lastSale = 0
 			local lastMeasure = -math.huge
+			local lastWhy
 			while env.Sell and gens.sell == my do
 				local muscle, cash, cap = readMuscle(), readCash(), readCapacity()
 				if not muscle then
@@ -2417,14 +2642,22 @@ TAB_SCRIPTS.Farming = (function()
 					end
 					-- the coins-per-muscle rate is unknown until one real sale (events / passes can make it 20x the base value). Judging by the
 					-- guessed rate makes "Enough" think it can never afford anything and never sell, so sell once to measure it.
-					if mode == SELL_ENOUGH and not reason and not measured and muscle > 0 and os.clock() - lastMeasure > 30 then
+					if mode == SELL_ENOUGH and not reason and not measured and not FX.Events.found and muscle > 0 and os.clock() - lastMeasure > 30 then   -- not needed when the event window was read: the rate is already known
 						lastMeasure = os.clock()
 						reason = "measuring the coin rate"
+					end
+					if not reason and os.clock() - (lastWhy or -1e9) > 10 then   -- every 10 s: why it is NOT selling (console)
+						lastWhy = os.clock()
+						dbg("Sell waiting |", first and (first.name .. " costs " .. fmtNum(first.price)) or "no target", "| cash", fmtNum(cash or 0),
+							"| muscle", fmtNum(muscle), "| coins/muscle", string.format("%.3f", rate), measured and "(measured)" or "(estimated)",
+							"| event coins x" .. tostring(FX.Events.coins), "found:", tostring(FX.Events.found),
+							"| storage", cap and (fmtNum(muscle) .. "/" .. fmtNum(cap)) or "?")
 					end
 					if reason then
 						Status.set("sell", "Selling (" .. reason .. ")")
 					elseif mode == SELL_ENOUGH and first and cash then
-						Status.set("sell", ("%s costs %s - cash %s + muscle %s"):format(first.name, fmtNum(first.price), fmtNum(cash), fmtNum(muscle * rate)))
+						Status.set("sell", ("%s costs %s - cash %s + muscle %s%s"):format(first.name, fmtNum(first.price), fmtNum(cash), fmtNum(muscle * rate),
+							(FX.Events.coins or 1) ~= 1 and (" (x%s coins event)"):format(tostring(FX.Events.coins)) or ""))
 					elseif cap then
 						Status.set("sell", ("Waiting - storage %s / %s"):format(fmtNum(muscle), fmtNum(cap)))
 					else
@@ -2696,6 +2929,138 @@ TAB_SCRIPTS.Farming = (function()
 
 	local function resetSkip() wFails, wBroken, dFails, dBroken = 0, false, 0, false end
 
+	-- the same rules smartWeight() / smartDnk() use, so "Sell If Enough" only sells for what they will really buy
+	SmartWants.weight = function(id, r)
+		local stage = stageValue()
+		local srow = stage and rowOf(STAGES, stage + 1)
+		local sprice = srow and tonumber(srow.Price)
+		local limit = sprice and sprice * (SMART_LIMITS[smartLimit] or 0.25) or math.huge
+		return (tonumber(r.Price) or math.huge) <= limit
+	end
+	SmartWants.dna = function(id, r)
+		local stage = stageValue()
+		local srow = stage and rowOf(STAGES, stage + 1)
+		local sprice = srow and tonumber(srow.Price)
+		if not sprice then return false end   -- no stage left: Smart DNA has nothing to aim for
+		local rate = sellRate()
+		local needStorage = sprice * DNA_MARGIN / math.max(rate, 1e-9)
+		local targetId, lastNormal
+		for i = 1, countOf(DNKS) do
+			local d = rowOf(DNKS, i)
+			if d and not d.donate and not skipRow(d) then
+				lastNormal = i
+				if not targetId and (tonumber(d.Capacity) or 0) >= needStorage then targetId = i end
+			end
+		end
+		targetId = targetId or lastNormal
+		return targetId ~= nil and id <= targetId
+	end
+
+	------------------------------------------------------------ helpers the Home page "Player Status" card uses
+	-- Everything is read from the same configs / data the buy loops use, so the card never opens the shop itself.
+	local function weightRowSkipped(id)
+		local r = rowOf(WEIGHTS, id)
+		return (not r) or (r.donate and true or false) or skipRow(r)
+	end
+	local function maxStageNum() return STAGES and countOf(STAGES) or 0 end
+	local GAIN_KEYS_PRINTED = false
+	local function weightGain(id)   -- base muscle gain of a weight, from its config row (the first numeric field named like gain / power / muscle)
+		local r = rowOf(WEIGHTS, id)
+		if type(r) ~= "table" then return nil end
+		if not GAIN_KEYS_PRINTED and id == 1 then
+			GAIN_KEYS_PRINTED = true
+			local keys = {}
+			for k, v in pairs(r) do keys[#keys + 1] = tostring(k) .. "=" .. tostring(v) end
+			table.sort(keys)
+			dbg("weight #1 config fields:", table.concat(keys, ", "))
+		end
+		for _, pass in ipairs({ { "gain" }, { "power" }, { "muscle" } }) do
+			for k, v in pairs(r) do
+				if type(k) == "string" and k:lower():find(pass[1], 1, true) and tonumber(v) and tonumber(v) > 0 then return tonumber(v) end
+			end
+		end
+		return nil
+	end
+	FX.farm = {
+		stage = stageValue, cash = readCash, muscle = readMuscle, fmt = fmtNum,
+		maxStage = function() local n = maxStageNum() return n > 0 and n or nil end,
+		-- the next Body Alter you could buy: its stage number and price (nil when there is none left)
+		nextAlter = function()
+			local s = stageValue()
+			if not (s and STAGES) then return nil end
+			local r = rowOf(STAGES, s + 1)
+			if not r or r.donate then return nil end
+			return s + 1, tonumber(r.Price)
+		end,
+		sellRate = function() return (sellRate()) end,   -- coins per muscle (measured from a real sale when there was one, x2 with the pass)
+		weightGain = weightGain,
+		topWeight = function() return WEIGHTS and bestWeight() or nil end,
+		-- the weight tool is called like the config's ToolName
+		topWeightName = function()
+			if not WEIGHTS then return nil end
+			local r = rowOf(WEIGHTS, bestWeight())
+			return r and tostring(r.ToolName or r.Name) or nil
+		end,
+		-- the next weight to buy: { idx, price, name }, or nil + "done" / "unknown"
+		nextWeight = function()
+			if not WEIGHTS then return nil, "unknown" end
+			for id = bestWeight() + 1, countOf(WEIGHTS) do
+				if not weightRowSkipped(id) then
+					local r = rowOf(WEIGHTS, id)
+					return { idx = id, price = tonumber(r.Price), name = tostring(r.Name or id) }
+				end
+			end
+			return nil, "done"
+		end,
+		-- the whole weight list ({ idx, price, has, name }), the weights Smart Weight never buys, and Smart Weight's state
+		shop = function()
+			local list = {}
+			if not WEIGHTS then return list end
+			local best = bestWeight()
+			for id = 1, countOf(WEIGHTS) do
+				local r = rowOf(WEIGHTS, id)
+				if r then list[#list + 1] = { idx = id, price = tonumber(r.Price), has = id <= best, name = tostring(r.Name or id) } end
+			end
+			return list
+		end,
+		skipWeight = function(i) return weightRowSkipped(i) end,
+		smartWeightOn = function() return env.SmartWeight == true end,
+		-- the highest weight Smart Weight is allowed to buy right now (the same limit rule smartWeight() uses)
+		weightCap = function()
+			if not WEIGHTS then return nil end
+			local s = stageValue()
+			local srow = s and STAGES and rowOf(STAGES, s + 1)
+			local sprice = srow and tonumber(srow.Price)
+			local limit = sprice and sprice * (SMART_LIMITS[smartLimit] or 0.25) or math.huge
+			local cap = 0
+			for id = 1, countOf(WEIGHTS) do
+				if not weightRowSkipped(id) then
+					local p = tonumber(rowOf(WEIGHTS, id).Price)
+					if not p or p > limit then break end
+					cap = id
+				end
+			end
+			return cap
+		end,
+		-- lifts per second at the running lift speed (or the Fast Lifter speed if Auto Lift is off), its name, and whether it is running
+		liftRate = function()
+			local running = env.gain == true
+			local c = (running and curLiftChoice) or LIFT_FAST
+			local d = LIFT_DELAY[c]
+			-- measured rate (real lifts of the last 3 minutes) while Auto Lift runs; the delay's nominal rate only until enough data exists
+			local rate = running and measuredLiftRate() or nil
+			return rate or (d and (1 / d) or 60), LIFT_SHORT[c] or "", running
+		end,
+	}
+
+	local lastSwWait = nil
+	local lastRescan = { weight = 0, dna = 0 }
+	local function rescanIfWaiting(kind)   -- the saved shop reading can be stale (e.g. right after Body Alter): re-read it every 30 s while waiting
+		if os.clock() - lastRescan[kind] > 30 then
+			lastRescan[kind] = os.clock()
+			Shop.invalidate(kind)
+		end
+	end
 	local function smartWeight()
 		syncStage()
 		if not (WEIGHTS and STAGES) then Status.set("sweight", "Can't read the weight / stage list") return 3 end
@@ -2719,11 +3084,19 @@ TAB_SCRIPTS.Farming = (function()
 				if not nextRow then nextRow = { id = id, row = r, price = p } end
 				if not p or p > limit or p > cash then break end
 				pick = { id = id, row = r, price = p }
-				if wBroken then break end   -- the server wants them in order: only ever the next one
+				break   -- this game's shop only sells the next weight (the rest are locked): only ever buy the next one, never jump ahead
 			end
 		end
 		if not nextRow then Status.set("sweight", "Waiting - all weights owned") return 5 end
 		if not pick then
+			rescanIfWaiting("weight")
+			-- say WHY it is waiting in the console, once per change (not every tick)
+			local why = (nextRow.price and nextRow.price > limit) and "above the limit" or "not enough coins"
+			local sig = why .. tostring(nextRow.id) .. tostring(stage)
+			if sig ~= lastSwWait then
+				lastSwWait = sig
+				dbg("Smart Weight waiting:", why, "| next #" .. tostring(nextRow.id), tostring(nextRow.row.Name), "price", tostring(nextRow.price), "| limit", tostring(limit), "| cash", tostring(cash))
+			end
 			if nextRow.price and nextRow.price > limit then
 				Status.set("sweight", ("Waiting for the next stage (%s is above the limit)"):format(tostring(nextRow.row.Name)))
 				return 1
@@ -2769,7 +3142,7 @@ TAB_SCRIPTS.Farming = (function()
 		local rate, measured = sellRate()
 		if not measured then
 			local m = readMuscle()
-			if m and m > 0 and not selling and os.clock() - lastProbe > 30 then
+			if m and m > 0 and not selling and not FX.Events.found and os.clock() - lastProbe > 30 then   -- not needed when the event window was read (same rule as Sell If Enough)
 				lastProbe = os.clock()
 				Status.set("sdna", "Measuring coins per muscle (one sale)")
 				doSell("measuring the coin rate")
@@ -2794,6 +3167,7 @@ TAB_SCRIPTS.Farming = (function()
 		if not info then return 2 end
 		local best = info.best
 		if best >= targetId then
+			rescanIfWaiting("dna")
 			local trow = rowOf(DNKS, targetId)
 			local covers = (tonumber(trow and trow.Capacity) or 0) * rate
 			if covers >= sprice then
@@ -2814,11 +3188,12 @@ TAB_SCRIPTS.Farming = (function()
 				if not nextRow then nextRow = { id = id, row = r, price = p } end
 				if not p or p > cash then break end
 				pick = { id = id, row = r, price = p }
-				if dBroken then break end
+				break   -- the shop only sells the next DNA (the rest are locked): only ever buy the next one, never jump ahead
 			end
 		end
 		if not nextRow then Status.set("sdna", "Waiting for the next stage (nothing left to buy)") return 3 end
 		if not pick then
+			rescanIfWaiting("dna")
 			Status.set("sdna", ("Waiting for enough coins for %s (stage needs ~%s storage)"):format(tostring(nextRow.row.Name), fmtNum(needStorage)))
 			return 0.3
 		end
@@ -2900,6 +3275,72 @@ TAB_SCRIPTS.Farming = (function()
 			end,
 		},
 	}
+
+	-- ---------------------------------------------------------------- Smart Weight / Auto Body Alter / Smart DNA on this page too
+	-- Same switches as on the Buy page: flipping either one flips the other (the feature itself only starts / stops once).
+	-- Smart DNA only exists without the Infinite Size gamepass, so it is simply skipped when the Buy page has no such entry.
+	do
+		local at = math.min(3, #macro + 1)
+		for _, nm in ipairs({ "Smart Weight", "Auto Body Alter", "Smart DNA" }) do
+			local buyEntry
+			for _, en in ipairs(rest) do if type(en) == "table" and en.name == nm then buyEntry = en break end end
+			if buyEntry then
+				local inner = buyEntry.callback
+				local macroEntry
+				macroEntry = {
+					type = "toggle", name = nm, icon = buyEntry.icon, default = false,
+					desc = buyEntry.desc,
+					callback = function(on)
+						if buyEntry._setUI and buyEntry._get then
+							if buyEntry._get() ~= (on == true) then buyEntry._setUI(on == true) end
+						else
+							inner(on)
+						end
+					end,
+				}
+				buyEntry.callback = function(on)
+					inner(on)
+					if macroEntry._setUI and macroEntry._get and macroEntry._get() ~= (on == true) then macroEntry._setUI(on == true) end
+				end
+				table.insert(macro, at, macroEntry)
+				at = at + 1
+			end
+		end
+	end
+
+	-- ---------------------------------------------------------------- Auto Reborn: this game has no reborn system yet
+	table.insert(macro, { type = "info", name = "Auto Reborn", icon = "♻", desc = "Coming Soon? (this game has no reborn system yet)" })
+
+	-- ---------------------------------------------------------------- WORST TOGGLE: the whole macro in one switch
+	do
+		local function findEntry(list, name)
+			for _, en in ipairs(list) do if type(en) == "table" and en.name == name then return en end end
+		end
+		local function setTo(en, v)
+			if en and en._setUI then pcall(en._setUI, v) end
+		end
+		table.insert(macro, 1, {
+			type = "toggle", name = "WORST TOGGLE", icon = "👑", default = false,
+			desc = "One switch for the whole macro: Sell If Enough, Gain Muscle (fast), Smart Weight, Auto Body Alter, Smart DNA (only without the Infinite Size gamepass). Also switches Anti AFK and Auto Rejoin on if they are off. Turning it off stops the macro features (Anti AFK / Auto Rejoin stay on).",
+			callback = function(on)
+				local list = {
+					findEntry(macro, "Auto Sell Muscle (Sell If Enough)"),
+					findEntry(macro, "Auto Gain Muscle (Fast)"),
+					findEntry(rest, "Smart Weight"),
+					findEntry(rest, "Auto Body Alter"),
+					findEntry(rest, "Smart DNA"),   -- keep LAST: nil with the Infinite Size gamepass (no entry), and ipairs stops at a nil
+				}
+				if on then
+					for _, en in ipairs(list) do setTo(en, true) end
+					-- Anti AFK / Auto Rejoin are normally ON from the start: only switch them on if they were turned off in Settings
+					if Extras and Extras.antiAfk and Extras.antiAfk._get and not Extras.antiAfk._get() then setTo(Extras.antiAfk, true) end
+					if Extras and Extras.autoRejoin and Extras.autoRejoin._get and not Extras.autoRejoin._get() then setTo(Extras.autoRejoin, true) end
+				else
+					for _, en in ipairs(list) do setTo(en, false) end
+				end
+			end,
+		})
+	end
 
 	-- stops everything when the hub is unloaded
 	table.insert(cleanupHooks, function()
@@ -3253,9 +3694,13 @@ TAB_SCRIPTS.Miscellaneous = (function()
 		{ "Auto Buy DNA", "Buys the next DNA (storage size) as soon as you can afford it. Hidden if you own Infinite Size.", "ℹ" },
 		{ "Smart Weight", "Buys the most expensive weight you can afford that costs no more than the chosen share of the next stage's price, skipping the cheaper ones. Pauses Auto Buy Weight while it is on.", "ℹ" },
 		{ "Smart DNA", "Only buys the storage needed for one full sale to cover the next stage. Uses your real coins per muscle (measured from your sales, so events like x10 coins are included). Never buys weights. Hidden if you own Infinite Size.", "ℹ" },
+		{ "Events tab", "Muscle / Coins multiplier of the running game event (x20, x10 ...). Auto Detect Events reads the game's Game Event window every 10 seconds; or turn it off and type the numbers yourself. Gain per lift, coins per muscle and every time estimate follow them.", "ℹ" },
 		{ "Auto Body Alter",              "Auto buys the new Body Alter (Stage).",                                                             "ℹ" },
 		{ "Auto Rejoin", "Starts by itself when the script is executed. Rejoins the same server after a kick / disconnect (it can't get back in if that server is closed or full). Fill in Rejoin Loader so the hub starts again by itself.", "ℹ" },
+		{ "Macro: WORST TOGGLE", "Switches the whole macro on or off in one click: Sell If Enough, fast lifting, Smart Weight and Auto Body Alter. Anti AFK and Auto Rejoin are switched on too if they were off.", "ℹ" },
 		{ "Macro: Gain + Sell", "Fast lifting plus Sell If Enough, in one place.", "ℹ" },
+		{ "Macro: Smart Weight", "The same switch as Smart Weight on the Buy page, kept here so the whole macro is on one page.", "ℹ" },
+		{ "Macro: Auto Reborn", "Coming Soon? This game has no reborn system yet.", "ℹ" },
 		{ "Auto Attack & Teleport",       "Teleports to players whose stage is lower than yours, on the opposite team. Equip Fists/Stomp first.", "ℹ" },
 		{ "Teleport to Player",           "Literally teleports you to the player chosen in the Players dropdown.",                             "ℹ" },
 		{ "Spectate Player",              "Watches the player chosen in the Players dropdown through their camera.",                           "ℹ" },
@@ -4665,6 +5110,7 @@ local function buildInput(row, entry)
 	box.Focused:Connect(function() tween(st, { Color = C.accent }) end)
 	box.FocusLost:Connect(function() submit() end)
 
+	entry._setText = function(v) box.Text = tostring(v) lastSubmitted = box.Text end   -- scripts can show a value without running the callback
 	register(entry, {
 		type = "input",
 		get = function() return entry.clearOnSubmit and lastSubmitted or box.Text end,
@@ -4844,7 +5290,7 @@ local function buildScriptPage(tabName, entries)
 			buildRows(list, sp.entries or {}, tabName .. "/" .. tostring(sp.name or i))
 		end
 	else
-		local SUBTITLES = { Farming = "Lift, sell and buy - everything for farming.", ["Bloodline & Islands"] = "Not available yet in this game.", Webhook = "Sends your stats to a Discord webhook every 10 minutes.", Players = "Pick a player, then teleport to them, hunt or spectate.", Miscellaneous = "Information about every feature, and the credits." }   -- tabName -> subtitle text
+		local SUBTITLES = { Farming = "Lift, sell and buy - everything for farming.", ["Bloodline & Islands"] = "Not available yet in this game.", Events = "Game events (x20 muscle, x10 coins ...): detected from the game, or typed by you.", Webhook = "Sends your stats to a Discord webhook every 10 minutes.", Players = "Pick a player, then teleport to them, hunt or spectate.", Miscellaneous = "Information about every feature, and the credits." }   -- tabName -> subtitle text
 		label(page, SUBTITLES[tabName] or "Press a button to run its script.", 322, 149, 19, C.sub, Enum.Font.Gotham)
 		frame(page, 322, 179, 1084, 1, C.stroke)
 		local plist = newList(322, 201, 1084, 640, true)
@@ -5147,9 +5593,550 @@ do
 		-- welcome card (left)
 		local hero = panel(322, 201, 520, 420)
 		slideLeft[#slideLeft + 1] = hero
-		-- HERO: empty card on purpose - put your picture in HOME_IMAGES.hero (top of this block)
-		applyImage(hero, "hero")
-		
+		-- ---------------------------------------------------------------- PLAYER STATUS card (replaces the picture)
+		-- Stage / Reborn (coming soon) / gain per lift, minute, hour, day + a recommendation.
+		-- Gain per lift is measured ONCE (from the game's own "+X Power" popup, or by one test lift) and then stays fixed until your
+		-- stage, best weight or body alter changes. Minute / hour / day = gain per lift x lifts per second of your lift mode.
+		do
+			local TILE_W, TILE_H, GAP, X0, Y0 = 226, 56, 12, 28, 52
+			local valueLbl = {}
+			local capLbl = {}
+			local function tile(key, caption, col, row)
+				local x = X0 + col * (TILE_W + GAP)
+				local y = Y0 + row * (TILE_H + 8)
+				local f = frame(hero, x, y, TILE_W, TILE_H, Color3.fromRGB(26, 26, 26), 0.35)
+				corner(f, UDim.new(0, 12))
+				stroke(f, Color3.fromRGB(95, 95, 95), 1, 0.2)
+				local cap = label(f, caption, 14, 14, 12, C.sub, Enum.Font.GothamMedium)
+				cap.Size = UDim2.fromOffset(TILE_W - 24, 18)
+				cap.RichText = false
+				capLbl[key] = cap
+				local v = label(f, "--", 14, 37, 22, Color3.new(1, 1, 1), Enum.Font.GothamBold)
+				v.Size = UDim2.fromOffset(TILE_W - 24, 28)
+				v.RichText = false
+				v.TextTruncate = Enum.TextTruncate.AtEnd
+				valueLbl[key] = v
+			end
+			local title = label(hero, "PLAYER STATUS", X0, 30, 15, Color3.new(1, 1, 1), Enum.Font.GothamBold)
+			title.RichText = false
+			local live = label(hero, "", 520 - X0, 30, 13, C.sub, Enum.Font.Gotham, Enum.TextXAlignment.Right)
+			live.RichText = false
+			live.Size = UDim2.fromOffset(260, 20)
+			tile("stage", "CURRENT STAGE", 0, 0)
+			tile("reborn", "CURRENT REBORN", 1, 0)
+			valueLbl.reborn.Text = "Coming Soon?"   -- this game has no reborn system
+			tile("lift", "GAIN PER LIFT", 0, 1)
+			tile("min", "GAIN PER MINUTE", 1, 1)
+			tile("hour", "GAIN PER HOUR", 0, 2)
+			tile("day", "GAIN PER DAY", 1, 2)
+			tile("nextw", "TIME UNTIL NEXT WEIGHT", 0, 3)
+			tile("nexta", "TIME UNTIL NEXT BODY ALTER", 1, 3)
+			valueLbl.nexta.Text = "--"
+			frame(hero, X0, 312, 520 - 2 * X0, 1, C.stroke)
+			local recCap = label(hero, "LIVE STATUS", X0, 328, 12, C.sub, Enum.Font.GothamBold)
+			recCap.RichText = false
+			-- switch next to "Recommended": Check Player Status [Live]
+			local liveOn, liveBusy, liveRequest, lastLive = false, false, false, -1e9
+			local liveMsg, liveMsgUntil = nil, 0
+			local liveLbl = label(hero, "Check Player Status [Live]", 520 - X0 - 44, 328, 12, C.sub, Enum.Font.GothamMedium, Enum.TextXAlignment.Right)
+			liveLbl.RichText = false
+			liveLbl.Size = UDim2.fromOffset(200, 18)
+			local livePill = new("TextButton", {
+				Position = UDim2.fromOffset(520 - X0 - 36, 319), Size = UDim2.fromOffset(36, 18),
+				BackgroundColor3 = Color3.fromRGB(60, 60, 60), BorderSizePixel = 0, AutoButtonColor = false, Text = "",
+			}, hero)
+			corner(livePill, UDim.new(1, 0))
+			stroke(livePill, Color3.fromRGB(110, 110, 110), 1)
+			local liveKnob = new("Frame", {
+				Position = UDim2.fromOffset(2, 2), Size = UDim2.fromOffset(14, 14),
+				BackgroundColor3 = Color3.fromRGB(190, 190, 190), BorderSizePixel = 0,
+			}, livePill)
+			corner(liveKnob, UDim.new(1, 0))
+			local recTxt = label(hero, "Measuring your gain per lift...", X0, 330, 16, C.text, Enum.Font.Gotham)
+			recTxt.Size = UDim2.fromOffset(520 - 2 * X0, 72)
+			recTxt.RichText = false
+			recTxt.TextWrapped = true
+			recTxt.TextYAlignment = Enum.TextYAlignment.Top
+			recTxt.AnchorPoint = Vector2.new(0, 0)
+			recTxt.Position = UDim2.fromOffset(X0, 342)
+			local function fmt(n, dec) return (FX.farm and FX.farm.fmt and FX.farm.fmt(n, dec)) or tostring(math.floor(n)) end
+			local function dur(sec)
+				if sec < 90 then return math.ceil(sec) .. "s" end
+				if sec < 5400 then return math.ceil(sec / 60) .. " min" end
+				if sec < 172800 then return string.format("%.1f h", sec / 3600) end
+				return string.format("%.1f days", sec / 86400)
+			end
+
+			local function muscleNow() local f = FX.farm return (f and f.muscle and f.muscle()) or (getMuscle()) end
+
+			-- ------------------------------------------------ gain per lift: fixed value, re-measured only when something changes
+			local perLift, perLiftTxt, perSrc = nil, nil, nil   -- perSrc: "popup" (exact, from the game) or "hud" (rough estimate)
+			local lastMuscleMult   -- the Events tab muscle multiplier the current gain per lift was measured under
+			local needMeasure = true
+			local tries = 0   -- test lifts fired so far for the current measurement
+			local altN, altPrice, altAt = nil, nil, -1e9
+			local lastKey
+			local nwName, nwPrice, nwDone = nil, nil, false
+			local nwIdx
+			local nwDeadline, nwFor   -- steady countdown for the "next weight" tile: finish time and the price it was made for
+			local lastParts = {}                      -- last seen stage / next body alter / best weight (nil reads are ignored)
+			local liveQueued, liveDueAt, liveTries = false, 0, 0   -- a Live check waiting to run (after a weight change), when, and retries
+			local incHist, incRate = {}, 1            -- recent { time, cash + muscle * sellRate } samples: the income really earned per second
+			-- countdown text: 45s, 12m 05s, 3h 20m, 2d 4h (changes every second instead of jumping between minutes)
+			local function durClock(sec)
+				if sec ~= sec or sec > 12960000 then return "Calculating..." end   -- NaN / about 5+ months: not a real estimate
+				sec = math.max(0, math.ceil(sec))
+				if sec < 60 then return sec .. "s" end
+				if sec < 3600 then return string.format("%dm %02ds", math.floor(sec / 60), sec % 60) end
+				if sec < 86400 then return string.format("%dh %02dm", math.floor(sec / 3600), math.floor((sec % 3600) / 60)) end
+				return string.format("%dd %dh", math.floor(sec / 86400), math.floor((sec % 86400) / 3600))
+			end
+			-- a new estimate that is close to the running countdown only nudges it, so the number ticks down evenly; a big change snaps.
+			-- one smoother per tile: returns smooth(eta, now, key) and reset()
+			local function newSmoother()
+				local sEta, sAt, sFor
+				return function(eta, now, key)
+					if sEta and sFor == key then
+						local expect = sEta - (now - sAt)
+						if expect > 0 and math.abs(eta - expect) <= math.max(2, expect * 0.25) then eta = expect + (eta - expect) * 0.3 end
+					end
+					sEta, sAt, sFor = eta, now, key
+					return eta
+				end, function() sEta = nil end
+			end
+			local smoothEta, resetEta = newSmoother()           -- "time until next weight"
+			local smoothReborn, resetReborn = newSmoother()     -- "time until next body alter"
+			local rbDeadline, rbFor, rbGood = nil, nil, -1e9   -- steady countdown for the Body Alter tile: finish time, its target price, last good estimate
+
+			-- base gain of a weight: read from the game's weight config (FX.farm.weightGain). nil = unknown, then a weight change just re-measures.
+			local function gainOfWeight(idx)
+				local f = FX.farm
+				return f and f.weightGain and f.weightGain(idx) or nil
+			end
+
+			-- Seconds until `have` coins reach `target` (the next Body Alter price), while Smart Weight buys on the way: it always buys the most expensive weight it can
+			-- afford (not above `cap`), every purchase costs coins and raises the income. `unit` = coins per second for each point of weight gain
+			-- (gain multiplier x lifts per second x sell rate), so the lift speed is part of every step. nil when something can't be read.
+			local function simulateTarget(f, have, target, unit, top, cap)
+				local shop = f.shop()
+				if #shop == 0 then return nil end
+				local cands = {}
+				for _, w in ipairs(shop) do
+					if w.idx > top and w.idx <= cap and not w.has and w.price and not f.skipWeight(w.idx) and gainOfWeight(w.idx) then
+						cands[#cands + 1] = w
+					end
+				end
+				local t, h, cur = 0, have, top
+				for _ = 1, #cands + 2 do
+					if h >= target then return t end
+					while true do   -- buy everything Smart Weight would buy right now
+						local best
+						for _, w in ipairs(cands) do
+							if w.idx > cur and w.price <= h and (not best or w.price > best.price) then best = w end
+						end
+						if not best then break end
+						h, cur = h - best.price, best.idx
+					end
+					local g = gainOfWeight(cur)
+					local rate = g and g * unit
+					if not rate or rate <= 0 then return nil end
+					local dtTarget = (target - h) / rate
+					local nextW   -- the cheapest weight above the one in your hand is the next one to become affordable
+					for _, w in ipairs(cands) do
+						if w.idx > cur and (not nextW or w.price < nextW.price) then nextW = w end
+					end
+					if not nextW then return t + dtTarget end
+					local dtW = (nextW.price - h) / rate
+					if dtW >= dtTarget then return t + dtTarget end
+					t, h = t + dtW, nextW.price
+				end
+				return t
+			end
+			local function popupValue(o)
+				if not o:IsA("TextLabel") then return nil end
+				local t = (tostring(o.Text or ""):gsub("<[^>]*>", ""))
+				return t:match("%+%s*([%d%.,]+%a*)%s*[Pp]ower") or t:match("%+%s*([%d%.,]+%a*)%s*[Mm]uscle")
+			end
+			local popupAt = -1e9   -- when the last "+X Power" popup was read
+			local function takePopup(o)
+				local num = popupValue(o)
+				if num then   -- the popup is the game's own exact number: always follow it (equipping another weight changes it too)
+					local n = parseShortNumber(num)
+					if n and n > 0 then perLift, perLiftTxt, perSrc, needMeasure, popupAt = n, num, "popup", false, os.clock() end
+				end
+			end
+			local function onNewObject(o)
+				if not alive or not o:IsA("TextLabel") then return end
+				task.defer(function()
+					takePopup(o)
+					if needMeasure or perSrc ~= "popup" then
+						local c; c = o:GetPropertyChangedSignal("Text"):Connect(function() takePopup(o) c:Disconnect() end)
+						task.delay(2, function() pcall(function() c:Disconnect() end) end)
+					end
+				end)
+			end
+			pcall(function()
+				local pg = player:WaitForChild("PlayerGui", 5)
+				if pg then connect(pg.DescendantAdded, onNewObject) end
+			end)
+			pcall(function() connect(workspace.DescendantAdded, onNewObject) end)   -- floating "+X Power" texts live in the world, not in PlayerGui
+			-- the game re-uses its popup labels (only the text changes, no new object appears), so also look at the screen twice a second
+			task.spawn(function()
+				while alive do
+					pcall(function()
+						for _, root in ipairs(player.PlayerGui:GetChildren()) do
+							if root ~= gui then
+								for _, o in ipairs(root:GetDescendants()) do
+									if o:IsA("TextLabel") then takePopup(o) end
+								end
+							end
+						end
+					end)
+					pcall(function()   -- floating popups can also sit on the character or in the camera
+						for _, root in ipairs({ player.Character, workspace.CurrentCamera }) do
+							if root then
+								for _, o in ipairs(root:GetDescendants()) do
+									if o:IsA("TextLabel") then takePopup(o) end
+								end
+							end
+						end
+					end)
+					task.wait(0.5)
+				end
+			end)
+			-- Lifts fired by the script (remote) show NO popup, only your own manual lifts do. So the script measures it itself:
+			-- right after a sale your muscle is ~0, where the HUD's 4 digits are exact (2.522Sxtg), and the first few gains are single lifts.
+			-- It re-measures after every sale, so the value follows weight / stage changes and stays fixed in between.
+			task.spawn(function()
+				local lastM, freshUntil, incs = nil, 0, {}
+				while alive do
+					local m = muscleNow()
+					local now = os.clock()
+					if m then
+						if lastM then
+							if m < lastM * 0.3 then freshUntil, incs = now + 8, {} end   -- muscle fell to almost nothing: a sale
+							if now < freshUntil and m > lastM then
+								incs[#incs + 1] = m - lastM
+								if #incs >= 3 then
+									local sorted = {}
+									for _, v in ipairs(incs) do sorted[#sorted + 1] = v end
+									table.sort(sorted)
+									local good = {}   -- a sample can catch two lifts at once: only keep gains close to the smallest one
+									for _, v in ipairs(sorted) do if v <= sorted[1] * 1.5 then good[#good + 1] = v end end
+									if #good >= 3 then
+										local v = good[math.ceil(#good / 2)]
+										perLift, perLiftTxt, perSrc, needMeasure = v, fmt(v, 3), "sale", false
+										freshUntil = 0
+									end
+								end
+							end
+						end
+						lastM = m
+					end
+					task.wait(0.1)
+				end
+			end)
+
+			-- ------------------------------------------------ Check Player Status [Live]
+			-- Holds the weight tool for a fraction of a second, lifts once BY THE GAME'S OWN TOOL (so its "+X Power" popup shows the exact
+			-- gain per lift), then puts the weight away again. If the weight was already in your hand it only lifts once and leaves it there.
+			local TOOL_SKIP = { "Fists", "Fist", "Stomp", "Foot" }
+			local function findWeightTool(name)
+				local ch, bp = player.Character, player:FindFirstChildOfClass("Backpack")
+				local list = {}
+				for _, box in ipairs({ ch, bp }) do
+					if box then
+						for _, t in ipairs(box:GetChildren()) do
+							if t:IsA("Tool") and not table.find(TOOL_SKIP, t.Name) then list[#list + 1] = { tool = t, held = box == ch } end
+						end
+					end
+				end
+				if name then
+					local low = tostring(name):lower()
+					for _, e in ipairs(list) do if e.tool.Name:lower() == low then return e.tool, e.held end end
+					for _, e in ipairs(list) do if e.tool.Name:lower():find(low, 1, true) or low:find(e.tool.Name:lower(), 1, true) then return e.tool, e.held end end
+				end
+				for _, e in ipairs(list) do if e.held then return e.tool, true end end   -- nothing matched by name: a weight already in your hand
+				return nil
+			end
+			local function liveCheck()
+				local f = FX.farm
+				local name = f and f.topWeightName and f.topWeightName()
+				local tool, held = findWeightTool(name)
+				local ch = player.Character
+				local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+				if not (tool and hum) then
+					liveMsg, liveMsgUntil = "Live check: couldn't find your weight tool" .. (name and (" (" .. tostring(name) .. ")") or "") .. ".", os.clock() + 8
+					return false
+				end
+				local t0 = os.clock()
+				if not held then
+					pcall(function() hum:EquipTool(tool) end)
+					task.wait(0.15)
+				end
+				pcall(function() tool:Activate() end)   -- one lift with the game's own tool
+				while alive and popupAt < t0 and os.clock() - t0 < 1.5 do task.wait(0.05) end
+				if not held then
+					pcall(function() hum:UnequipTools() end)
+					task.wait(0.05)
+					local bp = player:FindFirstChildOfClass("Backpack")
+					if tool.Parent == ch and bp then pcall(function() tool.Parent = bp end) end
+				end
+				if popupAt >= t0 then
+					liveMsg = ("Live check done with %s: %s per lift."):format(tostring(tool.Name), tostring(perLiftTxt))
+				else
+					liveMsg = ("Live check: lifted once with %s but no popup showed up."):format(tostring(tool.Name))
+				end
+				liveMsgUntil = os.clock() + 8
+				return true
+			end
+			-- the switch is saved on its own (WORST/livecheck.txt, like the Show name button) and restored when the script runs again
+			local function setLive(on, save)
+				liveOn = on
+				tween(livePill, { BackgroundColor3 = liveOn and Color3.fromRGB(215, 215, 215) or Color3.fromRGB(60, 60, 60) }, 0.15)
+				tween(liveKnob, { Position = UDim2.fromOffset(liveOn and 20 or 2, 2), BackgroundColor3 = liveOn and Color3.fromRGB(20, 20, 20) or Color3.fromRGB(190, 190, 190) }, 0.15)
+				liveLbl.TextColor3 = liveOn and Color3.new(1, 1, 1) or C.sub
+				if liveOn then liveRequest = true end
+				if save then pcall(Store.write, "livecheck.txt", liveOn and "1" or "0") end
+			end
+			livePill.MouseButton1Click:Connect(function() setLive(not liveOn, true) end)
+			local okSaved, savedLive = pcall(Store.read, "livecheck.txt")
+			if okSaved and savedLive == "1" then setLive(true, false) end
+
+			-- ------------------------------------------------ recommendation
+			local function recommend(gps, atMax)
+				local f = FX.farm
+				if not f then return "Waiting for the macro to load..." end
+				local cash, muscle = f.cash(), muscleNow()
+				if not (cash and muscle) then return "Can't read your cash or muscle yet." end
+				local sellRate = f.sellRate()
+				local have = cash + muscle * sellRate
+				local target, what
+				if altPrice and altN then target, what = altPrice, "Body Alter stage " .. altN end
+				if not target then
+					if atMax then return "You bought the last Body Alter. Reborn: Coming soon?" end
+					return "Keep lifting and buying weights. Turn on the Macro page toggles to automate lifting and selling."
+				end
+				if have >= target then
+					return "You can afford " .. what .. " right now. Sell your muscle and buy it (Auto Body Alter does this)."
+				end
+				if not gps or gps <= 0 then return "Measuring your gain per lift for " .. what .. "..." end
+				local smartOn = f.smartWeightOn and f.smartWeightOn()
+				local eta
+				if smartOn and rbDeadline and rbFor == target and os.clock() - rbGood < 10 then
+					eta = math.max(rbDeadline - os.clock(), 0)   -- same countdown as the tile (includes the weights Smart Weight buys on the way)
+				else
+					eta = (target - have) / (gps * sellRate)       -- no weight purchases counted
+				end
+				if eta ~= eta or eta > 12960000 then return "Next: " .. what .. " - calculating..." end
+				local msg = ("Next: %s in about %s%s."):format(what, dur(eta), smartOn and "" or " at your current lift speed")
+				if not smartOn and eta > 3 * 3600 then msg = msg .. " That's slow: turn on Smart Weight so you keep buying the best weight." end
+				return msg
+			end
+
+			local probing = false   -- (kept as a flag the update loop checks; the probe itself is gone)
+
+			-- ------------------------------------------------ the update loop
+			task.spawn(function()
+				while alive and hero.Parent do
+					local f = FX.farm
+					if f then
+						local now = os.clock()
+						-- the next Body Alter (re-read every 2 s) gives the real stage number: stage = next - 1
+						if now - altAt > 2 then
+							altAt = now
+							altN, altPrice = f.nextAlter()
+						end
+						-- stage, next body alter and best weight are checked every tick, so a change is seen within half a second.
+						-- A part that can't be read right now (nil) is ignored, so a flickering read never counts as a change.
+						local parts = { f.stage(), altN, f.topWeight() }
+						local changed = false
+							local weightFrom, weightTo
+						for i = 1, 3 do
+							local v = parts[i]
+							if v ~= nil then
+								local sv = tostring(v)
+								if lastParts[i] ~= nil and lastParts[i] ~= sv then
+										if i == 3 then weightFrom, weightTo = tonumber(lastParts[i]), tonumber(sv) else changed = true end
+									end
+								lastParts[i] = sv
+							end
+						end
+						-- an event multiplier changed (x20 started / ended, or you typed a number): the gain per lift scales with it, no re-measure
+						do
+							local mm = FX.Events.muscle or 1
+							if lastMuscleMult and mm ~= lastMuscleMult and lastMuscleMult > 0 and perLift then
+								perLift = perLift * mm / lastMuscleMult
+								perLiftTxt = fmt(perLift, 3)
+							end
+							lastMuscleMult = mm
+						end
+						-- a new weight needs no re-measure, no equip / lift / unequip: the gain per lift scales with the weight's own base gain
+						if weightTo and not changed then
+							local gOld, gNew = weightFrom and gainOfWeight(weightFrom), gainOfWeight(weightTo)
+							if perLift and gOld and gNew and gOld > 0 then
+								perLift = perLift * gNew / gOld
+								perLiftTxt, perSrc = fmt(perLift, 3), "weight"
+							else
+								changed = true
+							end
+						end
+						if changed then
+							-- the old gain per lift is no longer true: the tiles show "..." until the new one is measured
+							needMeasure, tries = true, 0
+							perLift, perLiftTxt, perSrc = nil, nil, nil
+							liveTries = 0
+							if liveOn then liveQueued, liveDueAt = true, now + 0.6 end   -- short wait so the new weight tool has arrived in your backpack
+						end
+						-- next weight to buy (for the "time until next weight" tile)
+						local w, why = f.nextWeight()
+						nwName, nwPrice, nwDone = w and w.name, w and w.price, (w == nil and why == "done")
+						nwIdx = w and w.idx
+						-- Check Player Status [Live]: when switched on, right after a weight / stage change (equip, lift once, unequip), and every 2 minutes.
+						-- A change that arrives while a check is running stays queued, and a check that couldn't find the tool is retried (up to 4 times).
+						if liveOn and not liveBusy and (liveRequest or (liveQueued and now >= liveDueAt) or now - lastLive > 120) then
+							liveBusy, liveRequest, liveQueued = true, false, false
+							task.spawn(function()
+								local ok, done = pcall(liveCheck)
+								lastLive = os.clock()
+								if not (ok and done) and liveTries < 4 then
+									liveTries = liveTries + 1
+									liveQueued, liveDueAt = true, os.clock() + 1.5
+								end
+								liveBusy = false
+							end)
+						end
+						if page.Visible then
+							local stage, maxStage = f.stage(), f.maxStage and f.maxStage()
+							if type(stage) ~= "number" then stage = nil end
+							valueLbl.stage.Text = stage and (tostring(stage) .. (maxStage and (" / " .. maxStage) or "")) or "--"
+							valueLbl.reborn.Text = "Coming Soon?"   -- no reborn system in this game
+							local lps, mode, running = f.liftRate()
+							local gps = perLift and perLift * lps or nil
+							valueLbl.lift.Text = perLiftTxt or "..."
+							if gps then
+								valueLbl.min.Text, valueLbl.hour.Text, valueLbl.day.Text = fmt(gps * 60), fmt(gps * 3600), fmt(gps * 86400)
+							else
+								valueLbl.min.Text, valueLbl.hour.Text, valueLbl.day.Text = "...", "...", "..."
+							end
+							-- time until the next weight: what you still miss (cash + muscle sold) divided by the income you really earn per second
+							-- (measured over the last ~10 s; before that is known, the gain per lift x lifts per second). Updates live every half second.
+							do
+								local cash, muscle = f.cash(), muscleNow()
+								local sellRate = f.sellRate()
+								local tnow = os.clock()
+								local have = (cash and muscle) and (cash + muscle * sellRate) or nil
+								if have then
+									local last = incHist[#incHist]
+									-- start over after a gap (page was hidden), an x2 change, or a drop (a purchase)
+									if last and (tnow - last[1] > 3 or sellRate ~= incRate or have < last[2] * 0.95) then incHist = {} end
+									incRate = sellRate
+									incHist[#incHist + 1] = { tnow, have }
+									while #incHist > 2 and tnow - incHist[1][1] > 12 do table.remove(incHist, 1) end
+								end
+								local measured
+								if #incHist >= 4 then
+									local first, newest = incHist[1], incHist[#incHist]
+									if newest[1] - first[1] >= 3 and newest[2] > first[2] then measured = (newest[2] - first[2]) / (newest[1] - first[1]) end
+								end
+								-- same income model as the Body Alter tile (gain per lift x lifts/s x sell rate); the noisy measured income is only a fallback
+								local income = (gps and gps * sellRate) or measured or nil
+								local txt = "--"
+								local nwEta
+								if nwDone then
+									txt = "All weights owned"
+								elseif nwPrice and have then
+									if have >= nwPrice then txt = "Ready now" resetEta() nwDeadline = nil
+									elseif income and income > 0 then
+											-- steady countdown: fixed finish time that only drifts slowly toward each new estimate
+											local newDl = tnow + (nwPrice - have) / income
+											if not nwDeadline or nwFor ~= nwPrice then
+												nwDeadline, nwFor = newDl, nwPrice
+											else
+												local remain = math.max(nwDeadline - tnow, 0)
+												local diff = newDl - nwDeadline
+												if math.abs(diff) > math.max(5, remain * 0.25) then
+													nwDeadline = newDl
+												else
+													nwDeadline = nwDeadline + math.clamp(diff, -0.1, 0.1)
+												end
+											end
+											nwEta = math.max(nwDeadline - tnow, 0)
+											txt = durClock(nwEta)
+									else txt = "..." end
+								end
+								valueLbl.nextw.Text = txt
+								-- time until the next Body Alter; once every Body Alter is bought this tile is the (not yet existing) reborn.
+								-- Needs Smart Weight: the estimate includes every weight it will buy on the way.
+								local atReborn = stage ~= nil and maxStage ~= nil and stage >= maxStage and not altN   -- every Body Alter bought
+								capLbl.nexta.Text = atReborn and "TIME UNTIL YOUR REBORN" or "TIME UNTIL NEXT BODY ALTER"
+								local target = altPrice
+								local rtxt = "..."
+								if atReborn then
+									rtxt = "Coming soon?"   -- no reborn system in this game
+									resetReborn()
+									rbDeadline = nil
+								elseif not (f.smartWeightOn and f.smartWeightOn()) then
+									rtxt = "Enable Smart Weight"
+									resetReborn()
+									rbDeadline = nil
+								elseif have and perLift and gps and gps > 0 and target then
+									local top, cap = f.topWeight(), f.weightCap()
+									local gTop = top and gainOfWeight(top)
+									if have >= target then
+										rtxt = "Ready now"
+										resetReborn()
+										rbDeadline, rbFor, rbGood = nil, target, tnow
+									elseif gTop and cap then
+										local unit = (perLift / gTop) * lps * sellRate   -- coins per second per point of weight gain
+										local ok, eta = pcall(simulateTarget, f, have, target, unit, top, cap)
+										if ok and eta then
+											-- steady countdown: a fixed finish time that only drifts slowly toward each new estimate
+											-- (a big miss, or a new target = new stage, snaps to the new estimate)
+											local newDl = tnow + eta
+											if not rbDeadline or rbFor ~= target then
+												rbDeadline, rbFor = newDl, target
+											else
+												local remain = math.max(rbDeadline - tnow, 0)
+												local diff = newDl - rbDeadline
+												if math.abs(diff) > math.max(5, remain * 0.25) then
+													rbDeadline = newDl
+												else
+													rbDeadline = rbDeadline + math.clamp(diff, -0.1, 0.1)   -- max 0.1s per half second tick
+												end
+											end
+											rbGood = tnow
+										end
+									end
+								end
+								-- a read that fails for a moment keeps showing the running countdown instead of "..."
+								if rtxt == "..." and rbDeadline and rbFor == target and tnow - rbGood < 10 then
+									rtxt = durClock(rbDeadline - tnow)
+								end
+								valueLbl.nexta.Text = rtxt
+								-- if the Body Alter (or Reborn) comes before the next weight can be bought, that weight is the last one of this stage
+								local aEta
+								if rtxt == "Ready now" then aEta = 0
+								elseif rbDeadline and rbFor == target and rtxt ~= "..." and rtxt ~= "Enable Smart Weight" and rtxt ~= "Calculating..." and rtxt ~= "Coming soon?" then aEta = rbDeadline - tnow end
+								if nwPrice and not nwDone and ((nwEta and aEta and aEta < nwEta) or (nwIdx and f.weightCap() and nwIdx > f.weightCap())) then
+									valueLbl.nextw.Text = "Max weight"
+								end
+							end
+							live.Text = ("%.2f lifts/s - %s%s"):format(lps, mode, running and "" or " (Auto Lift off)")
+							if not probing then
+								local ok, msg = pcall(recommend, gps, stage ~= nil and maxStage ~= nil and stage >= maxStage)
+								msg = ok and msg or "Measuring..."
+								if not perLift then msg = msg .. "  (Gain per lift appears after your next sale while Auto Lift runs, or turn on Check Player Status [Live].)" end
+								if liveMsg and os.clock() < liveMsgUntil then msg = liveMsg end
+								recTxt.Text = msg
+							end
+						end
+					end
+					task.wait(0.5)
+				end
+			end)
+		end
+
 		-- Discord button (bottom left)
 		local dc = panel(322, 641, 520, 150, "TextButton")
 		dc.Name = "DiscordButton"
