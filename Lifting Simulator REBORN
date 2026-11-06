@@ -342,8 +342,8 @@ new("UIGradient", {
 }, logo)
 icon(window, "logo", "", 56, 52, 60) -- only shows if an image id is set
 
-label(window, 'WORST •<font color="rgb(170,170,170)">No Limit Lifting Simulator</font>', 108, 39, 33, C.text, Enum.Font.GothamBold)
-label(window, "Free Version", 108, 72, 19, C.sub, Enum.Font.Gotham)
+label(window, 'WORST •<font color="rgb(170,170,170)">Lifting Simulator Reborn</font>', 108, 39, 33, C.text, Enum.Font.GothamBold)
+label(window, "Ultimate", 108, 72, 19, C.sub, Enum.Font.Gotham)
 
 local minLabel = label(window, "—", 1347, 37, 20, C.text, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
 minLabel.Size = UDim2.fromOffset(40, 30)
@@ -1267,71 +1267,162 @@ local Extras = (function()
 	end
 
 	---------------------------------------------------------------- GENERAL PAGE
-	-- Hide Info: hides the name / rank shown above your head
+	-- Hide Info: hides the name / rank shown above your head.
+	-- Found with the probe: it is one BillboardGui, Character.Head.Display (BG > RankLabel / RankLabel2 / Health), so switching it off hides all of it.
+	-- A listener keeps it off if the game turns it back on, and it is hooked again after a respawn.
 	do
-		local conn
-		local function setHidden(char, hide)
+		local conns, gen = {}, 0
+		local function clear()
+			gen += 1
+			for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+			conns = {}
+		end
+		local function watch(char)
 			if not char then return end
+			local my = gen
 			task.spawn(function()
 				local head = char:FindFirstChild("Head") or char:WaitForChild("Head", 5)
-				local tg = head and (head:FindFirstChild("TitleGui") or head:WaitForChild("TitleGui", 5))
-				if not tg then return end
-				for _, n in ipairs({ "tlName", "tlRank" }) do
-					local l = tg:FindFirstChild(n)
-					if l and l:IsA("TextLabel") then l.Visible = not hide end
+				if not head or gen ~= my then return end
+				local function hook(d)
+					if gen ~= my or not d:IsA("BillboardGui") or d.Name ~= "Display" then return end
+					d.Enabled = false
+					table.insert(conns, d:GetPropertyChangedSignal("Enabled"):Connect(function()
+						if gen == my and d.Enabled then d.Enabled = false end
+					end))
 				end
+				table.insert(conns, head.ChildAdded:Connect(hook))   -- the game may recreate it
+				local d = head:FindFirstChild("Display") or head:WaitForChild("Display", 5)
+				if d then hook(d) end
 			end)
 		end
 		E.hideInfo = {
 			type = "toggle", name = "Hide Info", icon = "🙈", default = false,
 			desc = "Hides the name and rank shown above your head.",
 			callback = function(on)
-				if conn then conn:Disconnect() conn = nil end
-				setHidden(player.Character, on)
-				if on then conn = player.CharacterAdded:Connect(function(c) setHidden(c, true) end) end
+				clear()
+				local char = player.Character
+				if not on then
+					local head = char and char:FindFirstChild("Head")
+					local d = head and head:FindFirstChild("Display")
+					if d and d:IsA("BillboardGui") then d.Enabled = true end
+					return
+				end
+				watch(char)
+				table.insert(conns, player.CharacterAdded:Connect(watch))
 			end,
 		}
 	end
 
-	-- Auto Equip/Unequip Weight: holds the weights, then swaps to the Foot for a moment
+	-- Auto Equip/Unequip Weight: keeps your weight in your hand and checks that it really is equipped (no swapping to the Foot any more)
 	do
 		local BLACKLIST = { "Athena", "Cronus", "Hades", "Hercules", "Poseidon", "Zeus", "Ares", "Fists", "Stomp" }
-		local function equipTools()
-			local bp, hum = getBackpack(), getHum()
-			if not (bp and hum) then return end
-			for _, item in ipairs(bp:GetChildren()) do
-				if item:IsA("Tool") and not table.find(BLACKLIST, item.Name) then hum:EquipTool(item) end
+		local COMBAT = { Fists = true, Stomp = true }   -- held on purpose (Auto Kill / Auto Attack): never swapped away from
+		local PAUSE_FOR_COMBAT = false   -- false = ALWAYS keep the weight equipped (even over Fists / Stomp). true = leave Fists / Stomp alone
+		-- The real weights come from the game's own list (ReplicatedStorage.Configs.WeightsConfig: every row's Name / ToolName),
+		-- so a god weapon or any other tool is never mistaken for a weight. weightRank maps tool name (lowercase) -> weight number.
+		-- If that list can't be read, it falls back to the BLACKLIST above (every tool that is not on it counts as a weight).
+		local weightRank
+		local weightsTried = false
+		local function loadWeightNames()
+			if weightsTried then return end
+			weightsTried = true
+			local ok, m = pcall(function()
+				return require(game:GetService("ReplicatedStorage"):WaitForChild("Configs", 5):WaitForChild("WeightsConfig", 5))
+			end)
+			if not ok or type(m) ~= "table" then
+				warn("[WORST Hub] Auto Equip Weight: couldn't read WeightsConfig, using the name blacklist instead.")
+				return
+			end
+			if m[1] == nil and m["1"] == nil and type(m.Data) == "table" then m = m.Data end
+			local rank, n = {}, 0
+			for k, row in pairs(m) do
+				local id = tonumber(k)
+				if id and type(row) == "table" then
+					for _, nm in ipairs({ row.ToolName, row.Name }) do
+						if nm then
+							rank[tostring(nm):lower()] = id
+							n += 1
+						end
+					end
+				end
+			end
+			if n > 0 then
+				weightRank = rank
+				print(("[WORST Hub] Auto Equip Weight: %d weight names read from WeightsConfig."):format(n))
+			else
+				warn("[WORST Hub] Auto Equip Weight: WeightsConfig had no names, using the name blacklist instead.")
 			end
 		end
-		local function unequipTools()
-			local ch, bp = player.Character, getBackpack()
-			if not (ch and bp) then return end
+		local function isWeight(item)
+			if not item:IsA("Tool") or COMBAT[item.Name] then return false end
+			if weightRank then return weightRank[item.Name:lower()] ~= nil end
+			return not table.find(BLACKLIST, item.Name)
+		end
+
+		-- the tool in your hand right now: weight (true), Fists / Stomp (false, name), or nothing (nil)
+		local function inHand()
+			local ch = player.Character
+			if not ch then return nil end
 			for _, item in ipairs(ch:GetChildren()) do
-				if item:IsA("Tool") and not table.find(BLACKLIST, item.Name) then item.Parent = bp end
+				if item:IsA("Tool") then return item end
 			end
+			return nil
 		end
-		local function equipFoot()
-			local bp, hum = getBackpack(), getHum()
-			local foot = bp and bp:FindFirstChild("Stomp")
-			if foot and foot:IsA("Tool") and hum then hum:EquipTool(foot) end
+		local function weightInBackpack()
+			local bp, found, bestId = getBackpack(), nil, -1
+			if bp then
+				for _, item in ipairs(bp:GetChildren()) do
+					if isWeight(item) then
+						local id = weightRank and weightRank[item.Name:lower()] or 0
+						if id >= bestId then found, bestId = item, id end   -- the highest weight; without the list, the last one
+					end
+				end
+			end
+			return found
+		end
+		-- equips the weight and checks it really arrived in your hand. Returns state, name:
+		--   "held" (already / now in your hand) | "failed" (could not equip it) | "none" (no weight in the backpack)
+		local function equipWeight()
+			local hand = inHand()
+			if hand and isWeight(hand) then return "held", hand.Name end
+			local tool = weightInBackpack()
+			if not tool then return "none" end
+			local hum = getHum()
+			if not hum then return "failed", tool.Name end
+			for _ = 1, 3 do
+				pcall(function() hum:EquipTool(tool) end)
+				local t0 = os.clock()
+				repeat task.wait(0.05) until tool.Parent == player.Character or os.clock() - t0 > 0.5
+				if tool.Parent == player.Character then return "held", tool.Name end
+			end
+			return "failed", tool.Name
 		end
 		E.equipWeights = {
 			type = "toggle", name = "Auto Equip/Unequip Weight", icon = "🏋", default = false,
-			desc = "Equips your weight automatically so you don't get reported for suspicious actions.",
+			desc = "Always keeps your weight in your hand: checks every 0.1s and equips it again whenever it is not equipped.",
 			callback = function(on)
 				local my = newGen("equipw")
 				if not on then Status.set("equipw", nil) return end
 				task.spawn(function()
+					loadWeightNames()
+					local lastStatus
+					local function setStatus(text)   -- only touch the status when it changes (this loop runs 10x per second)
+						if text ~= lastStatus then lastStatus = text Status.set("equipw", text) end
+					end
 					while alive and gens.equipw == my do
-						pcall(equipTools)
-						Status.set("equipw", "Holding the weights", 18)
-						if not waitWhile("equipw", my, 18) then break end
-						pcall(unequipTools)
-						task.wait(0.1)
-						pcall(equipFoot)
-						task.wait(0.5)
-						pcall(unequipTools)
-						task.wait(0.1)
+						local hand = inHand()
+						if PAUSE_FOR_COMBAT and hand and COMBAT[hand.Name] then
+							setStatus(("Paused - holding %s"):format(hand.Name))
+						elseif hand and isWeight(hand) then
+							setStatus(("Holding %s"):format(hand.Name))   -- equipped: nothing to do
+						else
+							-- not equipped: run the equip
+							local state, name = equipWeight()
+							if state == "held" then setStatus(("Holding %s"):format(name))
+							elseif state == "failed" then setStatus(("Can't equip %s"):format(name))
+							else setStatus("No weight found in your backpack") end
+						end
+						task.wait(0.1)   -- check every 0.1s
 					end
 				end)
 			end,
@@ -1629,9 +1720,7 @@ local TAB_SCRIPTS = {
 			end,
 		},
 		Extras.render3d,
-		Extras.autoRejoin,
 		Extras.rejoinLoader,
-		Extras.antiAfk,
 		Extras.blackScreen,
 		Extras.destroy,
 		Extras.invisible,
@@ -3323,20 +3412,25 @@ TAB_SCRIPTS.Farming = (function()
 			type = "toggle", name = "WORST TOGGLE", icon = "👑", default = false,
 			desc = "One switch for the whole macro: Sell If Enough, Gain Muscle (fast), Smart Weight, Auto Body Alter, Smart DNA (only without the Infinite Size gamepass). Also switches Anti AFK and Auto Rejoin on if they are off. Turning it off stops the macro features (Anti AFK / Auto Rejoin stay on).",
 			callback = function(on)
-				local list = {
-					findEntry(macro, "Auto Sell Muscle (Sell If Enough)"),
-					findEntry(macro, "Auto Gain Muscle (Fast)"),
+				local sellEn, gainEn = findEntry(macro, "Auto Sell Muscle (Sell If Enough)"), findEntry(macro, "Auto Gain Muscle (Fast)")
+				local buys = {
 					findEntry(rest, "Smart Weight"),
 					findEntry(rest, "Auto Body Alter"),
 					findEntry(rest, "Smart DNA"),   -- keep LAST: nil with the Infinite Size gamepass (no entry), and ipairs stops at a nil
 				}
 				if on then
-					for _, en in ipairs(list) do setTo(en, true) end
+					-- the buy switches go ON first and Sell last: Sell If Enough decides what to sell for by looking at which buy switches are on
+					-- (and what Smart Weight / Smart DNA would really buy). Started first, it saw none on, took every next item as a target and sold at once.
+					for _, en in ipairs(buys) do setTo(en, true) end
+					setTo(gainEn, true)
+					setTo(sellEn, true)
 					-- Anti AFK / Auto Rejoin are normally ON from the start: only switch them on if they were turned off in Settings
 					if Extras and Extras.antiAfk and Extras.antiAfk._get and not Extras.antiAfk._get() then setTo(Extras.antiAfk, true) end
 					if Extras and Extras.autoRejoin and Extras.autoRejoin._get and not Extras.autoRejoin._get() then setTo(Extras.autoRejoin, true) end
 				else
-					for _, en in ipairs(list) do setTo(en, false) end
+					setTo(sellEn, false)
+					setTo(gainEn, false)
+					for _, en in ipairs(buys) do setTo(en, false) end
 				end
 			end,
 		})
@@ -3357,14 +3451,212 @@ TAB_SCRIPTS.Farming = (function()
 	} }
 end)()
 
------------------------------------------------------------------- BLOODLINE & ISLANDS (not available in Lifting Simulator: REBORN yet)
--- The old islands (Hercules -> Trial), their kill spots and the island teleports don't exist in this game. Here "bloodline" is a race tier
--- gained from the Boss_N enemies and switched with ChangeRace, so this tab needs its own design.
+------------------------------------------------------------------ BLOODLINE & ISLANDS (island teleports first; the CFrames come from the old game)
+-- The island start points below are copied from the old No Limit Lifting Simulator script (Hercules -> Divinities; the later islands don't exist in this game). They may not be the same in
+-- Lifting Simulator: REBORN, so the Teleport button checks for ground at the target and brings you back when there is none.
+-- Auto Kill (the bloodline farm) is the old one ported: it stands on every kill spot of the chosen island and stomps with the Foot / Stomp tool.
 TAB_SCRIPTS["Bloodline & Islands"] = (function()
-	return {
-		{ type = "info", name = "Not available yet", icon = "🚧",
-		  desc = "The old islands and kill spots don't exist in Lifting Simulator: REBORN. Bloodline here comes from bosses, so this tab is being redone." },
+	local Status = FX.Status
+
+	local ISLANDS = {
+		{ "Hercules",   CFrame.new(1272.44, 94.00, 1851.11) },
+		{ "Ares",       CFrame.new(4055.03, 94.01, 1815.06) },
+		{ "Poseidon",   CFrame.new(6665.31, 94.01, 1902.04) },
+		{ "Hades",      CFrame.new(9393.84, 94.01, 1875.97) },
+		{ "Athena",     CFrame.new(11798.42, 94.01, 1875.52) },
+		{ "Zeus",       CFrame.new(14596.24, 94.01, 1904.77) },
+		{ "Cronus",     CFrame.new(17247.50, 94.01, 1848.54) },
+		{ "Robots",     CFrame.new(19979.43, 94.01, 1889.56) },
+		{ "Bugs",       CFrame.new(22494.12, 94.01, 1858.39) },
+		{ "Cyber",      CFrame.new(25107.67, 94.01, 1889.34) },
+		{ "Divinities", CFrame.new(27536.45, 94.01, 1815.89) },
 	}
+	local NAMES, CFRAMES = {}, {}
+	for i, it in ipairs(ISLANDS) do NAMES[i] = it[1] CFRAMES[it[1]] = it[2] end
+	local islandChoice = NAMES[1]
+
+	local function getRoot()
+		local ch = player.Character
+		return ch and ch:FindFirstChild("HumanoidRootPart")
+	end
+
+	-- is there something solid under the target? (a ray from a bit above it, straight down, ignoring your own character)
+	local function groundBelow(pos)
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		params.FilterDescendantsInstances = { player.Character }
+		return workspace:Raycast(pos + Vector3.new(0, 20, 0), Vector3.new(0, -400, 0), params)
+	end
+
+	-- ---------------------------------------------------------------- Bloodline farm (Auto Kill)
+	-- every kill spot of each island, copied from the old script (Middle, Devil 1/2, Angel 1/2). Spots with the same coordinates are visited once.
+	local BLOODLINE_SPOTS = {
+		{ "Hercules",   { {2142, 72.96, 1886.86},     {1750, -57.5004883, 1882.00024},       {2442, -57.5004883, 1870.00024},       {2122.85, 4.83, 2153.45},   {2135.10, 4.83, 1618.96} } },
+		{ "Ares",       { {4790.08, 72.96, 1883.74},  {5116, -57.5004883, 1850.00024},       {5006, -57.5004883, 1670.00024},       {4480.53, -66.96, 1873.10}, {4619.06, 67.86, 2191.77} } },
+		{ "Poseidon",   { {7423.88, 116.17, 1894.63}, {7258.40039, -57.5004883, 1694.07031}, {7580, -57.5004883, 1902.0802},        {7641.90, 113.07, 1713.49}, {7027.47, 113.07, 1899.24} } },
+		{ "Hades",      { {10077.96, 130.46, 1889.09},{10069.1484, -57.5004883, 2283.63013}, {9942.18848, -57.800293, 1490.21021},   {9622.37, 112.30, 1882.91}, {10496.92, 112.60, 1875.61} } },
+		{ "Athena",     { {12711.25, 167.06, 1837.08},{12301.7012, -57.5004883, 1887.00024}, {12879.7617, -57.5004883, 1642.82019}, {13082.91, 155.06, 1796.23},{12649.79, 155.66, 2171.43} } },
+		{ "Zeus",       { {15343.09, 161.06, 1847.09},{15551.2803, -54.5004883, 2091.14014}, {15097, -54.5004883, 1925.00024},      {15654.08, 158.06, 1810.93},{15173.99, 158.06, 2181.33} } },
+		{ "Cronus",     { {17967.72, 231.39, 1872.65},{18350.7109, -57.6010742, 1898.51025}, {17671.1699, -57.6547852, 1983.44019}, {17862.35, 255.39, 1476.00} } },
+		{ "Robots",     { {20655.21, 227.00, 1896.29},{20583.1621, -57.6010742, 1682.76025}, {20628, -57.6547852, 2078.58008},      {20436.26, 301.16, 1946.15},{20904.26, 308.96, 1933.62} } },
+		{ "Bugs",       { {23318.71, 692.53, 2022.52} } },
+		{ "Cyber",      { {25971.24, 708.20, 1999.64} } },
+		{ "Divinities", { {28713.60, 1434.99, 2041.96} } },
+	}
+	local SPOTS = {}
+	for _, b in ipairs(BLOODLINE_SPOTS) do
+		local list, seen = {}, {}
+		for _, q in ipairs(b[2]) do
+			local k = q[1] .. "," .. q[2] .. "," .. q[3]
+			if not seen[k] then seen[k] = true list[#list + 1] = CFrame.new(q[1], q[2], q[3]) end
+		end
+		SPOTS[b[1]] = list
+	end
+
+	local VirtualUser = game:GetService("VirtualUser")
+	-- the Foot tool is called "Stomp" in this game
+	local function isStomp(item)
+		if not item:IsA("Tool") then return false end
+		local n = item.Name:lower()
+		return n:find("stomp", 1, true) ~= nil or n:find("foot", 1, true) ~= nil
+	end
+	local function equipStomp()
+		local ch, bp = player.Character, player:FindFirstChild("Backpack")
+		local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+		if not (hum and bp) then return end
+		for _, item in ipairs(ch:GetChildren()) do
+			if isStomp(item) then return end   -- already in the hand
+		end
+		for _, item in ipairs(bp:GetChildren()) do
+			if isStomp(item) then hum:EquipTool(item) return end
+		end
+	end
+
+	local bloodlineChoice = NAMES[1]
+	local killToggle
+	local killGen = 0
+	local SPOT_WAIT = 3   -- seconds on every spot (same as the old script)
+
+	-- waits `sec` seconds but stops early when the toggle is switched off / the bloodline is changed; false = it was stopped
+	local function sleepWhileKilling(sec, my)
+		local t0 = os.clock()
+		while alive and killGen == my and os.clock() - t0 < sec do task.wait(0.1) end
+		return alive and killGen == my
+	end
+
+	local function stopKill()
+		killGen += 1
+		Status.set("kill", nil)
+	end
+
+	local function startKill()
+		killGen += 1
+		local my = killGen
+		local name = bloodlineChoice
+		local spots = SPOTS[name] or {}
+		Status.set("kill", ("%s - starting..."):format(name))
+		task.spawn(function()
+			while alive and killGen == my do
+				if not getRoot() then
+					Status.set("kill", "Waiting for your character to respawn")
+					task.wait(0.5)
+				else
+					equipStomp()
+					local missed = 0
+					for i, cf in ipairs(spots) do
+						local root = getRoot()
+						if not (alive and killGen == my and root) then break end
+						Status.set("kill", ("%s - stomping at spot %d/%d"):format(name, i, #spots))
+						root.CFrame = cf
+						task.wait(0.3)
+						root = getRoot()
+						if root and (root.Position - cf.Position).Magnitude > 150 then
+							missed += 1   -- you fell away from the spot: there is nothing under it in this game
+						else
+							pcall(function() VirtualUser:ClickButton1(Vector2.new(9e9, 9e9)) end)
+							if not sleepWhileKilling(SPOT_WAIT, my) then break end
+						end
+					end
+					if killGen == my and missed > 0 and missed >= #spots then
+						-- every spot is invalid: stop instead of falling again and again
+						Status.set("kill", ("%s - no valid kill spot, stopped"):format(name))
+						warn(("[WORST Hub] Auto Kill: none of the %d kill spots of %s exist in this game."):format(#spots, name))
+						killGen += 1
+						if killToggle and killToggle._setUI then pcall(killToggle._setUI, false) end
+						break
+					end
+				end
+			end
+		end)
+	end
+
+	local entries = {}
+
+	entries[#entries + 1] = {
+		type = "dropdown", name = "Choose Bloodline", icon = "⚔", width = 260,
+		desc = "Which island Auto Kill farms (Hercules to Divinities).",
+		options = NAMES, default = bloodlineChoice,
+		callback = function(option)
+			if option == nil then return end
+			bloodlineChoice = option
+			if killToggle and killToggle._get and killToggle._get() then startKill() end   -- switch bloodline while running
+		end,
+	}
+
+	killToggle = {
+		type = "toggle", name = "Auto Kill", icon = "☠", default = false,
+		desc = "Teleports to the kill spots of the chosen bloodline and stomps them with the Foot (Stomp). It equips the Foot by itself.",
+		callback = function(on)
+			if on then startKill() else stopKill() end
+		end,
+	}
+	entries[#entries + 1] = killToggle
+
+	entries[#entries + 1] = {
+		type = "dropdown", name = "Choose Island", icon = "🏝", width = 260,
+		desc = "Which island the Teleport button takes you to (Hercules to Divinities).",
+		options = NAMES, default = islandChoice,
+		callback = function(option)
+			if option == nil then return end
+			islandChoice = option
+		end,
+	}
+
+	entries[#entries + 1] = {
+		type = "button", name = "Teleport to Island", icon = "🚀", btnText = "Teleport", noSave = true,
+		desc = "Teleports you to the island chosen above. If there is no ground at that spot in this game, you are sent back to where you were.",
+		run = function()
+			local cf = CFRAMES[islandChoice]
+			if not cf then error("Pick an island first", 0) end
+			local root = getRoot()
+			if not root then error("Your character isn't loaded", 0) end
+			local origin = root.CFrame
+			local wasAnchored = root.Anchored
+			Status.set("tp", "Going to " .. islandChoice)
+			local ok, err = pcall(function()
+				root.Anchored = true   -- you can't fall while the area around the target loads
+				root.CFrame = cf   -- instant teleport
+				local found
+				local t0 = os.clock()
+				repeat   -- the ground may need a moment to stream in
+					found = groundBelow(cf.Position)
+					if found then break end
+					task.wait(0.2)
+				until os.clock() - t0 > 3
+				if not found then
+					root.CFrame = origin
+					error(("No ground at %s (%.0f, %.0f, %.0f): this coordinate is probably not valid in this game. You were sent back."):format(
+						islandChoice, cf.X, cf.Y, cf.Z), 0)
+				end
+			end)
+			if root.Parent then root.Anchored = wasAnchored end
+			Status.set("tp", nil)
+			if not ok then error(tostring(err), 0) end
+			return true
+		end,
+	}
+
+	return entries
 end)()
 
 ------------------------------------------------------------------ WEBHOOK (ported from the "Enable Webhook Logger" of ASAIYAGUINEW.lua)
@@ -3706,7 +3998,7 @@ TAB_SCRIPTS.Miscellaneous = (function()
 		{ "Spectate Player",              "Watches the player chosen in the Players dropdown through their camera.",                           "ℹ" },
 		{ "Enable Webhook Logger", "Sends your username, muscle, stage and cash to your Discord webhook every 10 minutes. Shows your real muscle even in Conceal mode.", "ℹ" },
 		{ "Anti AFK", "Starts by itself when the script is executed. You will not be kicked after 20 minutes of inactivity.", "ℹ" },
-		{ "Auto Equip/Unequip Weight",    "Automatically equips your weight so you don't get reported for suspicious actions.",                "ℹ" },
+		{ "Auto Equip/Unequip Weight",    "Keeps your weight in your hand and checks that it is really equipped. Pauses while Fists / Stomp are in your hand.",                "ℹ" },
 		{ "Auto Clicker Bloodline",       "Auto clicks your screen every 12 seconds.",                                                         "ℹ" },
 		{ "Auto Clicker Killstreak",      "Auto clicks your screen every 5 seconds.",                                                          "ℹ" },
 		{ "Auto Clicker Fast",            "Auto clicks your screen as fast as possible (every frame).",                                        "ℹ" },
@@ -3716,6 +4008,8 @@ TAB_SCRIPTS.Miscellaneous = (function()
 		{ "True Invisibility",            "Completely makes your character disappear to save FPS. Only invisible to you.",                     "ℹ" },
 		{ "Freeze Position",              "Literally freezes your avatar, so if you're falling, you will stay in that position.",              "ℹ" },
 		{ "Hide Info",                    "Hides the name and rank shown above your head.",                                                    "ℹ" },
+		{ "Auto Kill (Bloodline)",      "Teleports you to the kill spots of the chosen island and stomps them with the Foot so you can get bloodline points. Auto Equip Weight pauses while the Foot is in your hand.", "ℹ" },
+		{ "Teleport to Island",         "Teleports you to the chosen island. If there is no ground there in this game you are sent back to where you were.", "ℹ" },
 		{ "Credits",                      "Credit of the script goes to: Asaiya (Plan), Kiretsuki (Tester), Uron (Coder) and Raizel (Funds).", "★" },
 	}
 	if FX.infiniteSize then   -- Infinite Size owners never see anything about Smart DNA
@@ -5290,7 +5584,7 @@ local function buildScriptPage(tabName, entries)
 			buildRows(list, sp.entries or {}, tabName .. "/" .. tostring(sp.name or i))
 		end
 	else
-		local SUBTITLES = { Farming = "Lift, sell and buy - everything for farming.", ["Bloodline & Islands"] = "Not available yet in this game.", Events = "Game events (x20 muscle, x10 coins ...): detected from the game, or typed by you.", Webhook = "Sends your stats to a Discord webhook every 10 minutes.", Players = "Pick a player, then teleport to them, hunt or spectate.", Miscellaneous = "Information about every feature, and the credits." }   -- tabName -> subtitle text
+		local SUBTITLES = { Farming = "Lift, sell and buy - everything for farming.", ["Bloodline & Islands"] = "Auto kill the bloodline enemies and teleport between islands.", Events = "Game events (x20 muscle, x10 coins ...): detected from the game, or typed by you.", Webhook = "Sends your stats to a Discord webhook every 10 minutes.", Players = "Pick a player, then teleport to them, hunt or spectate.", Miscellaneous = "Information about every feature, and the credits." }   -- tabName -> subtitle text
 		label(page, SUBTITLES[tabName] or "Press a button to run its script.", 322, 149, 19, C.sub, Enum.Font.Gotham)
 		frame(page, 322, 179, 1084, 1, C.stroke)
 		local plist = newList(322, 201, 1084, 640, true)
@@ -5484,7 +5778,7 @@ end
 -- Home tab: welcome card, Discord button, 4 cards on the right
 do
 	local page = pages["Home"]
-	local DISCORD_LINK = "https://discord.gg/w0rst"   -- put your Discord invite here
+	local DISCORD_LINK = "https://discord.gg/Hk7QN5un5k"   -- put your Discord invite here
 
 	-- HOME IMAGES: put an image in the big center card (hero) and the four right cards (box1 - box4).
 	-- Each value can be:  a Roblox image id ("rbxassetid://123456789" or just 123456789)
@@ -6311,12 +6605,14 @@ do
 			end
 
 			local cards = {}
+			-- background features that always run: they never get a card on the Home page
+			local HIDE_FROM_HOME = { afk = true, rejoin = true }
 			-- Builds the ordered list: working now first, then waiting (soonest timer first).
 			local function build(now)
 				local act, wt = {}, {}
 				for i, key in ipairs(ST.order) do
 					local txt = ST.text[key]
-					if txt then
+					if txt and not HIDE_FROM_HOME[key] then
 						local at = ST.untilAt[key]
 						local left = at and math.max(at - now, 0) or nil
 						local it = { key = key, text = txt, left = left, i = i }
