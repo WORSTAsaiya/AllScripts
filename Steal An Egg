@@ -174,6 +174,9 @@ local S = {
     DEBUG_WEBHOOK = true, -- send rare-egg alert diagnostics to WEBHOOKS.Debug
     RELAY_TO_BOT  = true, -- true = the BOT sends the rare egg alerts: this script only posts "EGGALERT{...}" to the Debug webhook
                           -- (the bot removes the duplicates and posts through the tier webhooks). false = old way (claim + webhooks from here)
+    FALLBACK_TO_WEBHOOKS = false, -- false = when the relay to the bot fails, this script does NOT post the alert itself: no double posts
+                                  -- true  = old safety net: post through the webhooks from here when the relay fails (can double with the bot)
+    RELAY_RETRIES = 3,            -- how many times the relay is tried (2 s apart) before it gives up
     TEST_MODE   = false,  -- send 3 sample egg alerts + 1 butterfly alert + a normal and a rare UFO on start
 }
 
@@ -1153,15 +1156,22 @@ task.spawn(function()
             end
 
             local relayed = false
-            if S.RELAY_TO_BOT and validUrl(WEBHOOKS.Debug) then
-                local okR, sentR = pcall(relayEgg, a.name, a.tier, a.location, a.uid)
-                relayed = okR and sentR == true
+            local relayOn = S.RELAY_TO_BOT and validUrl(WEBHOOKS.Debug)
+            if relayOn then
+                for attempt = 1, S.RELAY_RETRIES do
+                    local okR, sentR = pcall(relayEgg, a.name, a.tier, a.location, a.uid)
+                    relayed = okR and sentR == true
+                    if relayed then break end
+                    task.wait(2)
+                end
                 debugLog(string.format("RELAY %s -> bot (%s)", tostring(a.name),
-                    relayed and "sent" or "FAILED, using the old claim + webhook path"))
+                    relayed and "sent" or (S.FALLBACK_TO_WEBHOOKS and "FAILED, using the old claim + webhook path"
+                        or "FAILED, NOT sent (FALLBACK_TO_WEBHOOKS is off)")))
                 if relayed then task.wait(S.ALERT_SEND_GAP) end
             end
 
-            if not relayed then
+            -- direct webhook posting only when the relay is off, or when it failed AND the fallback is allowed
+            if not relayed and (S.FALLBACK_TO_WEBHOOKS or not relayOn) then
                 local shouldSend, why = claim(ckey, cttl)
                 debugLog(string.format("CLAIM %s -> %s (%s) key=`%s`",
                     tostring(a.name), shouldSend and "SEND" or "SKIP", tostring(why), ckey:sub(1, 80)))
@@ -1548,9 +1558,17 @@ local function sendButterflyEmbed(startedAt, duration)
     -- the BOT posts it (in every channel that ran !bot_butterfly / !bot_all) and edits it when the event ends.
     -- The webhook posts below are ONLY used if the relay is off or failed (same as the eggs).
     task.spawn(function()
-        local relayed = S.RELAY_TO_BOT and validUrl(WEBHOOKS.Debug) and relayButterfly(startedAt, endsAt)
-        debugLog("RELAY butterfly bloom -> bot (" .. (relayed and "sent" or "FAILED or off, using the old webhook copy") .. ")")
-        if relayed then return end
+        local relayOn = S.RELAY_TO_BOT and validUrl(WEBHOOKS.Debug)
+        local relayed = false
+        if relayOn then
+            for attempt = 1, S.RELAY_RETRIES do
+                relayed = relayButterfly(startedAt, endsAt)
+                if relayed then break end
+                task.wait(2)
+            end
+        end
+        debugLog("RELAY butterfly bloom -> bot (" .. (relayed and "sent" or ((relayOn and not S.FALLBACK_TO_WEBHOOKS) and "FAILED, NOT sent (FALLBACK_TO_WEBHOOKS is off)" or "FAILED or off, using the old webhook copy")) .. ")")
+        if relayed or (relayOn and not S.FALLBACK_TO_WEBHOOKS) then return end
         mirrorStartEdit({
             username   = BOT.NAME,
             avatar_url = (BOT.AVATAR ~= "") and BOT.AVATAR or nil,
