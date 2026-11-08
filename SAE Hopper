@@ -3575,7 +3575,7 @@ end
 -- ---------------------------------------------------------------- heartbeat
 -- Tells the relay this account is alive so the website can list it. One tiny
 -- POST every HEARTBEAT_EVERY seconds, in its own thread (never blocks hopping).
-CONFIG.HEARTBEAT_EVERY = 30
+CONFIG.HEARTBEAT_EVERY = 10
 task.spawn(function()
 	local url = (tostring(CONFIG.HUB_URL or ""):gsub("/publish/?$", "")) .. "/beat"
 	local key = CONFIG.hubKey()
