@@ -78,7 +78,7 @@ local CONFIG = {
 	-- them. Each account then only hops to its own share of the servers (by server
 	-- id), so two of your accounts never pick the same one. Empty = single account.
 	-- Example: ACCOUNTS = { "alt_one", "alt_two", "alt_three" },
-	ACCOUNTS = {"gzrfdzpgikrd", "worsthops", "worsthops2"},
+	ACCOUNTS = {"gzrfdzpgikrd", "WorstHops", "WorstHops2", "Worsthops3"},
 
 	-- The ONE webhook every egg alert goes to (your bot cog reads it and posts the embed).
 	RELAY_WEBHOOK = "https://discord.com/api/webhooks/1553898268226887855/fG9vg0e9vhb_dUCi0xWqNzYr5-2w8QwelJ282YrUZWI7KPrjdH3V8gqmG7JX7zqSPHEP",
@@ -1778,6 +1778,7 @@ function CONFIG.publishToHub(a)
 	end
 	task.spawn(function()
 		a.sent = DateTime.now().UnixTimestampMillis   -- <-- the one new line
+		a.bot  = ACCT_TAG   -- which account found it, so the relay can route it to the right client
 		local body = jsonEncode(a)
 		if not body then return end
 		local ok, res = pcall(httpRequest, {
@@ -2830,6 +2831,7 @@ end
 -- with a new server list. This matches the desktop hunter's resilience.
 local function hop()
 	CONFIG.hbStatus = "Hopping"
+	if CONFIG.sendBeat then CONFIG.sendBeat("Hopping") end   -- tell the dashboard before leaving
 	if not CONFIG.HOP then
 		return hopRound()
 	end
@@ -3409,7 +3411,10 @@ local function main()
 
 		local hits    = scan(assets, eggState)
 		local players = #Players:GetPlayers()
-		CONFIG.hbStatus = "Scanning"
+		if CONFIG.hbStatus ~= "Scanning" then
+			CONFIG.hbStatus = "Scanning"
+			if CONFIG.sendBeat then CONFIG.sendBeat("Scanning") end
+		end
 
 		-- Opportunistic post of anything fresh the moment it is seen; the
 		-- branches below only hop once it has actually gone through.
@@ -3575,14 +3580,19 @@ end
 -- ---------------------------------------------------------------- heartbeat
 -- Tells the relay this account is alive so the website can list it. One tiny
 -- POST every HEARTBEAT_EVERY seconds, in its own thread (never blocks hopping).
-CONFIG.HEARTBEAT_EVERY = 10
-task.spawn(function()
+--
+-- Beats are sent when something happens: just before every hop ("Hopping") and when a
+-- server is landed on ("Scanning"). The timer below is only a slow safety net so an
+-- account that is mid-hop, stuck, or holding for the wave (no hops for ~35s) still
+-- shows as online. sendBeat never blocks the caller.
+CONFIG.HEARTBEAT_EVERY = 30
+CONFIG.sendBeat = function(statusOverride)
 	local url = (tostring(CONFIG.HUB_URL or ""):gsub("/publish/?$", "")) .. "/beat"
 	local key = CONFIG.hubKey()
 	if type(httpRequest) ~= "function" or key == "" or key:find("PUT_FINDER", 1, true) then return end
-	while not stopped() do
-		local status = CONFIG.hbStatus or "Starting"
-		if hoppingPaused() then status = "Holding for wave" end
+	local status = statusOverride or CONFIG.hbStatus or "Starting"
+	if hoppingPaused() then status = "Holding for wave" end
+	task.spawn(function()
 		local body = jsonEncode({ name = ACCT_TAG, status = status, eggs = eggsSentThisRun })
 		if body then
 			pcall(httpRequest, {
@@ -3591,6 +3601,11 @@ task.spawn(function()
 				Body = body,
 			})
 		end
+	end)
+end
+task.spawn(function()
+	while not stopped() do
+		CONFIG.sendBeat()
 		task.wait(CONFIG.HEARTBEAT_EVERY)
 	end
 end)
