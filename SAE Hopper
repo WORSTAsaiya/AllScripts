@@ -78,7 +78,7 @@ local CONFIG = {
 	-- them. Each account then only hops to its own share of the servers (by server
 	-- id), so two of your accounts never pick the same one. Empty = single account.
 	-- Example: ACCOUNTS = { "alt_one", "alt_two", "alt_three" },
-	ACCOUNTS = {"SDFSDgsfgfgs", "Pathoftheheavenwolf", "Pathoftheheavenwolfs"},
+	ACCOUNTS = {"worsthops2", "worsthops", "RaiZelerator", "BF_TESTasa", "hasdasfasgdfgsrg"},
 
 	-- The ONE webhook every egg alert goes to (your bot cog reads it and posts the embed).
 	RELAY_WEBHOOK = "https://discord.com/api/webhooks/1553898268226887855/fG9vg0e9vhb_dUCi0xWqNzYr5-2w8QwelJ282YrUZWI7KPrjdH3V8gqmG7JX7zqSPHEP",
