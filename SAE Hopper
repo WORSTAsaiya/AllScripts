@@ -78,7 +78,7 @@ local CONFIG = {
 	-- them. Each account then only hops to its own share of the servers (by server
 	-- id), so two of your accounts never pick the same one. Empty = single account.
 	-- Example: ACCOUNTS = { "alt_one", "alt_two", "alt_three" },
-	ACCOUNTS = {"worsthops2", "worsthops", "RaiZelerator", "BF_TESTasa", "hasdasfasgdfgsrg"},
+	ACCOUNTS = {"SDFSDgsfgfgs", "Pathoftheheavenwolf", "Pathoftheheavenwolfs"},
 
 	-- The ONE webhook every egg alert goes to (your bot cog reads it and posts the embed).
 	RELAY_WEBHOOK = "https://discord.com/api/webhooks/1553898268226887855/fG9vg0e9vhb_dUCi0xWqNzYr5-2w8QwelJ282YrUZWI7KPrjdH3V8gqmG7JX7zqSPHEP",
@@ -2829,6 +2829,7 @@ end
 -- stale or Roblox was busy - wait HOP_ROUND_PAUSE and start a fresh round
 -- with a new server list. This matches the desktop hunter's resilience.
 local function hop()
+	CONFIG.hbStatus = "Hopping"
 	if not CONFIG.HOP then
 		return hopRound()
 	end
@@ -3408,6 +3409,7 @@ local function main()
 
 		local hits    = scan(assets, eggState)
 		local players = #Players:GetPlayers()
+		CONFIG.hbStatus = "Scanning"
 
 		-- Opportunistic post of anything fresh the moment it is seen; the
 		-- branches below only hop once it has actually gone through.
@@ -3570,6 +3572,29 @@ end
 -- hopped, wait and run it again. Nothing is lost by retrying: main()
 -- re-reads the world on entry and the instance lock is only released on a
 -- clean stop.
+-- ---------------------------------------------------------------- heartbeat
+-- Tells the relay this account is alive so the website can list it. One tiny
+-- POST every HEARTBEAT_EVERY seconds, in its own thread (never blocks hopping).
+CONFIG.HEARTBEAT_EVERY = 30
+task.spawn(function()
+	local url = (tostring(CONFIG.HUB_URL or ""):gsub("/publish/?$", "")) .. "/beat"
+	local key = CONFIG.hubKey()
+	if type(httpRequest) ~= "function" or key == "" or key:find("PUT_FINDER", 1, true) then return end
+	while not stopped() do
+		local status = CONFIG.hbStatus or "Starting"
+		if hoppingPaused() then status = "Holding for wave" end
+		local body = jsonEncode({ name = ACCT_TAG, status = status, eggs = eggsSentThisRun })
+		if body then
+			pcall(httpRequest, {
+				Url = url, Method = "POST",
+				Headers = { ["Content-Type"] = "application/json", ["x-key"] = key },
+				Body = body,
+			})
+		end
+		task.wait(CONFIG.HEARTBEAT_EVERY)
+	end
+end)
+
 task.spawn(function()
 	while true do
 		local ok, err = pcall(main)
