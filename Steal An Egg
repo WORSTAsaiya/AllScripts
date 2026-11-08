@@ -309,6 +309,22 @@ local RARE_EGGS = {
     ["zombified night fang"]      = { tier = "Secret",  value = "1.1B/s", image = "https://stealanegg.tools/images/Zombified_Night_Fang_Pet.png" },
     ["zombified pumpkin fiend"]   = { tier = "Secret",  value = "800M/s", image = "https://stealanegg.tools/images/Zombified_Pumpkin_Fiend_Pet.png" },
     ["pumpkin golem"]             = { tier = "Secret",  value = "350M/s", image = "https://stealanegg.tools/images/Pumpkin_Golem_Pet.png" },
+
+    -- ===== NEW EGGS =====
+    -- Divine
+    ["xenorath"]          = { tier = "Divine",  value = "25B/s",  image = "https://stealanegg.tools/images/Xenorath_Pet.png" },
+    ["prismare"]          = { tier = "Divine",  value = "20B/s",  image = "https://stealanegg.tools/images/Prismare_Pet.png" },
+    ["sapphire leviathan"] = { tier = "Divine", value = "15B/s",  image = "https://stealanegg.tools/images/Sapphire_Leviathan_Pet.png" },
+    ["nebuloth kraken"]   = { tier = "Divine",  value = "8.5B/s", image = "https://stealanegg.tools/images/Nebuloth_Kraken_Pet.png" },
+    ["obsidian rex"]      = { tier = "Divine",  image = "https://stealanegg.tools/images/Obsidian_Rex_Pet.png" },   -- value not known yet
+
+    -- Eternal
+    ["abyssjaw"]          = { tier = "Eternal", value = "5B/s",   image = "https://stealanegg.tools/images/Abyssjaw_Pet.png" },
+    ["viridian prowler"]  = { tier = "Eternal", value = "3B/s",   image = "https://stealanegg.tools/images/Viridian_Prowler_Pet.png" },
+
+    -- Secret
+    ["tideler"]           = { tier = "Secret",  value = "2.8B/s", image = "https://stealanegg.tools/images/Tideler_Pet.png" },
+    ["aurora stag"]       = { tier = "Secret",  value = "1.2B/s", image = "https://stealanegg.tools/images/Aurora_Stag_Pet.png" },
 }
 
 
