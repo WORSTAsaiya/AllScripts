@@ -40,6 +40,18 @@
 --//     window left open by an earlier attempt is closed before a new giver / receiver job starts, so a retry no longer collides with it.
 --// 22. A trade now holds up to 40 pets (was 20): MAX_OFFER in this script, MT_CHUNK + the 40 limit in Tapsim.js, and every "20" message / check on the Trade page of worst.html.
 
+--// 31. Craft jobs: when the game answers "The selected pets cannot be crafted." (e.g. the pets are "Frozen: At sea" on an Expedition) exactly those pets are skipped for 1 hour; your other copies of the same pet still craft. The failure line also names the pet.
+--// 30. Auto Rebirth in World 2: same request, but pays with Currencies.RiftCoins and counts Statistics.RiftRebirths (price checked against the server's real price).
+--// 29. Auto Double Jump buys "Rift +1 Jump" (RiftDoubleJump, RiftGems) while you are in World 2, "+1 Jump" in World 1. Auto Chest Coins also claims
+--//     the Prehistoric Island chest (TapChestService.RF.Claim("PrehistoricIsland")) once the island is unlocked.
+--// 28. World 2 islands: bought through TimeRiftIslandService (the World 1 request never worked there = "not bought yet - retrying"); no Travel request is used
+--//     in World 2 any more (it tried to "travel" to the island you were already on) - islands are reached through their portals, and only when you are
+--//     really on another island. Prehistoric's portal is teleported to directly. "Teleport to" now lists World 1 only; new "Teleport to (World 2)" lists Spawn + World 2.
+--// 27. Crafting machines: Ice Age (World 2) Gold / Diamond / Rainbow spots added. The machine of that kind CLOSEST to you is used (known spots +
+--//     machines found in Workspace); if you are on an island without one, the closest island that has one. Unreachable spots are skipped for 2 minutes.
+--//     World 2 / Workspace-found machines use a "drop" teleport: 10 studs above the spot, frozen 2 s while the island loads, then you fall. No island Travel.
+--// 26. Auto Unlock Islands / Teleport to Island: islands after Heaven (Prehistoric, Ice Age, ...) are in World 2, so the script now goes to Heaven,
+--//     walks into Workspace.World2Portal.Doorway and waits for Progression.World = "TimeRift" before buying / traveling to them.
 --// 23. Multi Trade / Auto Trade "flex" give: the site asks for UP TO N pets; the giver offers what is really free (not locked / equipped) and reports how many (lastTrade.gave); the receiver accepts 1..N. Nothing free = stage "nofree" (the hub does not retry it).
 --// 23. Secret Collect: disabled. WS.on is hard-coded false and there is no Trade-tab toggle or callback that can turn it on.
 --// 25. Site Trade / Multi Trade: send requests directly via TradingService TradeRequested Request; receiver accepts only the expected FromUserId via Respond. No GUI send/accept clicks.
@@ -1488,16 +1500,155 @@ local function buildLogic()
 			{ island = "Heaven", cf = CFrame.new(120.258544921875, 15323.8330078125, -1810.82470703125, -0.0870286226272583, 7.841659765972508e-08, -0.9962058067321777, 1.1669022415006225e-09, 1, 7.861331852154763e-08, 0.9962058067321777, 5.67913405191689e-09, -0.0870286226272583) },
 		},
 	}
-	function Config.nearest(spots)
-		local hrp = getHRP()
-		if not hrp then return spots[1].island, spots[1].cf end
-		local best, bestD = spots[1], math.huge
-		for _, sp in ipairs(spots) do
-			local d = (hrp.Position - sp.cf.Position).Magnitude
-			if d < bestD then best, bestD = sp, d end
+
+	-- ===== World 2 machines (island "Ice Age") + live Workspace search + fallback =====
+	-- Everything below lives inside one function and in Config fields (the script is close to Lua's 200-local limit).
+	--  * The Ice Age Gold / Diamond / Rainbow machine spots are added to the lists above (marked drop = true: they are reached with a
+	--    "drop" teleport, see Config.dropTeleport, and need the Ice Age island to be unlocked or you to already be in World 2).
+	--  * Every call looks for the machine of that kind in Workspace (objects named like "... Machine" with gold / diamond / rainbow(shiny) in
+	--    the name). Machines found there that are not within 90 studs of a known spot are added as extra spots (also reached with the drop teleport).
+	--  * The spot CLOSEST to your character is used. If you are on an island that has none, that is simply the closest island that has one.
+	--  * A spot that could not be reached is skipped for 2 minutes, so the next closest one is used instead.
+	Config.bad = {}
+	;(function()
+		local function keyOf(p) return string.format("%d,%d,%d", math.floor(p.X / 5), math.floor(p.Y / 5), math.floor(p.Z / 5)) end
+		table.insert(Config.spots.gold, { island = "Ice Age", needIsland = "Ice Age", drop = true, cf = CFrame.new(1493.99267578125, 1363.6458740234375, 6994.37158203125, -0.08170577138662338, -9.533163591868288e-09, 0.9966564774513245, 8.248391414333867e-10, 1, 9.63276480803188e-09, -0.9966564774513245, 1.6091338261858823e-09, -0.08170577138662338) })
+		table.insert(Config.spots.diamond, { island = "Ice Age", needIsland = "Ice Age", drop = true, cf = CFrame.new(1501.5780029296875, 1381.301513671875, 6781.4287109375, 0.3796512186527252, -1.2291342166292907e-08, 0.9251297116279602, -7.876743701729083e-10, 1, 1.360931722871328e-08, -0.9251297116279602, -5.89549475904505e-09, 0.3796512186527252) })
+		table.insert(Config.spots.rainbow, { island = "Ice Age", needIsland = "Ice Age", drop = true, cf = CFrame.new(1416.4356689453125, 1376.7056884765625, 6893.00830078125, -0.11697980761528015, -6.219611492497279e-08, 0.9931343197822571, -7.307204175077686e-09, 1, 6.176537681312766e-08, -0.9931343197822571, -3.1733123073696134e-11, -0.11697980761528015) })
+		Config.spots.gold.kind, Config.spots.diamond.kind, Config.spots.rainbow.kind = "gold", "diamond", "rainbow"
+
+		local function playerData()
+			local ok, d = pcall(function() return require(RS.Controllers.Core.DataController):GetReplica().Data end)
+			return ok and type(d) == "table" and d or nil
 		end
-		return best.island, best.cf
-	end
+		-- true while you are in World 2 (Progression.World == "TimeRift")
+		function Config.inWorld2()
+			local d = playerData()
+			return d ~= nil and type(d.Progression) == "table" and d.Progression.World == "TimeRift"
+		end
+		-- true if the island is in Progression.UnlockedIslands
+		function Config.hasIsland(name)
+			local d = playerData()
+			local u = d and type(d.Progression) == "table" and d.Progression.UnlockedIslands
+			if type(u) ~= "table" then return false end
+			for _, n in ipairs({ name, name .. " Island" }) do
+				if u[n] then return true end
+			end
+			for _, v in pairs(u) do
+				if v == name or v == name .. " Island" then return true end
+			end
+			return false
+		end
+		-- a spot that needs an island is only used when you are in World 2, own that island, or are already close to it
+		local function usable(sp, hrp)
+			if not sp.needIsland then return true end
+			if Config.inWorld2() or Config.hasIsland(sp.needIsland) then return true end
+			return hrp ~= nil and (hrp.Position - sp.cf.Position).Magnitude < 1500
+		end
+
+		-- ---- live search in Workspace (cached for 45 s) ----
+		local KEYS = { gold = { "goldmachine", "goldenmachine" }, diamond = { "diamondmachine" }, rainbow = { "rainbowmachine", "shinymachine" } }
+		local cache, printed = {}, {}
+		local function scan(kind)
+			local c = cache[kind]
+			if c and os.clock() - c.t < 45 then return c.list end
+			local keys, list, n = KEYS[kind], {}, 0
+			if not keys then return list end
+			local char = lp.Character
+			for _, d in ipairs(workspace:GetDescendants()) do
+				n = n + 1
+				if n % 4000 == 0 then task.wait() end
+				local nm = d.Name
+				if #nm <= 40 and nm:lower():find("machine", 1, true) and (d:IsA("Model") or d:IsA("BasePart")) and not (char and d:IsDescendantOf(char)) then
+					local norm = nm:lower():gsub("[^%w]", "")
+					for _, k in ipairs(keys) do
+						if norm:find(k, 1, true) then
+							local ok, pos = pcall(function() if d:IsA("Model") then return d:GetPivot().Position end return d.Position end)
+							if ok and typeof(pos) == "Vector3" then
+								local dup = false
+								for _, e in ipairs(list) do
+									if (e.pos - pos).Magnitude < 25 then dup = true break end
+								end
+								if not dup then list[#list + 1] = { pos = pos, name = d:GetFullName() } end
+							end
+							break
+						end
+					end
+				end
+			end
+			cache[kind] = { t = os.clock(), list = list }
+			return list
+		end
+		-- machines found in Workspace that no known spot covers -> extra spots
+		local function liveSpots(kind, spots, hrp)
+			local out = {}
+			for _, e in ipairs(scan(kind)) do
+				local covered = false
+				for _, sp in ipairs(spots) do
+					if (sp.cf.Position - e.pos).Magnitude < 90 then covered = true break end
+				end
+				if not covered then
+					local flat = Vector3.new(hrp.Position.X - e.pos.X, 0, hrp.Position.Z - e.pos.Z)
+					local toward = flat.Magnitude > 1 and flat.Unit or Vector3.new(0, 0, 1)
+					local stand = e.pos + toward * 8 + Vector3.new(0, 3, 0)
+					out[#out + 1] = { island = "Workspace: " .. e.name, cf = CFrame.lookAt(stand, e.pos), drop = true, live = true, key = keyOf(e.pos) }
+					if not printed[e.name] then
+						printed[e.name] = true
+						print(string.format("[Machines] %s machine found in Workspace and used as an extra spot: %s", kind, e.name))
+					end
+				end
+			end
+			return out
+		end
+
+		-- Picks the machine spot closest to your character. Returns island, CFrame (same as before).
+		function Config.nearest(spots)
+			local hrp = getHRP()
+			local now = os.clock()
+			local cands = {}
+			for _, sp in ipairs(spots) do
+				sp.key = sp.key or keyOf(sp.cf.Position)
+				if usable(sp, hrp) and not (Config.bad[sp.key] and Config.bad[sp.key] > now) then cands[#cands + 1] = sp end
+			end
+			if hrp and spots.kind then
+				local okL, live = pcall(liveSpots, spots.kind, spots, hrp)
+				if okL then
+					for _, sp in ipairs(live) do
+						if not (Config.bad[sp.key] and Config.bad[sp.key] > now) then cands[#cands + 1] = sp end
+					end
+				end
+			end
+			if #cands == 0 then cands = spots end   -- nothing usable: the old behaviour (first spot)
+			local best, bestD = cands[1], math.huge
+			if hrp then
+				for _, sp in ipairs(cands) do
+					local d = (hrp.Position - sp.cf.Position).Magnitude
+					if d < bestD then best, bestD = sp, d end
+				end
+			end
+			Config.lastPick = best
+			return best.island, best.cf
+		end
+		-- true if this stand spot has to be reached with the drop teleport
+		function Config.isDropSpot(cf)
+			local p = Config.lastPick
+			if p and p.drop and (p.cf.Position - cf.Position).Magnitude < 2 then return true end
+			for _, list in pairs(Config.spots) do
+				for _, sp in ipairs(list) do
+					if sp.drop and (sp.cf.Position - cf.Position).Magnitude < 2 then return true end
+				end
+			end
+			return false
+		end
+		-- the spot that was just used could not be reached: skip it for 2 minutes (the next closest spot is used meanwhile)
+		function Config.markBad(cf)
+			local p = Config.lastPick
+			if p and p.key and (p.cf.Position - cf.Position).Magnitude < 2 then
+				Config.bad[p.key] = os.clock() + 120
+				warn("[Machines] could not reach the machine spot at " .. tostring(p.island) .. " - using the next closest one for 2 minutes")
+			end
+		end
+	end)()
 
 	-- true only while the inventory window is closed and no scan is running (assigned further down, once invIsOn exists)
 	local inventoryClosed = function() return true end
@@ -2702,8 +2853,52 @@ local function buildLogic()
 		return isNear(cf, 30)
 	end
 
+	-- "Drop" teleport (World 2 machines and machines found in Workspace): no island Travel. Teleports 10 studs ABOVE the spot, freezes the avatar for
+	-- 2 seconds (asks the game to stream the area in meanwhile), waits until there is ground under you (at most 3 more seconds), then lets you fall.
+	Config.dropTeleport = function(stillActive, cf, statusFn)
+		for attempt = 1, 3 do
+			if not stillActive() then return false end
+			local hrp = getHRP()
+			if hrp then
+				statusFn(attempt == 1 and "Teleporting above the machine (letting the island load)..." or ("Retrying machine teleport (" .. attempt .. "/3)..."))
+				local high = cf + Vector3.new(0, 10, 0)
+				pcall(function()
+					hrp.CFrame = high
+					hrp.AssemblyLinearVelocity = Vector3.zero
+					hrp.Anchored = true   -- frozen while the island loads
+				end)
+				task.spawn(function() pcall(function() lp:RequestStreamAroundAsync(high.Position, 2) end) end)
+				sleepFor(stillActive, 2)
+				local params = RaycastParams.new()
+				params.FilterType = Enum.RaycastFilterType.Exclude
+				params.FilterDescendantsInstances = { lp.Character }
+				local g0 = os.clock()
+				while stillActive() and os.clock() - g0 < 3 do
+					local h2 = getHRP()
+					if not h2 or workspace:Raycast(h2.Position, Vector3.new(0, -80, 0), params) then break end
+					task.wait(0.2)
+				end
+				pcall(function()   -- always let go, even when the feature was switched off meanwhile
+					local h3 = getHRP()
+					if h3 then
+						h3.Anchored = false
+						h3.AssemblyLinearVelocity = Vector3.zero
+					end
+				end)
+				if not stillActive() then return false end
+				sleepFor(stillActive, 1.5)   -- fall onto the machine area
+				if isNear(cf, 30) then return true end
+			else
+				sleepFor(stillActive, 0.5)
+			end
+		end
+		Config.markBad(cf)
+		return isNear(cf, 30)
+	end
+
 	-- Direct machine teleport for crafting jobs only; island travel is unnecessary.
 	local function directCraftTeleport(stillActive, cf, statusFn)
+		if Config.isDropSpot(cf) then return Config.dropTeleport(stillActive, cf, statusFn) end
 		for attempt = 1, 3 do
 			if not stillActive() then return false end
 			statusFn(attempt == 1 and "Teleporting directly to crafting machine..." or ("Retrying machine teleport (" .. attempt .. "/3)..."))
@@ -2711,6 +2906,7 @@ local function buildLogic()
 			sleepFor(stillActive, 0.5)
 			if isNear(cf, 30) then return true end
 		end
+		if not isNear(cf, 30) then Config.markBad(cf) end   -- unreachable: the next closest machine is used next time
 		return isNear(cf, 30)
 	end
 
@@ -4524,7 +4720,7 @@ local function buildLogic()
 				if tierIs(g.rawTier, cfg.fromTier) and (counted and job.want[key] ~= nil or (not counted and (job.selKey == nil or key == job.selKey))) then
 					local ids = {}
 					for _, c in ipairs(g.ids) do
-						if not spent[c.id] then ids[#ids + 1] = c end
+						if not spent[c.id] and not (job.refusedIds and (job.refusedIds[c.id] or 0) > os.clock()) then ids[#ids + 1] = c end
 					end
 					if #ids >= job.need then
 						sortCards(ids)
@@ -4584,8 +4780,28 @@ local function buildLogic()
 						dismissResult()
 					else
 						fails = fails + 1
-						warn(string.format("[Pets] %s %s (%d/%d)", cfg.name,
-							res and "was not successful" or "got no reply", fails, MAX_FAILS))
+						-- which pet it was (name, tier, the ids that were sent) and what the server answered
+						local answer = ""
+						if type(res) == "table" then
+							local parts = {}
+							for k, v in pairs(res) do
+								if type(v) ~= "table" and k ~= "Success" then parts[#parts + 1] = tostring(k) .. "=" .. tostring(v):sub(1, 60) end
+							end
+							table.sort(parts)
+							answer = " | server: " .. (#parts > 0 and table.concat(parts, ", ") or "(no details)")
+						end
+						warn(string.format("[Pets] %s %s (%d/%d) | pet: %s (%s) x%d | machine: %s/%s | ids: %s%s", cfg.name,
+							res and "was not successful" or "got no reply", fails, MAX_FAILS,
+							tostring(p.g.name), tostring(p.g.tier), #pick, tostring(cfg.machine), tostring(cfg.action),
+							table.concat(pick, ","), answer))
+						-- the game says THESE pets can never be crafted here (e.g. event pets): skip this pet for 1 hour instead of retrying it forever
+						if type(res) == "table" and tostring(res.Reason or ""):lower():find("cannot be crafted", 1, true) then
+							job.refusedIds = job.refusedIds or {}
+							for _, pid in ipairs(pick) do job.refusedIds[pid] = os.clock() + 3600 end
+							warn(string.format("[Pets] %s: the game refuses these %d %s (%s) (e.g. away on an Expedition) - skipping just them for 1 hour, your other copies carry on", cfg.name, #pick, tostring(p.g.name), tostring(p.g.tier)))
+							dismissResult()
+							break
+						end
 						if cfg.queue then
 							if queueCount() >= RAINBOW_CAPACITY then
 								-- all pods are in use: wait for the first running craft to finish
@@ -8239,6 +8455,16 @@ local function buildLogic()
 		local RECHECK_EVERY = 300 -- seconds to idle once everything is unlocked, then re-check for new islands (stays enabled meanwhile)
 		local FAR_Y       = 150   -- if you are more than this many studs above/below a portal, you are on the wrong island -> Travel to its island first
 		local svc = RS.RemoteServices.IslandService.RE
+		-- World 2 islands are bought through their own service (TimeRiftIslandService.RE.IslandUnlockRequested / IslandUnlockResult / IslandPortalEncountered,
+		-- same request format, island names like "Prehistoric Island"). World 2 has no Travel request: you reach an island by walking into its portal.
+		local trSvc = (function()
+			local s = RS.RemoteServices:FindFirstChild("TimeRiftIslandService")
+			return s and s:FindFirstChild("RE")
+		end)()
+		-- fixed portal spots in World 2 (key = island name without "Island", lower case, no spaces). Prehistoric: the portal in the World 2 hub.
+		local W2_PORTALS = {
+			prehistoric = CFrame.new(-44.44121551513672, 521.468994140625, 6763.56787109375, 0.9999567866325378, -1.25008829954254e-08, -0.009296965785324574, 1.3807414767086357e-08, 1, 1.4046892715668946e-07, 0.009296965785324574, -1.405912257723685e-07, 0.9999567866325378),
+		}
 
 		-- each step: tween to the island's portal -> buy the island -> Travel to it. Order = the order they get unlocked.
 		-- name = island name used by Travel (same names as the Hatch eggs use).
@@ -8284,6 +8510,21 @@ local function buildLogic()
 				portalSeen = { name = info.Island, price = info.Price, t = os.clock() }
 			end
 		end)
+		if trSvc then   -- the same two events from the World 2 service
+			local rr, rp = trSvc:FindFirstChild("IslandUnlockResult"), trSvc:FindFirstChild("IslandPortalEncountered")
+			if rr then
+				connect(rr.OnClientEvent, function(res)
+					if type(res) == "table" and res.Island then results[res.Island] = { r = res, t = os.clock() } end
+				end)
+			end
+			if rp then
+				connect(rp.OnClientEvent, function(info)
+					if type(info) == "table" and info.Action == "Purchase" and info.Island then
+						portalSeen = { name = info.Island, price = info.Price, t = os.clock() }
+					end
+				end)
+			end
+		end
 
 		local toggle = {
 			-- TOGGLE "Auto Unlock Islands": Goes to each island's portal, buys it, travels there and continues to the next one.
@@ -8302,6 +8543,17 @@ local function buildLogic()
 		local goEntry = {
 			type = "button", name = "Teleport to Island", icon = "🚀", noSave = true,
 			desc = "Travels to the island selected above (turn Auto Hatch off first, it pulls you back to the egg).",
+		}
+		-- World 2: its own dropdown (Spawn + every island after Heaven) and button. Filled by refreshWorldOptions() below.
+		local TRAVEL_OPTIONS2 = { "Spawn" }
+		local pick2Entry = {
+			type = "dropdown", name = "Teleport to (World 2)", icon = "🧭", width = 240,
+			desc = "World 2 islands (after Heaven). Spawn = where you arrive in World 2. Goes through the World 2 portal first if you are not there yet.",
+			options = TRAVEL_OPTIONS2, default = "Spawn",
+		}
+		local go2Entry = {
+			type = "button", name = "Teleport to World 2 Island", icon = "🚀", noSave = true,
+			desc = "Goes to the World 2 island selected above (walks through its portal; the island must be unlocked).",
 		}
 
 		-- Island purchase confirmation ("Are you sure you want to unlock the "X" island?"): it opens when you touch a portal and has a
@@ -8498,9 +8750,12 @@ local function buildLogic()
 			return nil
 		end
 		-- Returns the CFrame to teleport to for a travel step.
+		local findPortalWide = function() return nil end   -- replaced below (World 2 portals are not in Workspace.NextPortals)
 		local function getPortalCF(step)
 			if step.customPortalCF then return step.customPortalCF end
-			return portalCFrame(findPortal(step))
+			local w = W2_PORTALS[normName(step.name)]
+			if w then return w end
+			return portalCFrame(findPortal(step)) or portalCFrame(findPortalWide(step))
 		end
 		-- waits a few seconds for the portal to exist (it may still be streaming in right after a Travel)
 		local function waitPortalCF(step, id, sec)
@@ -8564,6 +8819,183 @@ local function buildLogic()
 			return STEPS[i - 1].name
 		end
 
+		-- ===== World 2 (TimeRift) =====
+		-- Every island AFTER Heaven (Prehistoric, Ice Age, ...) lives in World 2, so before buying one the script first goes through the
+		-- World 2 portal (Workspace.World2Portal.Doorway, on Heaven). "Which islands are World 2" = every step after Heaven in STEPS,
+		-- plus any name in WORLD2_ISLANDS below (add a name there if an island is ever put in the wrong world).
+		local WORLD2_NAME   = "TimeRift"   -- value of Progression.World while you are in World 2 (the game's own name for it)
+		local WORLD2_HOST   = "Heaven"     -- the island that has the World 2 portal; also the last World 1 island
+		local WORLD2_TRIES  = 4            -- how many times to try entering the portal
+		local WORLD2_WAIT   = 10           -- seconds to wait for the world to change after touching the portal
+		local WORLD2_ISLANDS = { "Prehistoric", "Ice Age" }   -- always treated as World 2 (names compared like normName)
+
+		-- True while this run is current (id == nil is the manual Teleport button: only needs the script alive).
+		local function live(id) if id == nil then return alive end return active(id) end
+		-- Waits `sec` seconds while the run is current.
+		local function nap(id, sec)
+			local t0 = os.clock()
+			while live(id) and os.clock() - t0 < sec do task.wait(0.1) end
+		end
+		-- The world you are in right now, from the game's own data ("TimeRift" = World 2).
+		local function currentWorld()
+			local ok, w = pcall(function()
+				return require(RS.Controllers.Core.DataController):GetReplica().Data.Progression.World
+			end)
+			return ok and w or nil
+		end
+		local function inWorld2() return currentWorld() == WORLD2_NAME end
+		-- First step that belongs to World 2: the step after Heaven (after Volcano if Heaven is not in the list).
+		local function world2Start()
+			local h, v
+			for i, st in ipairs(STEPS) do
+				local n = normName(st.name)
+				if n == normName(WORLD2_HOST) then h = i end
+				if n == "volcano" then v = i end
+			end
+			local base = h or v
+			return base and (base + 1) or nil
+		end
+		-- True if an island name belongs to World 2.
+		local function isW2Name(name)
+			local want = normName(name)
+			for _, n in ipairs(WORLD2_ISLANDS) do
+				if normName(n) == want then return true end
+			end
+			local s = world2Start()
+			if not s then return false end
+			for i, st in ipairs(STEPS) do
+				if normName(st.name) == want then return i >= s end
+			end
+			return false
+		end
+		-- True if step i (its island) is in World 2.
+		local function isW2Step(i) return STEPS[i] ~= nil and isW2Name(STEPS[i].name) end
+
+		-- Makes sure you are in World 2: Travel to Heaven, walk into Workspace.World2Portal.Doorway, wait until Progression.World changes.
+		-- Returns true once you are in World 2 (also when you already were).
+		local function ensureWorld2(id)
+			if inWorld2() then return true end
+			for n = 1, WORLD2_TRIES do
+				if not live(id) then return false end
+				local pf = workspace:FindFirstChild("World2Portal")
+				local door = pf and (pf:FindFirstChild("Doorway", true) or pf) or nil
+				if not door then
+					-- the portal is not loaded: go to Heaven (World 1) first and wait for it to appear
+					status(string.format("World 2: traveling to %s for the portal (try %d)...", WORLD2_HOST, n))
+					travelTo(WORLD2_HOST, id)
+					nap(id, SETTLE)
+					local t0 = os.clock()
+					while live(id) and not door and os.clock() - t0 < 8 do
+						task.wait(0.25)
+						pf = workspace:FindFirstChild("World2Portal")
+						door = pf and (pf:FindFirstChild("Doorway", true) or pf) or nil
+					end
+				end
+				local cf = door and portalCFrame(door)
+				if cf then
+					status(string.format("World 2: walking into the portal (try %d)...", n))
+					pcall(tweenTo, cf, id)
+					pcall(teleportTo, cf)   -- make sure the doorway is really touched
+					local t0 = os.clock()
+					while live(id) and not inWorld2() and os.clock() - t0 < WORLD2_WAIT do task.wait(0.25) end
+					if inWorld2() then
+						status("World 2 reached - waiting for it to load...")
+						nap(id, SETTLE + 1.5)
+						local hs = getHRP()
+						if hs then env.WORST_W2_SPAWN = hs.CFrame end   -- the arrival spot = World 2 Spawn
+						return live(id)
+					end
+				else
+					nap(id, TRAVEL_RETRY_WAIT)
+				end
+			end
+			status("Could not get into World 2 (portal not found or not touched) - check the console")
+			warn("[Islands] could not enter World 2 through Workspace.World2Portal.Doorway")
+			return false
+		end
+
+		-- Goes to the island that holds the portal of step i. World 1: Travel to the previous island (as before).
+		-- World 2: enter World 2 first; the first World 2 island's portal is where World 2 starts (no Travel), later ones Travel to the previous World 2 island.
+		-- World 2 portals are moved to with a plain teleport (no tween); everything else keeps the tween
+		local function moveToPortal(step, cf, id)
+			if isW2Name(step.name) then
+				teleportTo(cf)
+				nap(id, 0.5)
+				return live(id)
+			end
+			return tweenTo(cf, id)
+		end
+		-- Stands in a World 2 portal and waits until the game has moved you (> 150 studs). True if it did.
+		local goThroughPortal
+		goThroughPortal = function(step, id)
+			local cf = getPortalCF(step)
+			local t0 = os.clock()
+			while not cf and live(id) and os.clock() - t0 < 5 do task.wait(0.25) cf = getPortalCF(step) end
+			if not cf then return false end
+			status(step.name .. ": walking into its portal...")
+			moveToPortal(step, cf, id)
+			local h = getHRP()
+			local before = h and h.Position
+			t0 = os.clock()
+			while live(id) and before and os.clock() - t0 < 8 do
+				local h2 = getHRP()
+				if h2 and (h2.Position - before).Magnitude > 150 then
+					nap(id, SETTLE + 1)
+					return live(id)
+				end
+				task.wait(0.25)
+			end
+			return false
+		end
+		-- finds the portal of a World 2 island in Workspace (any Model / Part named like the island whose path contains "portal")
+		do
+			local wideCache = {}
+			findPortalWide = function(step)
+				if not isW2Name(step.name) then return nil end
+				local c = wideCache[step.name]
+				if c and os.clock() - c.t < (c.inst and 60 or 5) then return c.inst end
+				local want, found, n = normName(step.name), nil, 0
+				for _, d in ipairs(workspace:GetDescendants()) do
+					n = n + 1
+					if n % 4000 == 0 then task.wait() end
+					if #d.Name <= 40 and (d:IsA("Model") or d:IsA("BasePart")) and normName(d.Name) == want and d:GetFullName():lower():find("portal", 1, true) then
+						found = d
+						break
+					end
+				end
+				wideCache[step.name] = { t = os.clock(), inst = found }
+				return found
+			end
+		end
+		-- World 1 dropdown = islands up to Heaven; World 2 dropdown = Spawn + the islands after Heaven (the lists are edited in place)
+		local function refreshWorldOptions()
+			for k in pairs(TRAVEL_OPTIONS) do TRAVEL_OPTIONS[k] = nil end
+			for k in pairs(TRAVEL_OPTIONS2) do TRAVEL_OPTIONS2[k] = nil end
+			TRAVEL_OPTIONS2[1] = "Spawn"
+			for _, n in ipairs(TRAVEL_LIST) do
+				if isW2Name(n) then
+					if not table.find(TRAVEL_OPTIONS2, n) then TRAVEL_OPTIONS2[#TRAVEL_OPTIONS2 + 1] = n end
+				else
+					TRAVEL_OPTIONS[#TRAVEL_OPTIONS + 1] = islandLabel(n)
+				end
+			end
+			if pickEntry._refresh then pickEntry._refresh() end
+			if pick2Entry._refresh then pick2Entry._refresh() end
+		end
+		refreshWorldOptions()
+
+		-- `far` = you are known to be on the wrong island (the portal is far above / below you).
+		-- World 2 has no Travel request: the first World 2 island's portal is in the hub (arrive there when you enter World 2); later portals sit on the
+		-- previous World 2 island, which you reach by walking into ITS portal - and only when `far`, so being on the island already costs nothing.
+		local function goHost(i, id, far)
+			if isW2Step(i) then
+				if not inWorld2() and not ensureWorld2(id) then return false end
+				if far and i > 1 and isW2Step(i - 1) then return goThroughPortal(STEPS[i - 1], id) end
+				return true
+			end
+			return travelRetry(hostIsland(i), id)
+		end
+
 		-- reads Progression.UnlockedIslands from the game's own data
 		local function owned(name)
 			local ok, res = pcall(function()
@@ -8588,14 +9020,16 @@ local function buildLogic()
 			for _, n in ipairs({ step.name .. " Island", step.name }) do
 				if not n:find(" Island Island$") and not table.find(names, n) then names[#names + 1] = n end
 			end
+			local w2 = isW2Name(step.name) and trSvc and trSvc:FindFirstChild("IslandUnlockRequested")
 			for _, nm in ipairs(names) do
 				results[nm] = nil
-				pcall(function() svc.IslandUnlockRequested:FireServer({ Action = "Purchase", Island = nm }) end)
+				pcall(function() (w2 or svc.IslandUnlockRequested):FireServer({ Action = "Purchase", Island = nm }) end)
 				local t0 = os.clock()
 				while active(id) and not results[nm] and os.clock() - t0 < BUY_WAIT do task.wait(0.1) end
 				local r = results[nm] and results[nm].r
 				if r and (r.Success or r.Unlocked) then
 					env.WORST_ISLAND_BUYS = (tonumber(env.WORST_ISLAND_BUYS) or 0) + 1   -- Auto Skill Points wakes up on this (new skill trees open)
+					if w2 then pcall(function() w2:FireServer({ Action = "Recheck", Island = nm }) end) end   -- the game's own client does this right after a World 2 purchase
 					return true
 				end
 			end
@@ -8634,8 +9068,7 @@ local function buildLogic()
 					STEPS[#STEPS + 1] = { name = c.Name, auto = true }
 					TRAVEL_LIST[#TRAVEL_LIST + 1] = c.Name
 					newIsland[c.Name] = true
-					TRAVEL_OPTIONS[#TRAVEL_OPTIONS + 1] = islandLabel(c.Name)
-					if pickEntry._refresh then pickEntry._refresh() end
+					refreshWorldOptions()
 					print("[WORST Hub] new island portal found in Workspace.NextPortals and added: " .. c.Name)
 				end
 			end
@@ -8654,8 +9087,12 @@ local function buildLogic()
 				-- only do anything when there is something left to unlock; otherwise stay idle (no travelling, no pausing Auto Hatch)
 				if start <= #STEPS then
 					pauseHatch()
-					if start > 1 and active(id) then
-						travelRetry(STEPS[start - 1].name, id)
+					if active(id) then
+						if isW2Step(start) then
+							goHost(start, id, false)   -- World 2: just make sure you are in World 2 (no Travel; being on the island already is fine)
+						elseif start > 1 then
+							travelRetry(STEPS[start - 1].name, id)
+						end
 					end
 
 					for i = start, #STEPS do
@@ -8663,6 +9100,8 @@ local function buildLogic()
 						local tries = 0
 						local hostTried = false
 						while active(id) and not owned(step.name) do
+							-- islands after Heaven are in World 2: if you are not there (first time, or the server moved you), go through the portal
+							if isW2Step(i) and not inWorld2() then ensureWorld2(id) end
 							-- Sky Island override: travel to Spawn before going to its fixed purchase spot.
 							-- Do this once per unlock attempt cycle, not before every failed purchase.
 							if step.customPortalCF and not hostTried then
@@ -8680,21 +9119,21 @@ local function buildLogic()
 							if portalCF then
 								if not step.customPortalCF and hrp0 and math.abs(hrp0.Position.Y - portalCF.Position.Y) > FAR_Y then
 									-- not on the island that has this portal: Travel there first, then walk to the portal
-									travelRetry(hostIsland(i), id)
+									goHost(i, id, true)
 									portalCF = waitPortalCF(step, id, 6) or portalCF
 								end
 							else
 								-- portal not loaded / not found: go to the previous island (once), wait for it to show up in Workspace.NextPortals
 								if not hostTried then
 									hostTried = true
-									travelRetry(hostIsland(i), id)
+									goHost(i, id, false)
 								end
 								portalCF = waitPortalCF(step, id, 6)
 							end
 							dismissUntil = os.clock() + 20
 							status(string.format("%s: moving to the portal (try %d)...", step.name, tries + 1))
 							-- if the portal still cannot be found, skip the tween and just ask the server to buy it
-							if (not portalCF or tweenTo(portalCF, id)) and active(id) then
+							if (not portalCF or moveToPortal(step, portalCF, id)) and active(id) then
 								status(string.format("%s: buying (try %d)...", step.name, tries + 1))
 								tries = tries + 1
 								-- touching the portal opens the purchase popup: its green price button is pressed by the watcher above.
@@ -8732,7 +9171,11 @@ local function buildLogic()
 						if not active(id) then break end
 						status("Bought " .. step.name .. " - waiting before traveling there...")
 						sleep(id, AFTER_BUY_WAIT)
-						travelRetry(step.name, id)
+						if isW2Step(i) then
+							goThroughPortal(step, id)   -- World 2: walk into the island's portal (there is no Travel request)
+						else
+							travelRetry(step.name, id)
+						end
 						if i < #STEPS and active(id) then
 							local t0 = os.clock()
 							while active(id) and os.clock() - t0 < ISLAND_DELAY do
@@ -8788,7 +9231,36 @@ local function buildLogic()
 			if not travelTo(selected) then error("Travel to " .. tostring(selected) .. " failed") end
 		end
 
-		return { toggle = toggle, pick = pickEntry, go = goEntry }
+		-- World 2 button: Spawn = the arrival spot of the portal; an island = walk through its portal (the island must be unlocked)
+		local selected2 = "Spawn"
+		pick2Entry.callback = function(option) selected2 = tostring(option) end
+		go2Entry.run = function()
+			if not inWorld2() and not ensureWorld2(nil) then error("Could not get into World 2") end
+			if selected2 == "Spawn" then
+				local cf = env.WORST_W2_SPAWN
+				if typeof(cf) == "CFrame" then teleportTo(cf) return end
+				-- the arrival spot is not known yet (you were already in World 2 when the script started): ask for Spawn, re-enter if that took you out
+				travelTo("Spawn")
+				task.wait(SETTLE + 2)
+				if not inWorld2() and not ensureWorld2(nil) then error("Could not get back into World 2") end
+				return
+			end
+			local idx
+			for i2, st in ipairs(STEPS) do
+				if normName(st.name) == normName(selected2) then idx = i2 break end
+			end
+			if not idx then error("Unknown World 2 island: " .. tostring(selected2)) end
+			if not owned(STEPS[idx].name) then error(selected2 .. " is not unlocked yet") end
+			-- the island's own portal is the way in; when it is not loaded, go through the earlier World 2 portals first
+			local first = idx
+			while first > 1 and isW2Step(first - 1) do first = first - 1 end
+			if getPortalCF(STEPS[idx]) and goThroughPortal(STEPS[idx], nil) then return end
+			for j = first, idx do
+				if owned(STEPS[j].name) then goThroughPortal(STEPS[j], nil) end
+			end
+		end
+
+		return { toggle = toggle, pick = pickEntry, go = goEntry, pick2 = pick2Entry, go2 = go2Entry }
 	end)()
 
 	-------------------------------------------------------------------------- EVENTS > HALLOWEEN
@@ -12013,6 +12485,10 @@ local AutoRebirth = (function()
 	local BEST        = "Auto (most expensive you can afford)"
 	local MIN_DELAY   = 5     -- minimum seconds between rebirth requests
 	local state = { on = false, index = 1, best = true, delay = MIN_DELAY, sent = 0, loopId = 0 }
+	-- World 2 (Progression.World == "TimeRift") uses the SAME request (RebirthService.RE.RebirthRequested {Index = n}) but its own numbers:
+	-- coins = Currencies.RiftCoins, rebirth counter = Statistics.RiftRebirths (rewards RiftGems). `blocked` is cleared when you change world;
+	-- w2Scale corrects the price if World 2 uses a different price than the World 1 formula (learned from the server's RebirthResult.Price).
+	local blocked, lastW2, w2Scale, scaleWarned = {}, nil, 1, false
 
 	-- Finds the server remote used by Auto Rebirth.
 	local function getRemote()
@@ -12195,8 +12671,14 @@ local AutoRebirth = (function()
 		local cur = type(data.Currencies) == "table" and data.Currencies or {}
 		local stat = type(data.Statistics) == "table" and data.Statistics or {}
 		local upg = type(data.Upgrades) == "table" and data.Upgrades or {}
-		local coins = tonumber(cur.Coins)
-		local rebirths = tonumber(stat.Rebirths)
+		local w2 = (Config.inWorld2 and Config.inWorld2()) or false
+		if w2 ~= lastW2 then
+			lastW2 = w2
+			for k in pairs(blocked) do blocked[k] = nil end   -- refusals from the other world do not apply here
+		end
+		local coins = tonumber(w2 and cur.RiftCoins or cur.Coins)
+		local rebirths = tonumber(w2 and stat.RiftRebirths or stat.Rebirths)
+		if w2 then coins, rebirths = coins or 0, rebirths or 0 end
 		if not rebirths then
 			local ls = game:GetService("Players").LocalPlayer:FindFirstChild("leaderstats")
 			local v = ls and ls:FindFirstChild("Rebirths")
@@ -12210,10 +12692,11 @@ local AutoRebirth = (function()
 	-- coin price of one index at your current rebirth count (the price grows with every rebirth you have)
 	local function priceOf(idx, rebirths)
 		local ok, p = pcall(rcfg.GetPrice, amountOf(idx), rebirths)
-		return ok and type(p) == "number" and p or nil
+		if not (ok and type(p) == "number") then return nil end
+		return lastW2 and p * w2Scale or p
 	end
 	-- the index to fire right now, or nil if you can't afford it yet: Auto = the most expensive unlocked index you can afford, fixed = the chosen one
-	local blocked = {}   -- index -> os.clock() until which Auto skips it (the server refused it)
+	-- blocked: index -> os.clock() until which Auto skips it (the server refused it); declared at the top
 	local function pick(coins, rebirths, unlocked)
 		if state.best then
 			for i = unlocked, 1, -1 do
@@ -12261,7 +12744,7 @@ local AutoRebirth = (function()
 						local idx, price = pick(coins, rebirths, unlocked)
 						if not idx then
 							local need = state.best and 1 or math.min(state.index, unlocked)
-							status(string.format("Waiting for coins | need %s for +%s | have %s", short(priceOf(need, rebirths) or 0), short(amountOf(need)), short(coins)))
+							status(string.format("%sWaiting for %s | need %s for +%s | have %s", lastW2 and "[World 2] " or "", lastW2 and "Rift coins" or "coins", short(priceOf(need, rebirths) or 0), short(amountOf(need)), short(coins)))
 							nap(0.5)
 						else
 							if state.before then pcall(state.before) end   -- Kaitun: equip the Richest pets just before the rebirth
@@ -12282,7 +12765,18 @@ local AutoRebirth = (function()
 										nap(state.best and 0.5 or 2)
 									else
 										local got = type(lastResult) == "table" and tonumber(lastResult.Amount) or amountOf(idx)
-										status(string.format("Rebirthed +%s for %s coins | %s | requests sent: %d", short(got), short(price or 0), state.best and "Auto" or "fixed", state.sent))
+										-- World 2: compare the real price the server charged with the formula and correct for any difference
+										if lastW2 and type(lastResult) == "table" and tonumber(lastResult.Price) and price and price > 0 and w2Scale > 0 then
+											local newScale = tonumber(lastResult.Price) / (price / w2Scale)
+											if newScale > 0 and newScale < math.huge then
+												if not scaleWarned and math.abs(newScale - 1) > 0.02 then
+													scaleWarned = true
+													warn(string.format("[Rebirth] World 2 price differs from the World 1 formula (x%.4g); using the server's real price from now on", newScale))
+												end
+												w2Scale = newScale
+											end
+										end
+										status(string.format("%sRebirthed +%s for %s %s | %s | requests sent: %d", lastW2 and "[World 2] " or "", short(got), short(price or 0), lastW2 and "Rift coins" or "coins", state.best and "Auto" or "fixed", state.sent))
 									end
 								else
 									warn("[Rebirth] fire failed: " .. tostring(err))
@@ -16972,13 +17466,23 @@ local DoubleJump = (function()
         machineCache = bestObj
         return best
     end
+    -- World 1 buys "+1 Jump" (PhysicalUpgrades.DoubleJump, paid with Gems); World 2 buys "Rift +1 Jump" (PhysicalUpgrades.RiftDoubleJump, paid with RiftGems).
+    -- `mode` is picked from Progression.World at the start of every round of the main loop.
+    local MODES = {
+        w1 = { upgrade = "+1 Jump",      key = "DoubleJump",     gems = "Gems",     label = "Jump" },
+        w2 = { upgrade = "Rift +1 Jump", key = "RiftDoubleJump", gems = "RiftGems", label = "Rift Jump" },
+    }
+    local mode = MODES.w1
+    local function curMode()
+        return (Config.inWorld2 and Config.inWorld2()) and MODES.w2 or MODES.w1
+    end
     local function jumpLevel()
         local d = getData()
-        return d and (tonumber(d.PhysicalUpgrades.DoubleJump) or 0) or 0
+        return d and (tonumber(d.PhysicalUpgrades[mode.key]) or 0) or 0
     end
     -- sends one purchase and waits (up to 2.5 s) for the replicated level to reach `index`
     local function tryBuyJump(remote, index, cur)
-        local sent, res = pcall(function() return remote:InvokeServer({ Upgrade = "+1 Jump", Index = index }) end)
+        local sent, res = pcall(function() return remote:InvokeServer({ Upgrade = mode.upgrade, Index = index }) end)
         local t0 = os.clock()
         while cur() and os.clock() - t0 < 2.5 do
             if jumpLevel() >= index then return true, res end
@@ -17051,17 +17555,19 @@ local DoubleJump = (function()
         end)
         if not okR then say("Double Jump unavailable: " .. tostring(c)); return end
         controller = c
-        local needMachine, failStreak, bought = false, 0, 0
+        local needMachine, failStreak, bought, lastMode = false, 0, 0, nil
         while cur() do
             local data = getData()
             if not data then
                 say("Waiting for player data...")
                 task.wait(1)
             else
-                local level = tonumber(data.PhysicalUpgrades.DoubleJump) or 0
+                mode = curMode()
+                if mode ~= lastMode then lastMode, needMachine, failStreak = mode, false, 0 end   -- changed world: start fresh
+                local level = tonumber(data.PhysicalUpgrades[mode.key]) or 0
                 local index = level + 1
-                local gems = tonumber(data.Currencies.Gems) or 0
-                say(string.format("Jump %d | buying +1 Jump %d | Gems %s", level, index, fmt(gems)))
+                local gems = tonumber(data.Currencies[mode.gems]) or 0
+                say(string.format("%s %d | buying %s %d | %s %s", mode.label, level, mode.upgrade, index, mode.gems, fmt(gems)))
                 local ok, res = false, nil
                 if not needMachine then
                     ok, res = tryBuyJump(remote, index, cur)
@@ -17075,7 +17581,7 @@ local DoubleJump = (function()
                 if not cur() then break end
                 if ok then
                     failStreak, bought = 0, bought + 1
-                    say(string.format("Jump %d bought | %d bought this run | Gems %s", index, bought, fmt(((getData() or data).Currencies.Gems))))
+                    say(string.format("Jump %d bought | %d bought this run | Gems %s", index, bought, fmt(((getData() or data).Currencies[mode.gems] or 0))))
                     task.wait(JUMP_GAP)
                 else
                     failStreak = failStreak + 1
@@ -17124,6 +17630,10 @@ end)()
 -- Coin chests: Sky Island first, then Desert. Each has its own server cooldown.
 local DesertChest = (function()
     local RS = game:GetService("ReplicatedStorage")
+    -- PREHISTORIC_CHEST_CF: the spot next to the Prehistoric Island chest (World 2). Stand next to the chest, run
+    --   print(game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame)
+    -- and paste the result here (already filled in). If it is ever nil the script looks for a chest in Workspace (a Model / Part with "chest" in its name and "prehistoric" in its path).
+    local PREHISTORIC_CHEST_CF = CFrame.new(1088.7025146484375, 905.4437255859375, 6923.4560546875, 0.40898168087005615, 7.086457998184414e-08, -0.9125425815582275, -2.950336686069477e-08, 1, 6.443342215334269e-08, 0.9125425815582275, 5.709876460535668e-10, 0.40898168087005615)
     local chests = {
         {key = "SkyIsland", label = "Sky Island", cf = CFrame.new(-11.399580955505371, -28.014537811279297, -1858.01171875,
             0.921389639377594, 1.05265245409214e-08, 0.38864004611968994,
@@ -17133,14 +17643,16 @@ local DesertChest = (function()
             0.9304943084716797, -1.3800431908350674e-08, 0.3663064241409302,
             1.9580882693048807e-08, 1, -1.2064948151646604e-08,
             -0.3663064241409302, 1.8398967682742295e-08, 0.9304943084716797)},
+        -- World 2: claimed with the same request (TapChestService.RF.Claim("PrehistoricIsland")); needs the island to be unlocked
+        {key = "PrehistoricIsland", label = "Prehistoric", island = "Prehistoric", search = "prehistoric", cf = PREHISTORIC_CHEST_CF},
     }
     local entry = {
-        -- TOGGLE "Auto Chest Coins": Claims Sky Island first, waits 0.5s, then Desert.
+        -- TOGGLE "Auto Chest Coins": Claims Sky Island first, waits 0.5s, then Desert, then the Prehistoric Island chest (World 2, once unlocked).
         type = "toggle", name = "Auto Chest Coins", icon = "💰", default = false,
-        desc = "Claims Sky Island first, waits 0.5s, then Desert. Tracks each chest's own cooldown.",
+        desc = "Claims Sky Island first, waits 0.5s, then Desert, then the Prehistoric Island chest (World 2, once the island is unlocked). Tracks each chest's own cooldown.",
     }
     local on, generation = false, 0
-    local nextAttempt = {SkyIsland = 0, Desert = 0}
+    local nextAttempt = {}
     -- Sets the status text of Auto Chest Coins.
     local function say(message)
         if entry._desc and entry._desc.Parent then entry._desc.Text = message end
@@ -17154,6 +17666,32 @@ local DesertChest = (function()
             end
         end
     end
+    -- looks for a World 2 chest in Workspace (cached for 60 s)
+    local liveCF = {}
+    local function findChestCF(chest)
+        local c = liveCF[chest.key]
+        if c and os.clock() - c.t < 60 then return c.cf end
+        local found, n = nil, 0
+        for _, d in ipairs(workspace:GetDescendants()) do
+            n = n + 1
+            if n % 4000 == 0 then task.wait() end
+            if #d.Name <= 40 and (d:IsA("Model") or d:IsA("BasePart")) and d.Name:lower():find("chest", 1, true)
+                and d:GetFullName():lower():find(chest.search, 1, true) then
+                found = d
+                break
+            end
+        end
+        local cf
+        if found then
+            local ok, pos = pcall(function() if found:IsA("Model") then return found:GetPivot().Position end return found.Position end)
+            if ok and typeof(pos) == "Vector3" then
+                cf = CFrame.new(pos + Vector3.new(0, 3, 0))
+                print("[WORST Chests] " .. chest.label .. " chest found in Workspace: " .. found:GetFullName())
+            end
+        end
+        liveCF[chest.key] = { t = os.clock(), cf = cf }
+        return cf
+    end
     -- Main loop of Auto Chest Coins.
     local function run(id)
         local ok, controller, remote = pcall(function()
@@ -17164,12 +17702,49 @@ local DesertChest = (function()
         local function active() return alive and on and generation == id end
         -- True if a chest is ready to be claimed.
         local function ready(chest, data)
+            if chest.island and not (Config.hasIsland and Config.hasIsland(chest.island)) then return false end   -- island not unlocked yet
             return (tonumber(data.TapChests[chest.key]) or 0) <= os.time()
-                and os.clock() >= nextAttempt[chest.key]
+                and os.clock() >= (nextAttempt[chest.key] or 0)
+        end
+        -- True once the server has put the chest on cooldown.
+        local function confirmed(chest)
+            local updated = playerData(controller)
+            return (updated and tonumber(updated.TapChests[chest.key]) or 0) > os.time()
         end
         -- Claims one chest.
         local function claim(chest)
             if not active() then return end
+            if chest.island then
+                -- World 2 chest: first ask from where you stand; if the server wants you at the chest, go there ("drop" teleport, no Travel) and ask again
+                say(chest.label .. ": claiming...")
+                local sent, result = pcall(function() return remote:InvokeServer(chest.key) end)
+                task.wait(0.4)
+                if confirmed(chest) then say(chest.label .. " chest claimed! Waiting for cooldown.") return end
+                local cf = chest.cf or findChestCF(chest)
+                if not cf then
+                    say(chest.label .. ": refused from here (" .. tostring(result) .. ") and no chest position known - set PREHISTORIC_CHEST_CF; retrying in 60s")
+                    nextAttempt[chest.key] = os.clock() + 60
+                    return
+                end
+                say(chest.label .. ": going to the chest...")
+                local arrived = Config.dropTeleport and Config.dropTeleport(active, cf, say)
+                if not active() then return end
+                if not arrived then
+                    say(chest.label .. ": could not reach the chest; retrying in 60s")
+                    nextAttempt[chest.key] = os.clock() + 60
+                    return
+                end
+                task.wait(0.5)
+                sent, result = pcall(function() return remote:InvokeServer(chest.key) end)
+                task.wait(0.4)
+                if confirmed(chest) then
+                    say(chest.label .. " chest claimed! Waiting for cooldown.")
+                else
+                    say(chest.label .. " claim unconfirmed: " .. tostring(result) .. "; retrying in 60s")
+                    nextAttempt[chest.key] = os.clock() + 60
+                end
+                return
+            end
             local character = player.Character
             local moved = character and pcall(function() character:PivotTo(chest.cf) end)
             if not moved then
@@ -17182,43 +17757,46 @@ local DesertChest = (function()
             if not active() then return end
             local sent, result = pcall(function() return remote:InvokeServer(chest.key) end)
             task.wait(0.3)
-            local updated = playerData(controller)
-            local nextReady = updated and tonumber(updated.TapChests[chest.key]) or 0
-            if nextReady > os.time() then
+            if confirmed(chest) then
                 say(chest.label .. " chest claimed! Waiting for cooldown.")
             else
                 say(chest.label .. " claim unconfirmed: " .. tostring(result) .. "; retrying in 60s")
                 nextAttempt[chest.key] = os.clock() + 60
             end
         end
+        -- Seconds left until a chest can be claimed, as hh:mm:ss.
+        local function remaining(chest, d)
+            if chest.island and not (Config.hasIsland and Config.hasIsland(chest.island)) then return "locked" end
+            local cooldown = math.max(0, (tonumber(d.TapChests[chest.key]) or 0) - os.time())
+            local retry = math.max(0, (nextAttempt[chest.key] or 0) - os.clock())
+            local seconds = math.ceil(math.max(cooldown, retry))
+            return string.format("%02d:%02d:%02d", math.floor(seconds/3600), math.floor(seconds/60)%60, seconds%60)
+        end
         while active() do
             local d = playerData(controller)
             if not d then
                 say("Waiting for coin chest data...")
             else
-                local skyReady = ready(chests[1], d)
-                local desertReady = ready(chests[2], d)
-                if skyReady or desertReady then
+                local due = {}
+                for _, chest in ipairs(chests) do
+                    if ready(chest, d) then due[#due + 1] = chest end
+                end
+                if #due > 0 then
                     local priority = Logic and Logic.priority
                     local held = priority and priority.acquireTrip and priority.acquireTrip("Craft", active, say) or active()
                     if held and active() then
-                        if skyReady then claim(chests[1]) end
-                        if active() and skyReady and desertReady then task.wait(0.5) end
-                        if active() and desertReady then
+                        for k, chest in ipairs(due) do
+                            if not active() then break end
                             local current = playerData(controller)
-                            if current and ready(chests[2], current) then claim(chests[2]) end
+                            if current and ready(chest, current) then claim(chest) end
+                            if active() and k < #due then task.wait(0.5) end
                         end
                         if priority and priority.releaseTrip then priority.releaseTrip("Craft") end
                     end
                 else
-                    -- Seconds left until a chest can be claimed.
-                    local function remaining(chest)
-                        local cooldown = math.max(0, (tonumber(d.TapChests[chest.key]) or 0) - os.time())
-                        local retry = math.max(0, nextAttempt[chest.key] - os.clock())
-                        local seconds = math.ceil(math.max(cooldown, retry))
-                        return string.format("%02d:%02d:%02d", math.floor(seconds/3600), math.floor(seconds/60)%60, seconds%60)
-                    end
-                    say("Sky Island: " .. remaining(chests[1]) .. " | Desert: " .. remaining(chests[2]))
+                    local parts = {}
+                    for _, chest in ipairs(chests) do parts[#parts + 1] = chest.label .. ": " .. remaining(chest, d) end
+                    say(table.concat(parts, " | "))
                 end
             end
             for _ = 1, 10 do
@@ -17231,7 +17809,7 @@ local DesertChest = (function()
         on = value == true
         generation = generation + 1
         if on then
-            nextAttempt = {SkyIsland = 0, Desert = 0}
+            nextAttempt = {}
             task.spawn(run, generation)
         else
             say("Auto Chest Coins disabled")
@@ -17733,7 +18311,7 @@ local TAB_SCRIPTS = {
 				},
 			},
 		},
-		{ name = "Islands", entries = Logic and Logic.islands and { Logic.islands.toggle, Logic.islands.pick, Logic.islands.go } or {} },
+		{ name = "Islands", entries = Logic and Logic.islands and { Logic.islands.toggle, Logic.islands.pick, Logic.islands.go, Logic.islands.pick2, Logic.islands.go2 } or {} },
 		{ name = "30M Event", entries = Logic and Logic.quest30 and Logic.quest30.entries or {} },
 	} },
 	-- the Pets tab has its own pages (buttons at the top of the tab): Crafting, Enchanting, Multi Enchanting, Auto Equip, Delete Pets
