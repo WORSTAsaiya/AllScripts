@@ -1,0 +1,1387 @@
+--Joiner
+--[[
+	WORST - EGG FINDER  (Delta / mobile friendly client)
+	Black / white / ash theme.
+	Live list of egg alerts from YOUR relay server with Join buttons,
+	a Min Value slider (0 -> Qa) and a Rarity dropdown.
+
+	DEMO MODE: CONFIG.DEMO = true shows fake alerts (no server needed).
+	Set it to false for real use.
+
+	RARITY: every pet name is looked up in PET_TIERS below, so a pet can never
+	show the wrong tier even if the alert carried a different one. Pets that are
+	not in the table fall back to the tier sent by the finder (read from the game).
+	When a new pet is added to the game, add its name to the right list.
+]]
+
+local CONFIG = {
+	DEMO       = false,
+
+	HUB_WS     = "ws://103.119.217.118:3000",    -- later: wss://your-domain
+	HUB_HTTP   = "http://103.119.217.118:3000",  -- later: https://your-domain
+	KEY        = "e0964becb8828133",
+
+	-- optional: raw link to THIS script so it reloads itself after each teleport
+	SCRIPT_URL = "",
+
+	MAX_CARDS  = 30,
+	TITLE      = "WORST - EGG FINDER",
+
+	-- SPEED: the window opens and the data connection starts straight away.
+	-- Turn these on only if your executor runs the script before the game is ready.
+	WAIT_FOR_GAME      = true,
+	WAIT_FOR_CHARACTER = true,
+	DEBUG_LATENCY      = true,    -- shows how long each new alert took (on the card) and prints the breakdown
+	STAGGER            = false,   -- true = cards slide in one after another instead of all at once
+
+	-- extra seconds to wait after the game has loaded (0 = none; raise it only if your executor still runs too early)
+	LOAD_EXTRA_WAIT = 0,
+
+	-- every egg in a wave disappears together: this many seconds after the FIRST egg
+	-- of a session was reported (4:45), all Join buttons turn grey and stop working
+	EXPIRE_SECS = 285,
+
+	-- pictures on the cards (needs an executor with request + writefile + getcustomasset)
+	IMAGES     = true,
+	IMAGE_MODE = "egg",   -- "egg" = egg picture (falls back to the pet picture), "pet" = pet picture only
+	IMAGE_BASE = "https://stealanegg.tools/images/",
+}
+
+-- ------------------------------------------------------------ pet -> rarity
+local PET_LISTS = {
+	Secret = {
+		"Yeti", "Cerberus", "Kraken", "TRex", "Tralaledon", "Cosmic Dragon", "Cosmic Skeleton",
+		"Stag", "Mutant Shark", "Pure Jellyfish", "Centaur", "Gargoyle", "RazorFang", "Starry Fox",
+		"Graveyard Brute", "BloodBloom", "Werewolf",
+		-- new biome
+		"Tideler", "Aurora Stag",
+	},
+	Eternal = {
+		"Ice Dragon", "Phoenix", "Lava Dragon", "El Maja", "Mosasaurus", "Eternal Lunar Dragon",
+		"Oni Tiger", "Gorilla King", "Pegasus", "Skeleton Horse", "Celestial Sunlion", "Ghost Reaper",
+		"Shelltide Voyager", "Gorillastein",
+		-- new biome
+		"Viridian Prowler", "Abyssjaw",
+	},
+	Divine = {
+		"Unicorn", "Kitsune", "Nightflame", "ArchAngel", "World Burner", "Royal Skywhale",
+		"Voidseer Pumpkin",
+		-- new biome
+		"Nebuloth Kraken", "Xenorath", "Obsidian Rex", "Prismare",
+	},
+}
+
+local function norm(s)
+	return (tostring(s or ""):lower():gsub("[^%w]", ""))
+end
+
+local PET_TIER = {}
+for tier, names in pairs(PET_LISTS) do
+	for _, n in ipairs(names) do PET_TIER[norm(n)] = tier end
+end
+
+-- ------------------------------------------------------------ pet -> picture file
+-- Same files the finder uses for its Discord alerts (stealanegg.tools). Key = lowercase pet name.
+-- A pet that is not listed falls back to  Name_With_Underscores_Pet.png
+local PET_IMAGES = {
+	["world burner"] = "World_Burner.png",
+	["archangel"] = "ArchAngel.png",
+	["royal skywhale"] = "Royal_Skywhale.png",
+	["nightflame"] = "Nightflame.png",
+	["kitsune"] = "Kitsune.png",
+	["unicorn"] = "Unicorn.png",
+	["celestial sunlion"] = "Celestial_Sunlion.png",
+	["skeleton horse"] = "Skeleton_Horse.png",
+	["pegasus"] = "Pegasus.png",
+	["oni tiger"] = "Oni_Tiger.png",
+	["eternal lunar dragon"] = "Eternal_Lunar_Dragon.png",
+	["gorilla king"] = "Gorilla_King.png",
+	["mosasaurus"] = "Mosasaurus.png",
+	["el maja"] = "El_Maja.png",
+	["lava dragon"] = "Lava_Dragon.png",
+	["ice dragon"] = "Ice_Dragon.png",
+	["phoenix"] = "Phoenix.png",
+	["king snake"] = "King_Snake_Pet.png",
+	["yeti"] = "Yeti_Pet.png",
+	["cerberus"] = "Cerberus.png",
+	["kraken"] = "Kraken.png",
+	["trex"] = "TRex_Pet.png",
+	["tralaledon"] = "Tralaledon_Pet.png",
+	["cosmic skeleton"] = "Cosmic_Skeleton_Boss_Pet.png",
+	["cosmic dragon"] = "Cosmic_Dragon_Pet.png",
+	["stag"] = "Stag_Pet.png",
+	["mutant shark"] = "Mutant_Shark.png",
+	["pure jellyfish"] = "Pure_Jellyfish.png",
+	["gargoyle"] = "Gargoyle.png",
+	["razorfang"] = "RazorFang.png",
+	["centaur"] = "Centaur.png",
+	["starry fox"] = "Starry_Fox.png",
+	["voidseer pumpkin"] = "Voidseer_Pumpkin_Pet.png",
+	["gorillastein"] = "Abomination_Kong_Pet.png",
+	["shelltide voyager"] = "Shelltide_Voyager_Pet.png",
+	["ghost reaper"] = "Ghost_Reaper_Pet.png",
+	["werewolf"] = "Werewolf_Pet.png",
+	["bloodbloom"] = "BloodBloom_Pet.png",
+	["graveyard brute"] = "Graveyard_Brute_Pet.png",
+	["bone emperor"] = "Bone_Emperor_Pet.png",
+	["zombified bone emperor"] = "Zombified_Bone_Emperor_Pet.png",
+	["phantom dragon"] = "Phantom_Dragon_Pet.png",
+	["zombified phantom dragon"] = "Zombified_Phantom_Dragon_Pet.png",
+	["zombified grave cerberus"] = "Zombified_Grave_Cerberus_Pet.png",
+	["soul phantom"] = "Soul_Phantom_Pet.png",
+	["grave cerberus"] = "Grave_Cerberus_Pet.png",
+	["zombified tombstone bear"] = "Zombified_Tombstone_Bear_Pet.png",
+	["zombified night fang"] = "Zombified_Night_Fang_Pet.png",
+	["zombified pumpkin fiend"] = "Zombified_Pumpkin_Fiend_Pet.png",
+	["pumpkin golem"] = "Pumpkin_Golem_Pet.png",
+}
+
+-- ------------------------------------------------------------ egg varieties (mutations)
+-- bg / fg = chip colours. rainbow = true gives the chip a rainbow gradient.
+-- A variety that is not listed still shows, as a plain grey chip, so new ones never get lost.
+local MUTATIONS = {
+	silver  = { name = "Silver",  bg = Color3.fromRGB(205, 210, 220), fg = Color3.fromRGB(10, 10, 12) },
+	golden  = { name = "Golden",  bg = Color3.fromRGB(255, 196, 36),  fg = Color3.fromRGB(10, 10, 12) },
+	rainbow = { name = "Rainbow", bg = Color3.fromRGB(255, 255, 255), fg = Color3.fromRGB(10, 10, 12), rainbow = true },
+	diamond = { name = "Diamond", bg = Color3.fromRGB(96, 205, 255),  fg = Color3.fromRGB(10, 10, 12) },
+}
+local MUT_ALIAS = { gold = "golden", gilded = "golden" }
+
+-- "Golden" / "gold" / " RAINBOW " -> display name + style. Returns nil for none / normal / empty.
+local function readMutation(m)
+	m = tostring(m or ""):gsub("^%s+", ""):gsub("%s+$", "")
+	local k = norm(m)
+	if k == "" or k == "none" or k == "normal" or k == "regular" or k == "default" then return nil end
+	k = MUT_ALIAS[k] or k
+	local s = MUTATIONS[k]
+	if s then return s.name, s end
+	return m, { name = m, bg = Color3.fromRGB(90, 90, 100), fg = Color3.fromRGB(255, 255, 255) }
+end
+
+-- "Golden Stag" -> "Golden", "Stag"
+local function splitMutationPrefix(name)
+	local low = name:lower()
+	for word in pairs(MUTATIONS) do
+		if low:sub(1, #word + 1) == word .. " " then
+			return name:sub(1, #word), name:sub(#word + 2)
+		end
+	end
+	for word, k in pairs(MUT_ALIAS) do
+		if low:sub(1, #word + 1) == word .. " " then
+			return MUTATIONS[k].name, name:sub(#word + 2)
+		end
+	end
+end
+
+-- ------------------------------------------------------------ startup
+-- Only what the window itself needs: the local player. The game-loaded and character
+-- waits are optional now (see CONFIG), because the window and the data feed do not
+-- need the game world at all.
+if CONFIG.WAIT_FOR_GAME and not game:IsLoaded() then game.Loaded:Wait() end
+do
+	local P = game:GetService("Players")
+	while not P.LocalPlayer do task.wait() end
+	local lp = P.LocalPlayer
+	if not (gethui and pcall(gethui)) then lp:WaitForChild("PlayerGui") end
+	if CONFIG.WAIT_FOR_CHARACTER then
+		local t0 = os.clock()
+		while not lp.Character and os.clock() - t0 < 20 do task.wait(0.2) end
+	end
+	local extra = tonumber(CONFIG.LOAD_EXTRA_WAIT) or 0
+	if extra > 0 then task.wait(extra) end
+end
+
+-- ------------------------------------------------------------------ services
+local Players         = game:GetService("Players")
+local HttpService     = game:GetService("HttpService")
+local TeleportService = game:GetService("TeleportService")
+local TweenService    = game:GetService("TweenService")
+local UIS             = game:GetService("UserInputService")
+local TextService     = game:GetService("TextService")
+local LocalPlayer     = Players.LocalPlayer
+
+local env = (getgenv and getgenv()) or _G
+if env.EGG_HUB_RUNNING then return end
+env.EGG_HUB_RUNNING = true
+
+local stopped = false
+
+-- ------------------------------------------------------------------- helpers
+local UNITS = { { 1e18, "Qi" }, { 1e15, "Qa" }, { 1e12, "T" }, { 1e9, "B" }, { 1e6, "M" }, { 1e3, "K" } }
+
+local function fmt(n)
+	n = tonumber(n) or 0
+	for _, u in ipairs(UNITS) do
+		if n >= u[1] then
+			local s = ("%.2f"):format(n / u[1]):gsub("%.?0+$", "")
+			return s .. u[2]
+		end
+	end
+	return ("%d"):format(n)
+end
+
+local function formatValue(n)
+	n = tonumber(n) or 0
+	for _, u in ipairs(UNITS) do
+		if n >= u[1] then return ("$%.2f%s"):format(n / u[1], u[2]) end
+	end
+	return ("$%d"):format(n)
+end
+
+-- slider position (0..1) <-> value. 0 at the far left, then 1K .. 1Qa on a log scale.
+local function posToValue(p)
+	if p < 0.03 then return 0 end
+	local v = 10 ^ (3 + ((p - 0.03) / 0.97) * 12)
+	return tonumber(("%.3g"):format(v))
+end
+local function valueToPos(v)
+	if v <= 0 then return 0 end
+	return 0.03 + 0.97 * ((math.log(v, 10) - 3) / 12)
+end
+
+local function timeAgo(born)
+	local s = math.max(0, os.clock() - born)
+	if s < 60 then return math.floor(s) .. "s ago" end
+	return math.floor(s / 60) .. "m ago"
+end
+
+local reqFn = (syn and syn.request) or (http and http.request) or http_request or request
+
+local function tween(obj, t, props, style, dir)
+	local tw = TweenService:Create(obj, TweenInfo.new(t, style or Enum.EasingStyle.Quad, dir or Enum.EasingDirection.Out), props)
+	tw:Play()
+	return tw
+end
+
+-- Fade helpers. CanvasGroup is unreliable on mobile executors, so instead of
+-- GroupTransparency we remember every element's own transparencies and tween those.
+local function collect(root)
+	local items = {}
+	local function add(o)
+		if o:IsA("GuiObject") and o.BackgroundTransparency < 1 then
+			items[#items + 1] = { o, "BackgroundTransparency", o.BackgroundTransparency }
+		end
+		if o:IsA("TextLabel") or o:IsA("TextButton") or o:IsA("TextBox") then
+			items[#items + 1] = { o, "TextTransparency", o.TextTransparency }
+		end
+		if o:IsA("UIStroke") then
+			items[#items + 1] = { o, "Transparency", o.Transparency }
+		end
+		if o:IsA("ImageLabel") or o:IsA("ImageButton") then
+			items[#items + 1] = { o, "ImageTransparency", o.ImageTransparency }
+		end
+	end
+	add(root)
+	for _, d in ipairs(root:GetDescendants()) do add(d) end
+	return items
+end
+
+local function setAlpha(items, hidden)
+	for _, it in ipairs(items) do it[1][it[2]] = hidden and 1 or it[3] end
+end
+
+local function fadeItems(items, t, hidden, style, dir)
+	for _, it in ipairs(items) do
+		tween(it[1], t, { [it[2]] = hidden and 1 or it[3] }, style, dir)
+	end
+end
+
+-- ------------------------------------------------------------ picture loader
+-- Roblox cannot show web pictures directly, so each one is downloaded once, saved to a
+-- small folder and shown through getcustomasset. If the executor lacks any of those
+-- functions the cards simply have no picture (everything else still works).
+local IMG_DIR   = "WorstEggFinder_img"
+local assetFn   = (type(getcustomasset) == "function" and getcustomasset) or (type(getsynasset) == "function" and getsynasset) or nil
+local CAN_IMG   = CONFIG.IMAGES and reqFn ~= nil and assetFn ~= nil
+	and type(writefile) == "function" and type(isfile) == "function" and type(readfile) == "function"
+local imgAsset  = {}   -- url -> asset string, or false when it could not be loaded
+local imgBusy   = {}   -- url -> list of callbacks waiting for it
+
+if CAN_IMG and type(makefolder) == "function" then
+	pcall(function() if not (isfolder and isfolder(IMG_DIR)) then makefolder(IMG_DIR) end end)
+end
+
+local function fetchOne(url)
+	if imgAsset[url] ~= nil then return imgAsset[url] end
+	local path = IMG_DIR .. "/" .. url:match("([^/]+)$"):gsub("[^%w%._%-]", "_")
+	local ok, asset = pcall(function()
+		if not isfile(path) then
+			local res = reqFn({ Url = url, Method = "GET" })
+			if not (res and res.StatusCode == 200 and type(res.Body) == "string" and res.Body:sub(2, 4) == "PNG") then
+				return false
+			end
+			writefile(path, res.Body)
+		end
+		return assetFn(path)
+	end)
+	imgAsset[url] = (ok and asset) or false
+	return imgAsset[url]
+end
+
+-- urls = list tried in order; cb(asset) runs with the first one that loads (never if none do)
+local function loadImage(urls, cb)
+	if not CAN_IMG then return end
+	task.spawn(function()
+		for _, url in ipairs(urls) do
+			local a = fetchOne(url)
+			if a then cb(a) return end
+		end
+	end)
+end
+
+local function imageUrlsFor(petName)
+	local key = tostring(petName or ""):lower()
+	local file = PET_IMAGES[key] or (tostring(petName):gsub("%s+", "_") .. "_Pet.png")
+	local pet  = CONFIG.IMAGE_BASE .. file
+	if CONFIG.IMAGE_MODE == "pet" then return { pet } end
+	local egg, n = pet:gsub("_Pet%.png$", "_Egg.png")
+	if n == 0 then egg, n = pet:gsub("%.png$", "_Egg.png") end
+	return { egg, pet }
+end
+
+-- ------------------------------------------------------------------- state
+local wsLive   = false  -- true while the WebSocket is connected
+local alerts   = {}     -- newest first
+local filters  = { minValue = 0, rarity = "All" }
+local joining  = false
+local lastId   = 0
+local seqCount = 0
+local cards    = {}     -- [alert] = { wrap=, card=, sub=, items= }
+local auto       = { on = false, minValue = 0 }   -- auto join
+local sessionEnd = nil                            -- shared "eggs disappear" deadline (os.clock)
+
+-- auto join settings survive teleports (file, or passed through queue_on_teleport)
+local SETTINGS_FILE = "WorstEggFinder_settings.json"
+
+local function saveSettings()
+	if type(writefile) ~= "function" then return end
+	pcall(writefile, SETTINGS_FILE, HttpService:JSONEncode({ autoOn = auto.on, autoMin = auto.minValue }))
+end
+
+local function loadSettings()
+	local fromHop = type(env.EGG_JOIN_SETTINGS) == "table"
+	local t = env.EGG_JOIN_SETTINGS
+	env.EGG_JOIN_SETTINGS = nil
+	if type(t) ~= "table" then
+		local ok, d = pcall(function()
+			if type(isfile) == "function" and type(readfile) == "function" and isfile(SETTINGS_FILE) then
+				return HttpService:JSONDecode(readfile(SETTINGS_FILE))
+			end
+		end)
+		t = (ok and type(d) == "table") and d or nil
+	end
+	if t then
+		auto.on = t.autoOn == true
+		auto.minValue = tonumber(t.autoMin) or 0
+	end
+	-- these settings were carried over by a hop: Auto Join turns itself off so it
+	-- cannot hop away while you are stealing the egg
+	if fromHop and auto.on then
+		auto.on = false
+		saveSettings()
+	end
+end
+
+-- -------------------------------------------------------------------- UI kit
+local function mk(class, props, parent)
+	local o = Instance.new(class)
+	for k, v in pairs(props) do o[k] = v end
+	if parent then o.Parent = parent end
+	return o
+end
+local function corner(o, r) mk("UICorner", { CornerRadius = UDim.new(0, r) }, o) end
+local function stroke(o, c, t) mk("UIStroke", { Color = c, Thickness = t or 1.5 }, o) end
+
+-- black / white / ash palette
+local C = {
+	panel   = Color3.fromRGB(16, 16, 18),
+	titlebar= Color3.fromRGB(9, 9, 10),
+	popup   = Color3.fromRGB(22, 22, 25),
+	card    = Color3.fromRGB(30, 30, 34),
+	box     = Color3.fromRGB(26, 26, 30),
+	line    = Color3.fromRGB(70, 70, 77),
+	ash     = Color3.fromRGB(140, 140, 148),
+	ashLite = Color3.fromRGB(185, 185, 192),
+	light   = Color3.fromRGB(228, 228, 231),
+	white   = Color3.fromRGB(255, 255, 255),
+	black   = Color3.fromRGB(8, 8, 9),
+	track   = Color3.fromRGB(52, 52, 58),
+	select  = Color3.fromRGB(62, 62, 69),
+}
+
+local RAINBOW = ColorSequence.new({
+	ColorSequenceKeypoint.new(0.00, Color3.fromRGB(255, 80, 80)),
+	ColorSequenceKeypoint.new(0.20, Color3.fromRGB(255, 190, 60)),
+	ColorSequenceKeypoint.new(0.40, Color3.fromRGB(120, 230, 100)),
+	ColorSequenceKeypoint.new(0.60, Color3.fromRGB(70, 190, 255)),
+	ColorSequenceKeypoint.new(0.80, Color3.fromRGB(150, 110, 255)),
+	ColorSequenceKeypoint.new(1.00, Color3.fromRGB(255, 100, 200)),
+})
+
+-- tier badges stay readable in greyscale: brighter = rarer
+local TIER_BADGE = {
+	Divine  = { bg = Color3.fromRGB(245, 245, 247), fg = C.black },
+	Eternal = { bg = Color3.fromRGB(165, 165, 172), fg = C.black },
+	Secret  = { bg = Color3.fromRGB(78, 78, 86),    fg = C.white },
+}
+
+local parentGui
+do
+	local ok, h = pcall(function() return gethui and gethui() end)
+	parentGui = (ok and h) or LocalPlayer:WaitForChild("PlayerGui")
+end
+
+local gui = mk("ScreenGui", {
+	Name = "WorstEggFinder", ResetOnSpawn = false, DisplayOrder = 999, IgnoreGuiInset = true,
+	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+}, parentGui)
+
+local main = mk("Frame", {
+	Size = UDim2.new(0, 320, 0, 452),
+	Position = UDim2.new(0.5, -160, 0, 50),
+	BackgroundColor3 = C.panel,
+	ClipsDescendants = true,
+}, gui)
+corner(main, 10)
+stroke(main, C.line, 2)
+local mainScale = mk("UIScale", { Scale = 0.9 }, main)
+
+-- ------------------------------------------------ remember window position
+local POS_FILE = "WorstEggFinder_pos.json"
+
+local function savePos()
+	if type(writefile) ~= "function" then return end
+	local p = main.Position
+	pcall(writefile, POS_FILE, HttpService:JSONEncode({ p.X.Scale, p.X.Offset, p.Y.Scale, p.Y.Offset }))
+end
+
+do
+	local ok, d = pcall(function()
+		if type(isfile) == "function" and type(readfile) == "function" and isfile(POS_FILE) then
+			return HttpService:JSONDecode(readfile(POS_FILE))
+		end
+	end)
+	if ok and type(d) == "table" and type(d[1]) == "number" and type(d[2]) == "number"
+		and type(d[3]) == "number" and type(d[4]) == "number" then
+		local cam = workspace.CurrentCamera
+		local vp = cam and cam.ViewportSize or Vector2.new(1280, 720)
+		local x = d[1] * vp.X + d[2]
+		local y = d[3] * vp.Y + d[4]
+		-- only restore it if the title bar would still be reachable on this screen
+		if x > -250 and x < vp.X - 70 and y > -10 and y < vp.Y - 40 then
+			main.Position = UDim2.new(d[1], d[2], d[3], d[4])
+		end
+	end
+end
+
+-- title bar (drag handle)
+local title = mk("Frame", { Size = UDim2.new(1, 0, 0, 30), BackgroundColor3 = C.titlebar }, main)
+corner(title, 10)
+mk("TextLabel", {
+	Size = UDim2.new(1, -70, 1, 0), Position = UDim2.new(0, 10, 0, 0), BackgroundTransparency = 1,
+	Text = CONFIG.TITLE, TextColor3 = C.white, Font = Enum.Font.GothamBlack, TextSize = 14,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, title)
+
+local btnMin = mk("TextButton", {
+	Size = UDim2.new(0, 26, 0, 22), Position = UDim2.new(1, -60, 0, 4), BackgroundColor3 = C.card,
+	Text = "-", TextColor3 = C.white, Font = Enum.Font.GothamBold, TextSize = 16,
+}, title)
+corner(btnMin, 6)
+local btnClose = mk("TextButton", {
+	Size = UDim2.new(0, 26, 0, 22), Position = UDim2.new(1, -30, 0, 4), BackgroundColor3 = C.line,
+	Text = "X", TextColor3 = C.white, Font = Enum.Font.GothamBold, TextSize = 12,
+}, title)
+corner(btnClose, 6)
+
+-- drag
+do
+	local dragging, dragStart, startPos
+	title.InputBegan:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+			dragging, dragStart, startPos = true, i.Position, main.Position
+			i.Changed:Connect(function()
+				if i.UserInputState == Enum.UserInputState.End then dragging = false savePos() end
+			end)
+		end
+	end)
+	UIS.InputChanged:Connect(function(i)
+		if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+			local d = i.Position - dragStart
+			main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+		end
+	end)
+end
+
+local body = mk("Frame", { Size = UDim2.new(1, 0, 1, -30), Position = UDim2.new(0, 0, 0, 30), BackgroundTransparency = 1 }, main)
+
+-- row 1: MIN JOIN (slider) | AUTO JOIN (toggle)
+local autoRow = mk("Frame", { Size = UDim2.new(1, -12, 0, 46), Position = UDim2.new(0, 6, 0, 6), BackgroundTransparency = 1 }, body)
+mk("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }, autoRow)
+
+-- row 2: SHOW MIN VALUE | RARITY | STATUS
+local statRow = mk("Frame", { Size = UDim2.new(1, -12, 0, 46), Position = UDim2.new(0, 6, 0, 58), BackgroundTransparency = 1 }, body)
+mk("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }, statRow)
+
+local function statBox(parent, cols, order, name)
+	local box = mk("Frame", { Size = UDim2.new(1 / cols, cols == 3 and -3 or -2, 1, 0), BackgroundColor3 = C.box, LayoutOrder = order }, parent)
+	corner(box, 6)
+	stroke(box, C.line, 1.5)
+	mk("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 14), Position = UDim2.new(0, 0, 0, 3), BackgroundTransparency = 1,
+		Text = name, TextColor3 = C.ash, Font = Enum.Font.GothamBold, TextSize = 9,
+	}, box)
+	local btn = mk("TextButton", {
+		Size = UDim2.new(1, -4, 0, 22), Position = UDim2.new(0, 2, 0, 19), BackgroundTransparency = 1,
+		Text = "", TextColor3 = C.white, Font = Enum.Font.GothamBlack, TextSize = 15, AutoButtonColor = false,
+	}, box)
+	return btn, box
+end
+
+local minJoinVal         = statBox(autoRow, 2, 1, "MIN JOIN")
+local autoVal, autoBox   = statBox(autoRow, 2, 2, "AUTO JOIN")
+local minVal             = statBox(statRow, 3, 1, "SHOW MIN VALUE")
+local rarityVal          = statBox(statRow, 3, 2, "RARITY")
+local hubVal             = statBox(statRow, 3, 3, "STATUS")
+minJoinVal.Text, autoVal.Text = "0", "OFF"
+autoVal.TextColor3 = C.ash
+minVal.Text, rarityVal.Text, hubVal.Text = "0", "All", "Active"
+
+mk("TextLabel", {
+	Size = UDim2.new(1, -12, 0, 16), Position = UDim2.new(0, 6, 0, 108), BackgroundTransparency = 1,
+	Text = "Tap SHOW MIN VALUE or RARITY to filter the list.",
+	TextColor3 = C.ash, Font = Enum.Font.Gotham, TextSize = 10,
+}, body)
+
+local list = mk("ScrollingFrame", {
+	Size = UDim2.new(1, -12, 1, -136), Position = UDim2.new(0, 6, 0, 128), BackgroundTransparency = 1,
+	BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = C.ash, CanvasSize = UDim2.new(0, 0, 0, 0),
+	AutomaticCanvasSize = Enum.AutomaticSize.Y,
+}, body)
+mk("UIListLayout", { Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder }, list)
+
+local emptyLabel = mk("TextLabel", {
+	Size = UDim2.new(1, 0, 0, 40), BackgroundTransparency = 1, Text = "Waiting for alerts...", LayoutOrder = 1000000,
+	TextColor3 = C.ash, Font = Enum.Font.Gotham, TextSize = 12,
+}, list)
+
+-- ------------------------------------------------------------- popup system
+-- a transparent blocker under the popups: tapping anywhere else closes them
+local openPopup = nil
+local blocker = mk("TextButton", {
+	Size = UDim2.new(1, 0, 1, -108), Position = UDim2.new(0, 0, 0, 108), BackgroundTransparency = 1,
+	Text = "", AutoButtonColor = false, Visible = false, ZIndex = 10,
+}, body)
+
+local function hidePopup(p)
+	if not p then return end
+	if openPopup == p then
+		openPopup = nil
+		blocker.Visible = false
+	end
+	fadeItems(p.items, 0.15, true, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+	tween(p.frame, 0.15, { Position = p.pos + UDim2.new(0, 0, 0, -10) }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+	task.delay(0.17, function()
+		if openPopup ~= p then p.frame.Visible = false end
+	end)
+end
+
+local function showPopup(p)
+	if openPopup == p then return hidePopup(p) end   -- tap again = close
+	if openPopup then hidePopup(openPopup) end
+	openPopup = p
+	blocker.Visible = true
+	p.frame.Visible = true
+	setAlpha(p.items, true)
+	p.frame.Position = p.pos + UDim2.new(0, 0, 0, -10)
+	fadeItems(p.items, 0.2, false)
+	tween(p.frame, 0.22, { Position = p.pos }, Enum.EasingStyle.Back)
+end
+
+blocker.MouseButton1Click:Connect(function() hidePopup(openPopup) end)
+
+-- ----------------------------------------------------------- value sliders
+local POPUP_Y = 110   -- popups open just under the second row
+
+-- onValue(v)  every time the value changes (also while dragging)
+-- onLive()    while dragging, throttled      onDone()  when the finger lets go
+local function makeSlider(titleText, onValue, onLive, onDone)
+	local frame = mk("Frame", {
+		Size = UDim2.new(1, -12, 0, 98), Position = UDim2.new(0, 6, 0, POPUP_Y), BackgroundColor3 = C.popup,
+		Visible = false, ZIndex = 20,
+	}, body)
+	corner(frame, 10)
+	stroke(frame, C.ash, 2)
+	local pop = { frame = frame, pos = UDim2.new(0, 6, 0, POPUP_Y) }
+
+	mk("TextLabel", {
+		Size = UDim2.new(0.5, 0, 0, 20), Position = UDim2.new(0, 12, 0, 8), BackgroundTransparency = 1,
+		Text = titleText, TextColor3 = C.ash, Font = Enum.Font.GothamBold, TextSize = 11,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, frame)
+	local valueLabel = mk("TextLabel", {
+		Size = UDim2.new(0.5, -12, 0, 20), Position = UDim2.new(0.5, 0, 0, 8), BackgroundTransparency = 1,
+		Text = "0", TextColor3 = C.white, Font = Enum.Font.GothamBlack, TextSize = 16,
+		TextXAlignment = Enum.TextXAlignment.Right,
+	}, frame)
+
+	local area = mk("Frame", { Size = UDim2.new(1, -28, 0, 44), Position = UDim2.new(0, 14, 0, 38), BackgroundTransparency = 1 }, frame)
+	local track = mk("Frame", { Size = UDim2.new(1, 0, 0, 8), Position = UDim2.new(0, 0, 0, 8), BackgroundColor3 = C.track }, area)
+	corner(track, 4)
+	local fill = mk("Frame", { Size = UDim2.new(0, 0, 1, 0), BackgroundColor3 = C.ashLite }, track)
+	corner(fill, 4)
+
+	for _, t in ipairs({ { "0", 0, 0 }, { "M", valueToPos(1e6), 0.5 }, { "B", valueToPos(1e9), 0.5 }, { "T", valueToPos(1e12), 0.5 }, { "Qa", 1, 1 } }) do
+		mk("TextLabel", {
+			Size = UDim2.new(0, 24, 0, 14), Position = UDim2.new(t[2], 0, 0, 26), AnchorPoint = Vector2.new(t[3], 0),
+			BackgroundTransparency = 1, Text = t[1], TextColor3 = C.ash,
+			Font = Enum.Font.GothamBold, TextSize = 10,
+		}, area)
+	end
+
+	local knob = mk("Frame", {
+		Size = UDim2.new(0, 22, 0, 22), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0, 0, 0, 12),
+		BackgroundColor3 = C.white,
+	}, area)
+	corner(knob, 11)
+	stroke(knob, C.ash, 3)
+	pop.items = collect(frame)
+
+	local pos = 0
+	local function setPos(p)
+		pos = math.clamp(p, 0, 1)
+		knob.Position = UDim2.new(pos, 0, 0, 12)
+		fill.Size = UDim2.new(pos, 0, 1, 0)
+		local v = posToValue(pos)
+		valueLabel.Text = fmt(v) .. "/s"
+		onValue(v)
+	end
+
+	local dragging, lastLive = false, 0
+	local function fromInput(i)
+		local w = area.AbsoluteSize.X
+		if w <= 0 then return end
+		setPos((i.Position.X - area.AbsolutePosition.X) / w)
+		-- act WHILE dragging (throttled so phones don't lag)
+		if onLive and os.clock() - lastLive > 0.06 then
+			lastLive = os.clock()
+			onLive()
+		end
+	end
+	area.InputBegan:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			fromInput(i)
+		end
+	end)
+	UIS.InputChanged:Connect(function(i)
+		if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+			fromInput(i)
+		end
+	end)
+	UIS.InputEnded:Connect(function(i)
+		if dragging and (i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch) then
+			dragging = false
+			onValue(posToValue(pos))
+			if onDone then onDone() end
+		end
+	end)
+
+	return pop, setPos
+end
+
+local function syncNow()
+	if env.EGG_HUB_SYNC then env.EGG_HUB_SYNC() end
+end
+
+-- SHOW MIN VALUE: which cards are listed
+local sliderPop = makeSlider("SHOW MIN / SEC", function(v)
+	filters.minValue = v
+	minVal.Text = fmt(v)
+end, syncNow, syncNow)
+
+-- MIN JOIN: how valuable an egg must be before AUTO JOIN takes it
+local joinPop, setJoinSlider = makeSlider("JOIN MIN / SEC", function(v)
+	auto.minValue = v
+	minJoinVal.Text = fmt(v)
+end, nil, saveSettings)
+
+-- ----------------------------------------------------------- RARITY dropdown
+local dropFrame = mk("Frame", {
+	Size = UDim2.new(0, 104, 0, 4 + 4 * 28), Position = UDim2.new(0, 108, 0, 110), BackgroundColor3 = C.popup,
+	Visible = false, ZIndex = 20,
+}, body)
+corner(dropFrame, 10)
+stroke(dropFrame, C.ash, 2)
+local dropPop = { frame = dropFrame, pos = UDim2.new(0, 108, 0, 110) }
+
+local RARITY_OPTIONS = { "Secret", "Eternal", "Divine", "All" }
+local optButtons = {}
+local syncCards  -- forward declaration
+
+local function setRarity(name)
+	filters.rarity = name
+	rarityVal.Text = name
+	for n, b in pairs(optButtons) do
+		b.BackgroundColor3 = (n == name) and C.select or C.card
+	end
+	hidePopup(dropPop)
+	syncCards()
+end
+
+for i, name in ipairs(RARITY_OPTIONS) do
+	local b = mk("TextButton", {
+		Size = UDim2.new(1, -8, 0, 26), Position = UDim2.new(0, 4, 0, 4 + (i - 1) * 28),
+		BackgroundColor3 = (name == "All") and C.select or C.card,
+		Text = name, TextColor3 = C.white, Font = Enum.Font.GothamBlack, TextSize = 13,
+	}, dropFrame)
+	corner(b, 6)
+	optButtons[name] = b
+	b.MouseButton1Click:Connect(function() setRarity(name) end)
+end
+dropPop.items = collect(dropFrame)
+
+minVal.MouseButton1Click:Connect(function() showPopup(sliderPop) end)
+minJoinVal.MouseButton1Click:Connect(function() showPopup(joinPop) end)
+rarityVal.MouseButton1Click:Connect(function() showPopup(dropPop) end)
+
+-- AUTO JOIN box: fades smoothly between OFF and ON
+local function refreshAutoUI(animate)
+	local on = auto.on
+	autoVal.Text = on and "ON" or "OFF"
+	local box  = on and C.select or C.box
+	local text = on and C.white or C.ash
+	if animate then
+		tween(autoBox, 0.22, { BackgroundColor3 = box })
+		tween(autoVal, 0.22, { TextColor3 = text })
+	else
+		autoBox.BackgroundColor3 = box
+		autoVal.TextColor3 = text
+	end
+end
+local function toggleAuto()
+	auto.on = not auto.on
+	refreshAutoUI(true)
+	saveSettings()
+end
+autoVal.MouseButton1Click:Connect(toggleAuto)
+
+-- restore the saved auto join settings (they survive teleports)
+loadSettings()
+setJoinSlider(valueToPos(auto.minValue))
+refreshAutoUI(false)
+
+-- ------------------------------------------------------------------ logic
+local function setHub(text, bright)
+	hubVal.Text = "Active"
+	hubVal.TextColor3 = (text == "RECONNECT" or text == "OFFLINE") and C.ash or C.white
+end
+
+-- true once the shared "eggs disappear" deadline of this alert's session has passed
+local function isExpired(a)
+	return a.expireAt ~= nil and os.clock() >= a.expireAt
+end
+
+local function styleExpired(e)
+	e.expired = true
+	e.join.BackgroundColor3 = C.track
+	e.join.TextColor3 = C.ash
+	e.join.AutoButtonColor = false
+	e.join.Active = false
+	if e.img then e.img.ImageColor3 = Color3.fromRGB(95, 95, 100) end
+end
+
+local function passes(a)
+	if (a.valueNum or 0) < filters.minValue then return false end
+	if filters.rarity ~= "All" and a.tier ~= filters.rarity then return false end
+	return true
+end
+
+-- ------------------------------------------------------- EGG IN SERVER box
+-- Top-middle box for the server you joined from a card: a tick while that egg is
+-- still in the server, a cross once it is gone.
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TARGET_FILE = "WorstEggFinder_target.json"
+
+-- other names the game uses for the same egg (all normalised)
+local ALIAS = {
+	starryfox = { "cosmicfox" }, cosmicfox = { "starryfox" },
+	celestialsunlion = { "cosmiclion" }, cosmiclion = { "celestialsunlion" },
+	gorillastein = { "abominationkong", "frankensteinkongegg" },
+	abominationkong = { "gorillastein", "frankensteinkongegg" },
+	frankensteinkongegg = { "gorillastein", "abominationkong" },
+	werewolf = { "dreadwolf" }, dreadwolf = { "werewolf" },
+}
+
+local function sameEgg(a, b)
+	if a == "" or b == "" then return false end
+	if a == b then return true end
+	for _, x in ipairs(ALIAS[a] or {}) do
+		if x == b then return true end
+	end
+	return false
+end
+
+local target = nil      -- { egg =, jobId =, tier = } of the server we are standing in
+-- the "Egg in Server" box at the top of the screen was removed
+local function startMonitor() end
+
+-- remember which egg we are joining for, so the next server can show the box
+local function saveTarget(a)
+	if type(writefile) == "function" then
+		pcall(writefile, TARGET_FILE, HttpService:JSONEncode({ egg = a.egg, jobId = a.jobId, tier = a.tier }))
+	end
+end
+
+local function readTarget()
+	local t = env.EGG_JOIN_TARGET
+	env.EGG_JOIN_TARGET = nil
+	if type(t) == "table" then return t end
+	local ok, d = pcall(function()
+		if type(isfile) == "function" and type(readfile) == "function" and isfile(TARGET_FILE) then
+			return HttpService:JSONDecode(readfile(TARGET_FILE))
+		end
+	end)
+	if ok and type(d) == "table" then return d end
+	return nil
+end
+
+local function joinServer(a)
+	if joining or stopped then return end
+	if a.jobId == game.JobId then
+		setHub("HERE", false)
+		target = { egg = a.egg, jobId = a.jobId, tier = a.tier }
+		saveTarget(a)
+		startMonitor()
+		return
+	end
+	saveTarget(a)
+	joining = true
+	setHub("JOINING", true)
+
+	local q = queue_on_teleport or queueonteleport
+	if q and CONFIG.SCRIPT_URL ~= "" then
+		local tjson = HttpService:JSONEncode({ egg = a.egg, jobId = a.jobId, tier = a.tier })
+		local sjson = HttpService:JSONEncode({ autoOn = auto.on, autoMin = auto.minValue })
+		pcall(q, ('getgenv().EGG_HUB_RUNNING=nil; getgenv().EGG_JOIN_TARGET=game:GetService("HttpService"):JSONDecode([==[%s]==]); getgenv().EGG_JOIN_SETTINGS=game:GetService("HttpService"):JSONDecode([==[%s]==]); loadstring(game:HttpGet("%s"))()'):format(tjson, sjson, CONFIG.SCRIPT_URL))
+	end
+
+	local ok, err = pcall(function()
+		TeleportService:TeleportToPlaceInstance(tonumber(a.placeId), a.jobId, LocalPlayer)
+	end)
+	if not ok then
+		warn("[egg-finder] teleport error: " .. tostring(err))
+		joining = false
+		setHub("FAILED", false)
+	end
+	task.delay(12, function() joining = false end)
+end
+
+TeleportService.TeleportInitFailed:Connect(function(_, result, msg)
+	joining = false
+	setHub("FAILED", false)
+	warn("[egg-finder] join failed: " .. tostring(result) .. " " .. tostring(msg))
+end)
+
+-- AUTO JOIN: take a brand-new alert that is still alive, passes the list filters and
+-- is worth at least MIN JOIN. Alerts that were already waiting when we connected
+-- are never auto-joined.
+local autoDone = {}
+local function tryAutoJoin(a)
+	if not auto.on or joining or stopped then return end
+	if not a or isExpired(a) or autoDone[a.jobId] then return end
+	if a.jobId == game.JobId then return end
+	if (a.valueNum or 0) < auto.minValue then return end
+	if not passes(a) then return end
+	autoDone[a.jobId] = true
+	joinServer(a)
+end
+
+local function valueText(a)
+	return ('<font color="%s">%s/s</font>'):format(a._valHex or "#FFFFFF", formatValue(a.valueNum))
+end
+
+-- ------------------------------------------------------------ shiny card themes
+-- Gold / Silver / Rainbow cards are painted all over with a metallic gradient, get a
+-- glossy top, a light sweep that glides across, and a pulsing glowing border.
+-- Text on these cards is dark so it stays readable on the bright background.
+local function seq(list)
+	local k = {}
+	for i, v in ipairs(list) do k[i] = ColorSequenceKeypoint.new(v[1], Color3.fromRGB(v[2], v[3], v[4])) end
+	return ColorSequence.new(k)
+end
+local THEMES = {
+	golden = {
+		bg = seq({ { 0, 255, 242, 168 }, { 0.30, 255, 204, 48 }, { 0.62, 232, 166, 18 }, { 1, 255, 226, 104 } }),
+		glow = Color3.fromRGB(255, 218, 70),
+		text = Color3.fromRGB(36, 24, 0), sub = Color3.fromRGB(64, 44, 0), valHex = "#241800",
+		chipText = Color3.fromRGB(255, 218, 70),
+	},
+	silver = {
+		bg = seq({ { 0, 255, 255, 255 }, { 0.30, 214, 219, 228 }, { 0.62, 176, 182, 194 }, { 1, 240, 243, 249 } }),
+		glow = Color3.fromRGB(255, 255, 255),
+		text = Color3.fromRGB(16, 18, 24), sub = Color3.fromRGB(44, 48, 58), valHex = "#101218",
+		chipText = Color3.fromRGB(240, 244, 252),
+	},
+	rainbow = {
+		bg = seq({ { 0, 255, 128, 128 }, { 0.20, 255, 204, 110 }, { 0.40, 160, 238, 140 }, { 0.60, 116, 208, 255 }, { 0.80, 178, 148, 255 }, { 1, 255, 138, 214 } }),
+		rainbow = true,
+		text = Color3.fromRGB(12, 12, 16), sub = Color3.fromRGB(34, 34, 44), valHex = "#0C0C10",
+		chipText = Color3.new(1, 1, 1),
+	},
+}
+local DARK_TILE = Color3.fromRGB(22, 22, 26)
+
+local function metaText(a)
+	local parts = {}
+	if a.kg and a.kg ~= "" then parts[#parts + 1] = a.kg end
+	if a.players and a.players ~= "" then parts[#parts + 1] = a.players end
+	if a.lat then parts[#parts + 1] = ("%.1fs delay"):format(a.lat / 1000) end
+	parts[#parts + 1] = timeAgo(a.born)
+	return table.concat(parts, "  •  ")
+end
+
+local CARD_H = 70
+local IMG_W   = CONFIG.IMAGES and 60 or 0   -- space kept for the picture on the left
+
+local function makeCard(a, delay)
+	-- wrap = layout slot (grows open), card = the visible frame that slides + fades in
+	local wrap = mk("Frame", {
+		Size = UDim2.new(1, -6, 0, 0), BackgroundTransparency = 1, ClipsDescendants = true, LayoutOrder = -a.seq,
+	}, list)
+	local c = mk("Frame", {
+		Size = UDim2.new(1, 0, 0, CARD_H), Position = UDim2.new(0, 36, 0, 0), BackgroundColor3 = C.card,
+	}, wrap)
+	corner(c, 8)
+
+	local mutName, mut = readMutation(a.mutation)
+	local th = mutName and THEMES[mutName:lower()] or nil
+	a._valHex = th and th.valHex or nil
+	local txtMain = th and th.text or C.white
+	local txtSub  = th and th.sub or C.ash
+
+	-- border takes the colour of the egg variety; themed cards get a thicker glowing one
+	local cardStroke = mk("UIStroke", {
+		Color = (th and th.glow) or (mut and mut.bg) or C.line,
+		Thickness = th and 2 or (mut and 1.8 or 1),
+	}, c)
+	if (mut and mut.rainbow) or (th and th.rainbow) then
+		mk("UIGradient", { Color = RAINBOW }, cardStroke)
+	end
+
+	local bgGrad, sweep, strokeGrad
+	if th then
+		c.BackgroundColor3 = Color3.new(1, 1, 1)          -- the gradient provides the colour
+		c.ClipsDescendants = true
+		bgGrad = mk("UIGradient", { Color = th.bg, Rotation = 28 }, c)
+		strokeGrad = cardStroke:FindFirstChildOfClass("UIGradient")
+		-- glossy top half
+		local gloss = mk("Frame", {
+			Size = UDim2.new(1, 0, 0.55, 0), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0,
+		}, c)
+		corner(gloss, 8)
+		mk("UIGradient", {
+			Rotation = 90,
+			Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.5), NumberSequenceKeypoint.new(1, 1) }),
+		}, gloss)
+		-- light sweep that glides across now and then
+		sweep = mk("Frame", {
+			Size = UDim2.new(0.22, 0, 2.2, 0), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(-0.3, 0, 0.5, 0),
+			Rotation = 18, BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0,
+		}, c)
+		mk("UIGradient", {
+			Transparency = NumberSequence.new({
+				NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0.3), NumberSequenceKeypoint.new(1, 1),
+			}),
+		}, sweep)
+	end
+
+	-- picture (egg / pet). Starts empty and fills in once downloaded.
+	local img
+	if CONFIG.IMAGES then
+		local frame = mk("Frame", {
+			Size = UDim2.new(0, 52, 0, 52), Position = UDim2.new(0, 8, 0.5, -26), BackgroundColor3 = C.box,
+		}, c)
+		corner(frame, 8)
+		img = mk("ImageLabel", {
+			Size = UDim2.new(1, -4, 1, -4), Position = UDim2.new(0, 2, 0, 2), BackgroundTransparency = 1,
+			ScaleType = Enum.ScaleType.Fit, Image = "",
+		}, frame)
+		loadImage(imageUrlsFor(a.egg), function(asset)
+			if img and img.Parent then img.Image = asset end
+		end)
+	end
+
+	local textX = 10 + IMG_W
+
+	-- row 1: pet name (+ variety chip on the right)
+	local chipW = 0
+	if mutName then
+		chipW = TextService:GetTextSize(mutName:upper(), 9, Enum.Font.GothamBlack, Vector2.new(200, 16)).X + 14
+		local chip = mk("Frame", {
+			Size = UDim2.new(0, chipW, 0, 16), Position = UDim2.new(1, -(88 + chipW), 0, 8),
+			BackgroundColor3 = th and DARK_TILE or mut.bg,
+		}, c)
+		corner(chip, 4)
+		if not th and mut.rainbow then mk("UIGradient", { Color = RAINBOW }, chip) end
+		local chipLabel = mk("TextLabel", {
+			Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Text = mutName:upper(),
+			TextColor3 = th and th.chipText or mut.fg, Font = Enum.Font.GothamBlack, TextSize = 9,
+		}, chip)
+		if th and th.rainbow then mk("UIGradient", { Color = RAINBOW }, chipLabel) end
+	end
+	mk("TextLabel", {
+		Size = UDim2.new(1, -(textX + 88 + (chipW > 0 and chipW + 4 or 0)), 0, 20), Position = UDim2.new(0, textX, 0, 6),
+		BackgroundTransparency = 1,
+		Text = a.egg or "Egg", TextColor3 = txtMain, Font = Enum.Font.GothamBlack, TextSize = 15,
+		TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+	}, c)
+
+	-- row 2: tier badge + value
+	local badgeStyle = TIER_BADGE[a.tier]
+	local badge = mk("Frame", {
+		Size = UDim2.new(0, 56, 0, 16), Position = UDim2.new(0, textX, 0, 29),
+		BackgroundColor3 = badgeStyle and badgeStyle.bg or C.track,
+	}, c)
+	corner(badge, 4)
+	if th then mk("UIStroke", { Color = DARK_TILE, Thickness = 1.2 }, badge) end
+	mk("TextLabel", {
+		Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
+		Text = (a.tier ~= "" and a.tier or "?"):upper(), TextColor3 = badgeStyle and badgeStyle.fg or C.ashLite,
+		Font = Enum.Font.GothamBlack, TextSize = 9,
+	}, badge)
+	mk("TextLabel", {
+		Size = UDim2.new(1, -(textX + 56 + 6 + 84), 0, 16), Position = UDim2.new(0, textX + 62, 0, 29), BackgroundTransparency = 1, RichText = true,
+		Text = valueText(a), Font = Enum.Font.GothamBlack, TextSize = 13, TextColor3 = txtMain,
+		TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+	}, c)
+
+	-- row 3: kg / players / age
+	local sub = mk("TextLabel", {
+		Size = UDim2.new(1, -(textX + 84), 0, 16), Position = UDim2.new(0, textX, 0, 48), BackgroundTransparency = 1,
+		Text = metaText(a), TextColor3 = txtSub, Font = Enum.Font.GothamBold, TextSize = 10,
+		TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+	}, c)
+
+	local join = mk("TextButton", {
+		Size = UDim2.new(0, 70, 0, 40), Position = UDim2.new(1, -78, 0.5, -20), BackgroundColor3 = C.light,
+		Text = "Join", TextColor3 = C.black, Font = Enum.Font.GothamBlack, TextSize = 16,
+	}, c)
+	corner(join, 8)
+	if th then
+		join.BackgroundColor3 = DARK_TILE
+		join.TextColor3 = C.white
+	end
+	join.MouseButton1Click:Connect(function()
+		if isExpired(a) then return end
+		joinServer(a)
+	end)
+
+	-- keep the shiny layers underneath the text and buttons
+	if th then
+		for _, ch in ipairs(c:GetChildren()) do
+			if ch:IsA("GuiObject") then ch.ZIndex = 2 end
+		end
+		for _, ch in ipairs(c:GetChildren()) do
+			if ch == sweep or (ch:IsA("Frame") and ch.Size.Y.Scale == 0.55) then ch.ZIndex = 1 end
+		end
+	end
+
+	local items = collect(c)
+	setAlpha(items, true)
+	local entry = { wrap = wrap, card = c, sub = sub, items = items, join = join, img = img, expired = false }
+	cards[a] = entry
+	if isExpired(a) then styleExpired(entry) end
+
+	task.delay(delay or 0, function()
+		if not wrap.Parent then return end
+		tween(wrap, 0.22, { Size = UDim2.new(1, -6, 0, CARD_H) })
+		fadeItems(items, 0.28, false)
+		tween(c, 0.3, { Position = UDim2.new(0, 0, 0, 0) }, Enum.EasingStyle.Back)
+	end)
+
+	-- shine animations (only themed cards): pulsing glow, gliding sweep, flowing rainbow
+	if th then
+		task.delay((delay or 0) + 0.7, function()
+			if not wrap.Parent then return end
+			local pulse = TweenInfo.new(0.9, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true)
+			TweenService:Create(cardStroke, pulse, { Thickness = 3.4, Transparency = 0.35 }):Play()
+			if strokeGrad then
+				TweenService:Create(strokeGrad, TweenInfo.new(2.6, Enum.EasingStyle.Linear, Enum.EasingDirection.Out, -1, false), { Rotation = 360 }):Play()
+			end
+			if th.rainbow and bgGrad then
+				bgGrad.Offset = Vector2.new(-0.35, 0)
+				TweenService:Create(bgGrad, TweenInfo.new(2.4, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), { Offset = Vector2.new(0.35, 0) }):Play()
+			end
+		end)
+		task.spawn(function()
+			task.wait((delay or 0) + 0.5 + math.random() * 1.5)
+			while wrap.Parent and not stopped do
+				sweep.Position = UDim2.new(-0.3, 0, 0.5, 0)
+				tween(sweep, 0.9, { Position = UDim2.new(1.3, 0, 0.5, 0) }, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
+				task.wait(3.3)
+			end
+		end)
+	end
+end
+
+local function removeCard(a)
+	local e = cards[a]
+	if not e then return end
+	cards[a] = nil
+	fadeItems(e.items, 0.18, true, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+	tween(e.card, 0.18, { Position = UDim2.new(0, -36, 0, 0) }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+	tween(e.wrap, 0.22, { Size = UDim2.new(1, -6, 0, 0) })
+	task.delay(0.26, function() e.wrap:Destroy() end)
+end
+
+syncCards = function()
+	local shown = 0
+	for _, a in ipairs(alerts) do
+		if passes(a) then
+			shown = shown + 1
+			if not cards[a] then makeCard(a, CONFIG.STAGGER and math.min(0.4, (shown - 1) * 0.04) or 0) end
+		else
+			removeCard(a)
+		end
+	end
+	emptyLabel.Visible = shown == 0
+	emptyLabel.Text = (#alerts == 0) and "Waiting for alerts..." or "No alerts match your filters"
+end
+env.EGG_HUB_SYNC = syncCards
+
+local function addAlert(a, skipSync)
+	if type(a) ~= "table" or not a.jobId then return end
+	if a.id and a.id > lastId then lastId = a.id end
+	for _, e in ipairs(alerts) do
+		if a.id and e.id == a.id then return end
+	end
+	-- latency probe: only for brand-new alerts (not history) that carry the hopper's send time
+	if CONFIG.DEBUG_LATENCY and tonumber(a.sent) and a.sent > 0 and (tonumber(a.age) or 0) < 10000 then
+		local now = DateTime.now().UnixTimestampMillis
+		local ts  = tonumber(a.ts) or now
+		a.lat = now - a.sent
+		print(("[latency] %s | hopper->relay %dms | relay->you %dms | total %dms | via %s")
+			:format(tostring(a.egg), ts - a.sent, now - ts, a.lat, wsLive and "WebSocket" or "HTTP"))
+	end
+	seqCount = seqCount + 1
+	a.seq = seqCount
+	a.valueNum = tonumber(a.value) or 0
+	a.born = os.clock() - ((tonumber(a.age) or 0) / 1000)
+
+	-- all eggs of a wave disappear together: one deadline per session, counted from
+	-- the first egg reported in it. An egg born after that deadline starts a new session.
+	if not sessionEnd or a.born >= sessionEnd then
+		sessionEnd = a.born + CONFIG.EXPIRE_SECS
+	end
+	a.expireAt = sessionEnd
+
+	-- clean the name and pin the tier from the table so it can never be mislabelled
+	a.egg = tostring(a.egg or "Egg"):gsub("%s+[Ee]gg$", "")
+	local mutRaw = a.mutation or a.variety or a.variant or a.mut
+	local prefix, rest = splitMutationPrefix(a.egg)
+	if prefix then
+		a.egg = rest
+		if readMutation(mutRaw) == nil then mutRaw = prefix end
+	end
+	a.mutation = readMutation(mutRaw)   -- nil when none
+	a.tier = PET_TIER[norm(a.egg)] or tostring(a.tier or "")
+
+	table.insert(alerts, 1, a)
+	while #alerts > CONFIG.MAX_CARDS do
+		removeCard(table.remove(alerts))
+	end
+	if not skipSync then syncCards() end
+	return a
+end
+
+-- minimise / close
+local minimised = false
+btnMin.MouseButton1Click:Connect(function()
+	minimised = not minimised
+	hidePopup(openPopup)
+	if minimised then
+		tween(main, 0.22, { Size = UDim2.new(0, 320, 0, 30) })
+		task.delay(0.22, function() if minimised then body.Visible = false end end)
+	else
+		body.Visible = true
+		tween(main, 0.28, { Size = UDim2.new(0, 320, 0, 452) }, Enum.EasingStyle.Back)
+	end
+	btnMin.Text = minimised and "+" or "-"
+end)
+btnClose.MouseButton1Click:Connect(function()
+	stopped = true
+	env.EGG_HUB_RUNNING = nil
+	env.EGG_HUB_SYNC = nil
+	fadeItems(collect(main), 0.2, true, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+	tween(mainScale, 0.2, { Scale = 0.9 })
+	task.delay(0.25, function() gui:Destroy() end)
+end)
+
+-- live "x ago" refresh
+task.spawn(function()
+	while not stopped do
+		for a, e in pairs(cards) do
+			if e.sub and e.sub.Parent then e.sub.Text = metaText(a) end
+			if not e.expired and isExpired(a) then styleExpired(e) end
+		end
+		task.wait(1)
+	end
+end)
+
+-- --------------------------------------------------------------- data sources
+local function handleMessage(raw)
+	local ok, d = pcall(function() return HttpService:JSONDecode(raw) end)
+	if not ok or type(d) ~= "table" then return end
+	if d.type == "history" and type(d.alerts) == "table" then
+		for i = #d.alerts, 1, -1 do addAlert(d.alerts[i], true) end
+		syncCards()
+	elseif d.type == "alert" then
+		local a = addAlert(d.alert)
+		if a then tryAutoJoin(a) end
+	end
+end
+
+local function runWebSocket()
+	if not (WebSocket and WebSocket.connect) then return false end
+	local ok, ws = pcall(WebSocket.connect, CONFIG.HUB_WS .. "/?key=" .. CONFIG.KEY)
+	if not ok or not ws then return false end
+	setHub("LIVE", true)
+	wsLive = true
+	local closed = false
+	ws.OnMessage:Connect(handleMessage)
+	ws.OnClose:Connect(function() closed = true end)
+	while not closed and not stopped do task.wait(0.5) end
+	wsLive = false
+	setHub("RECONNECT", false)
+	return true
+end
+
+local pollPrimed = false
+local function runPolling(seconds)
+	if not reqFn then return end
+	local t0 = os.clock()
+	setHub("POLL", true)
+	while not stopped and os.clock() - t0 < seconds do
+		local ok, res = pcall(reqFn, {
+			Url = ("%s/recent?key=%s&since=%d"):format(CONFIG.HUB_HTTP, CONFIG.KEY, lastId),
+			Method = "GET",
+		})
+		if ok and res and res.StatusCode == 200 then
+			local okj, d = pcall(function() return HttpService:JSONDecode(res.Body) end)
+			if okj and type(d.alerts) == "table" then
+				local fresh = {}
+				for _, a in ipairs(d.alerts) do
+					local added = addAlert(a, true)
+					if added then fresh[#fresh + 1] = added end
+				end
+				syncCards()
+				if pollPrimed then
+					for _, a in ipairs(fresh) do tryAutoJoin(a) end
+				end
+				pollPrimed = true
+			end
+			setHub("POLL", true)
+		else
+			setHub("OFFLINE", false)
+		end
+		task.wait(0.4)
+	end
+end
+
+-- One quick HTTP pull of everything newer than lastId. Used at startup (so the list fills
+-- the moment the window opens, without waiting for the WebSocket) and as a bridge while
+-- the WebSocket is still connecting or reconnecting. Duplicates are ignored by id.
+local function pull(autoJoin)
+	if not reqFn then return end
+	local ok, res = pcall(reqFn, {
+		Url = ("%s/recent?key=%s&since=%d"):format(CONFIG.HUB_HTTP, CONFIG.KEY, lastId),
+		Method = "GET",
+	})
+	if not (ok and res and res.StatusCode == 200) then return end
+	local okj, d = pcall(function() return HttpService:JSONDecode(res.Body) end)
+	if not (okj and type(d) == "table" and type(d.alerts) == "table") then return end
+	local fresh = {}
+	for _, a in ipairs(d.alerts) do
+		local added = addAlert(a, true)
+		if added then fresh[#fresh + 1] = added end
+	end
+	if #fresh > 0 then
+		syncCards()
+		if autoJoin then for _, a in ipairs(fresh) do tryAutoJoin(a) end end
+	end
+end
+
+-- demo mode: fake alerts built from the real pet lists, so tiers are always right
+local function runDemo()
+	setHub("DEMO", true)
+	local pool = {}
+	for tier, names in pairs(PET_LISTS) do
+		for _, n in ipairs(names) do pool[#pool + 1] = { n, tier } end
+	end
+	local muts = { "Golden", "Silver", "Rainbow", "Diamond", "None", "None" }
+	local id = 0
+	while not stopped do
+		id = id + 1
+		local e = pool[math.random(#pool)]
+		addAlert({
+			id = 1000 + id, placeId = tostring(game.PlaceId), jobId = "demo-" .. id,
+			egg = e[1], tier = e[2],
+			-- spread values from millions up to quadrillions so the slider has something to filter
+			value = 10 ^ (6 + math.random() * 9),
+			kg = ("%.2f Kg"):format(math.random(200, 1500) / 10),
+			mutation = muts[math.random(#muts)], players = math.random(1, 4) .. "/7", age = 0,
+		})
+		task.wait(5)
+	end
+end
+
+-- if we just arrived in the server we joined for, show the egg box
+do
+	local t = readTarget()
+	if t and t.egg and t.jobId and t.jobId == game.JobId then
+		target = t
+		-- arrived in the egg's server: Auto Join switches off (re-enable it when you are done)
+		if auto.on then
+			auto.on = false
+			saveSettings()
+			refreshAutoUI(false)
+		end
+		startMonitor()
+	elseif type(writefile) == "function" then
+		pcall(writefile, TARGET_FILE, "{}")
+	end
+end
+
+-- open animation: collect the (still empty) window first, hide it, fade it in...
+syncCards()
+do
+	local mainItems = collect(main)
+	setAlpha(mainItems, true)
+	fadeItems(mainItems, 0.3, false)
+	tween(mainScale, 0.38, { Scale = 1 }, Enum.EasingStyle.Back)
+end
+
+-- ...and only then start the data source, so no card exists yet to be caught by it
+task.spawn(function()
+	if CONFIG.DEMO then return runDemo() end
+
+	-- 1) fill the list right now over plain HTTP (does not wait for the WebSocket)
+	task.spawn(function() pull(false) end)
+
+	-- 2) while the WebSocket is not connected yet, keep pulling so nothing is missed
+	if WebSocket and WebSocket.connect then
+		task.spawn(function()
+			while not stopped do
+				if not wsLive then pull(true) end
+				task.wait(0.4)
+			end
+		end)
+	end
+
+	-- 3) the WebSocket itself: instant pushes once it is up
+	while not stopped do
+		local hadWS = runWebSocket()
+		if not hadWS then runPolling(60) else task.wait(0.3) end
+	end
+end)
