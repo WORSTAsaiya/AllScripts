@@ -1777,6 +1777,7 @@ function CONFIG.publishToHub(a)
 		return
 	end
 	task.spawn(function()
+		a.sent = DateTime.now().UnixTimestampMillis   -- <-- the one new line
 		local body = jsonEncode(a)
 		if not body then return end
 		local ok, res = pcall(httpRequest, {
