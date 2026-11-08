@@ -286,7 +286,7 @@ local CONFIG = {
 	-- Lower this if Delta's own menu ends up hidden behind the panel.
 	RENDER_OFF_DISPLAY_ORDER = 9999,
 	-- FPS cap while the view is off (0 = leave Roblox's cap alone).
-	RENDER_OFF_FPS = 25,
+	RENDER_OFF_FPS = 5,
 	-- Full re-hide of every tracked part, in seconds. The frequent pass below
 	-- only repairs your own character (the one thing Roblox itself un-hides);
 	-- anything else that comes back is caught by this one. Keep it large:
