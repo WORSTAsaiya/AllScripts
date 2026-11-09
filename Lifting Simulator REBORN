@@ -105,6 +105,27 @@ for _, parent in ipairs({
 	if old then pcall(function() old:Destroy() end) end
 end
 
+------------------------------------------------------------------ PERFORMANCE TUNING
+-- The UI effects (spinning borders, ash particles, glow) used to update on EVERY frame. They now update at most UI_FX_HZ times a second.
+local PERF = {
+	UI_FX_HZ = 30,         -- effect updates per second (lower = faster game, choppier effects)
+	ASH_COUNT = 14,        -- floating ash particles in the window (was 30)
+	EXTRA_RIM = false,     -- the second spinning border light (AshRim2)
+	TEXT_OUTLINE = false,  -- dark outline on EVERY text (expensive to draw)
+	OUTLINE_MIN_SIZE = 20, -- with TEXT_OUTLINE off, only texts this big (titles / headers) get the outline
+	DIM = 0.5,             -- darkness of the layer behind the UI text (0.7 was the old value; lower = darker)
+}
+local function throttled(fn)
+	local acc, minStep = 0, 1 / PERF.UI_FX_HZ
+	return function(dt)
+		acc = acc + dt
+		if acc < minStep then return end
+		local d = acc
+		acc = 0
+		fn(d)
+	end
+end
+
 -- True if this input is a left mouse button press.
 local function isPress(input)
 	return input.UserInputType == Enum.UserInputType.MouseButton1
@@ -375,7 +396,7 @@ do
 		table.insert(list, e)
 		return st, e
 	end
-	connect(game:GetService("RunService").Heartbeat, function(dt)
+	connect(game:GetService("RunService").Heartbeat, throttled(function(dt)
 		if not window.Visible then return end
 		dt = math.min(dt, 0.1)
 		for _, e in ipairs(list) do
@@ -388,7 +409,7 @@ do
 				end
 			end
 		end
-	end)
+	end))
 end
 
 ------------------------------------------------------------------ Main panel background
@@ -494,13 +515,13 @@ do
 	}, glow)
 
 	local step = newEmitter({
-		count = 30, parent = layer, z = 1, maxAlpha = 0.55, warm = 0.12, drift = 5, topFade = 90,
+		count = PERF.ASH_COUNT, parent = layer, z = 1, maxAlpha = 0.55, warm = 0.12, drift = 5, topFade = 90,
 		speed = { 26, 62 }, life = { 8, 15 }, size = { 2, 5 }, sway = { 6, 22 },
 		spawn = function() return math.random(0, WINDOW_W), math.random(math.floor(WINDOW_H * 0.55), WINDOW_H + 12) end,
 	})
 
 	local clock = 0
-	connect(game:GetService("RunService").Heartbeat, function(dt)
+	connect(game:GetService("RunService").Heartbeat, throttled(function(dt)
 		if not (FX.bg and window.Visible) then return end
 		dt = math.min(dt, 0.1)
 		clock = clock + dt
@@ -509,7 +530,7 @@ do
 		local pulse = math.sin(clock * 0.6) * 0.5 + 0.5
 		glow.BackgroundTransparency = 1 - (1 - (0.95 - pulse * 0.04)) * (FX.introA or 1)
 		glow.BackgroundColor3 = Color3.fromRGB(235, 235, 235):Lerp(Color3.fromRGB(255, 175, 120), (math.sin(clock * 0.23) * 0.5 + 0.5) * 0.45)
-	end)
+	end))
 end
 
 
@@ -599,11 +620,11 @@ do -- slowly sweeping ash-colored shimmer around the window border
 	for _, ch in ipairs(window:GetChildren()) do
 		if ch:IsA("UIStroke") and ch:FindFirstChild("ShimmerGradient") then grad = ch.ShimmerGradient end
 	end
-	connect(game:GetService("RunService").Heartbeat, function(dt)
+	connect(game:GetService("RunService").Heartbeat, throttled(function(dt)
 		if not (grad and window.Visible) then return end
 		rot = (rot + dt * 28) % 360
 		grad.Rotation = rot
-	end)
+	end))
 end
 
 do -- dark ash border (as thick as the gap around the sidebar) with a light ash glow spinning around it
@@ -651,13 +672,16 @@ do -- dark ash border (as thick as the gap around the sidebar) with a light ash 
 		}),
 	}, stroke2)
 	local r1, r2 = 0, 0
-	connect(game:GetService("RunService").Heartbeat, function(dt)
+	grad2Holder.Visible = PERF.EXTRA_RIM
+	connect(game:GetService("RunService").Heartbeat, throttled(function(dt)
 		if not window.Visible then return end
 		r1 = (r1 + dt * 70) % 360
-		r2 = (r2 - dt * 45) % 360
 		grad.Rotation = r1
-		grad2.Rotation = r2
-	end)
+		if PERF.EXTRA_RIM then
+			r2 = (r2 - dt * 45) % 360
+			grad2.Rotation = r2
+		end
+	end))
 end
 
 ------------------------------------------------------------------ Tabs / pages
@@ -1002,7 +1026,7 @@ do
 			corner(imgs[i], UDim.new(0, 28))
 		end
 		corner(new("Frame", { -- dark layer so the text stays readable
-			Size = UDim2.fromScale(1, 1), BackgroundColor3 = C.window, BackgroundTransparency = 0.7, BorderSizePixel = 0, ZIndex = 0,
+			Size = UDim2.fromScale(1, 1), BackgroundColor3 = C.window, BackgroundTransparency = PERF.DIM, BorderSizePixel = 0, ZIndex = 0,
 		}, holder), UDim.new(0, 28))
 		-- PreloadAsync can take minutes (or never return) with executor files, and everything below waits for it: the panel stayed
 		-- solid and the animation never started. Preload in the background instead of waiting for it.
@@ -1042,7 +1066,7 @@ function Config.readable(d)
 	if not (d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox")) then return end
 	if d.Text == "✓" or d.Text == "X" then return end
 	if d.Font == Enum.Font.Gotham then d.Font = Enum.Font.GothamMedium end
-	if d.TextStrokeTransparency >= 1 then
+	if d.TextStrokeTransparency >= 1 and (PERF.TEXT_OUTLINE or d.TextSize >= PERF.OUTLINE_MIN_SIZE) then
 		d.TextStrokeColor3 = Color3.new(0, 0, 0)
 		d.TextStrokeTransparency = 0.55
 	end
