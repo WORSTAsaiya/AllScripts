@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Layout is picked automatically (freeform if enabled on the device, else split-screen with 2 apps).
-# Usage:  bash setup.sh            (it asks how many accounts, then each username)
+# Usage:  bash setup.sh            (it asks how many accounts; usernames are auto-detected)
 #         bash setup.sh user1 user2  (or give the usernames directly)
 # Usernames are matched IN ORDER to the clones it finds:
 #   com.roblox.client, com.roblox.clienu, then whichever of clienz / clienv / clien is installed.
@@ -13,7 +13,7 @@ else exec 3<&0; fi
 
 # ---- tools (skipped if already there) ----
 if [ -z "$DRY_RUN" ]; then
-  pkg install -y which android-tools tmux termux-api jq curl >/dev/null 2>&1 || true
+  pkg install -y which android-tools tmux termux-api jq curl sqlite >/dev/null 2>&1 || true
 fi
 
 # ---- root check ----
@@ -46,6 +46,24 @@ echo "Found ${#FOUND[@]} Roblox app(s): ${FOUND[*]}"
 
 valid_user() { [[ "$1" =~ ^[A-Za-z0-9_]{3,20}$ ]]; }
 
+# find the logged-in username of a clone by reading its Roblox cookie (needs root)
+detect_user() {
+  local pkg=$1 db tmp cookie resp name
+  db=$(su -c "find /data/data/$pkg -name Cookies -type f" </dev/null 2>/dev/null | head -1 | tr -d '\r')
+  [ -z "$db" ] && return 1
+  tmp="$HOME/.ck_$pkg.db"
+  su -c "cat '$db'" </dev/null > "$tmp" 2>/dev/null
+  su -c "cat '$db-wal'" </dev/null > "$tmp-wal" 2>/dev/null || true
+  [ -s "$tmp-wal" ] || rm -f "$tmp-wal"
+  cookie=$(sqlite3 "$tmp" "select value from cookies where name='.ROBLOSECURITY' and host_key like '%roblox.com' order by last_access_utc desc limit 1" 2>/dev/null)
+  rm -f "$tmp" "$tmp-wal"
+  [ -z "$cookie" ] && return 1
+  resp=$(curl -s -m 15 -H "Cookie: .ROBLOSECURITY=$cookie" https://users.roblox.com/v1/users/authenticated)
+  name=$(echo "$resp" | jq -r '.name // empty' 2>/dev/null)
+  [ -z "$name" ] && return 1
+  echo "$name"
+}
+
 USERS=()
 if [ $# -gt 0 ]; then
   # non-interactive: bash setup.sh user1 user2 ...
@@ -58,7 +76,7 @@ if [ $# -gt 0 ]; then
     USERS+=("$u")
   done
 else
-  # interactive
+  # interactive: only ask how many accounts, usernames are auto-detected
   while true; do
     printf "How many accounts? (1-%d): " "${#FOUND[@]}"
     read -r -u 3 count
@@ -66,13 +84,20 @@ else
     echo "Type a number from 1 to ${#FOUND[@]}."
   done
   for ((k=0; k<count; k++)); do
-    while true; do
-      printf "[%s] username: " "${FOUND[$k]}"
-      read -r -u 3 u
-      u=$(echo "$u" | tr -d '[:space:]')
-      if valid_user "$u"; then USERS+=("$u"); break; fi
-      echo "  Not valid. Use the Roblox username (3-20 letters, numbers or _), not the display name."
-    done
+    u=$(detect_user "${FOUND[$k]}" || true)
+    if valid_user "$u"; then
+      echo "[${FOUND[$k]}] detected: $u"
+      USERS+=("$u")
+    else
+      echo "[${FOUND[$k]}] couldn't auto-detect (not logged in?)."
+      while true; do
+        printf "[%s] username: " "${FOUND[$k]}"
+        read -r -u 3 u
+        u=$(echo "$u" | tr -d '[:space:]')
+        if valid_user "$u"; then USERS+=("$u"); break; fi
+        echo "  Not valid. Use the Roblox username, not the display name."
+      done
+    fi
   done
 fi
 
