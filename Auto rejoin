@@ -2,8 +2,8 @@
 # Layout is picked automatically (freeform if enabled on the device, else split-screen with 2 apps).
 # Usage:  bash setup.sh            (it asks how many accounts; usernames are auto-detected)
 #         bash setup.sh user1 user2  (or give the usernames directly)
-# Usernames are matched IN ORDER to the clones it finds:
-#   com.roblox.client, com.roblox.clienu, then whichever of clienz / clienv / clien is installed.
+# Clones are found automatically: com.roblox.client first, then every installed
+# com.roblox.clien<letter> (and com.roblox.clien) in alphabetical order, up to 20.
 set -e
 
 # input comes from the keyboard even if the script was started oddly
@@ -48,15 +48,17 @@ if [ -z "$LAYOUT" ]; then
   ff=$(su -c "settings get global enable_freeform_support" </dev/null 2>/dev/null | tr -d '\r\n')
   if [ "$ff" = "1" ]; then LAYOUT=freeform; else LAYOUT=split; fi
 fi
-if [ "$LAYOUT" = "split" ]; then MAXA=2; else MAXA=3; fi
+if [ "$LAYOUT" = "split" ]; then MAXA=2; else MAXA=20; fi
 
 # ---- find the clones, in a fixed order ----
 installed=$(su -c "pm list packages" </dev/null | sed 's/^package://' | tr -d '\r')
-ORDER=(com.roblox.client com.roblox.clienu com.roblox.clienz com.roblox.clienv com.roblox.clien)
 FOUND=()
-for p in "${ORDER[@]}"; do
-  echo "$installed" | grep -qx "$p" && FOUND+=("$p")
-done
+# the original app first
+if echo "$installed" | grep -qx "com.roblox.client"; then FOUND+=("com.roblox.client"); fi
+# then every clone: com.roblox.clien + optional single letter (no guessing needed, it just lists what's installed)
+while IFS= read -r p; do
+  [ -n "$p" ] && FOUND+=("$p")
+done < <(echo "$installed" | grep -E '^com\.roblox\.clien[a-z]?$' | grep -vx 'com.roblox.client' | sort || true)
 if [ ${#FOUND[@]} -gt $MAXA ]; then FOUND=("${FOUND[@]:0:$MAXA}"); fi
 if [ ${#FOUND[@]} -eq 0 ]; then echo "No Roblox clones found."; exit 1; fi
 
@@ -129,9 +131,22 @@ echo "Setting up:"
 for ((k=0; k<N; k++)); do echo "  [${PKGS[$k]}] = \"${USERS[$k]}\""; done
 echo
 
-# ---- window slots on a 720x1280 screen (left top right bottom); Termux takes the top-left ----
-SLOTS=("0 653 360 1273" "360 33 720 653" "360 653 720 1273")
-TERMUX_SLOT="0 33 360 653"
+# ---- window slots: a grid sized to the screen (left top right bottom); Termux takes cell 0 ----
+SCREEN=$(su -c "wm size" </dev/null 2>/dev/null | tr -d '\r' | grep -oE '[0-9]+x[0-9]+' | tail -1)
+SW=${SCREEN%x*}; SH=${SCREEN#*x}
+[[ "$SW" =~ ^[0-9]+$ && "$SH" =~ ^[0-9]+$ ]] || { SW=720; SH=1280; }
+TOP=33; BOT=$((SH-7))
+TOTAL=$((N+1))                       # accounts + Termux
+COLS=1; while [ $((COLS*COLS)) -lt $TOTAL ]; do COLS=$((COLS+1)); done
+ROWS=$(( (TOTAL + COLS - 1) / COLS ))
+CW=$((SW/COLS)); CH=$(( (BOT-TOP)/ROWS ))
+SLOTS=()
+for ((i=0; i<TOTAL; i++)); do
+  l=$(( (i%COLS)*CW )); t=$(( TOP + (i/COLS)*CH ))
+  SLOTS+=("$l $t $((l+CW)) $((t+CH))")
+done
+TERMUX_SLOT="${SLOTS[0]}"
+[ "$LAYOUT" = "split" ] || echo "Screen ${SW}x${SH}: ${COLS}x${ROWS} grid, windows ${CW}x${CH}"
 
 # ---- config.sh ----
 {
@@ -144,7 +159,7 @@ TERMUX_SLOT="0 33 360 653"
   echo " )"
   echo "declare -A SLOT=("
   i=0
-  for p in "${PKGS[@]}"; do echo "  [$p]=\"${SLOTS[$i]}\""; i=$((i+1)); done
+  for p in "${PKGS[@]}"; do echo "  [$p]=\"${SLOTS[$((i+1))]}\""; i=$((i+1)); done
   echo ")"
   echo "TERMUX_SLOT=\"$TERMUX_SLOT\""
   echo "declare -A MODE=("
