@@ -23,7 +23,7 @@ local CONFIG = {
 	-- (Put your own old key here only in YOUR copy if you want to skip the login window.)
 	KEY        = "",
 
-	-- FREE VERSION: with no key, the joiner still shows alerts, but only from the few bots you allow on
+	-- FREE VERSION: with no key, the joiner still shows alerts, but only eggs worth up to the limit you set on
 	-- the site (SAE HOPPERS > Free version slider), and 2 seconds later than paying clients.
 	-- Set to false if you want a key to be required again.
 	FREE       = true,
@@ -1351,6 +1351,7 @@ local function handleMessage(raw)
 	elseif not ACC.session then
 		return
 	elseif d.type == "status" then
+		if d.freeMax and ACC.session.free then ACC.session.freeMax = tonumber(d.freeMax) end
 		ACC.setLeft(d.secondsLeft, d.bots)
 	elseif d.type == "history" and type(d.alerts) == "table" then
 		for i = #d.alerts, 1, -1 do addAlert(d.alerts[i], true) end
@@ -1585,7 +1586,7 @@ ACC.login = function(token, isFree)
 		return false, tostring(d.error or "Login failed."), (tonumber(res.StatusCode or res.status) == 401)
 	end
 	if ACC.session then ACC.resetFeed() end   -- a key replacing the free version: start from a clean list
-	ACC.session = { token = token, free = isFree == true, unlimited = d.unlimited == true or isFree == true, expireClock = os.clock() + (tonumber(d.secondsLeft) or 0), bots = d.bots }
+	ACC.session = { token = token, free = isFree == true, unlimited = d.unlimited == true or isFree == true, expireClock = os.clock() + (tonumber(d.secondsLeft) or 0), bots = d.bots, freeMax = tonumber(d.freeMax) }
 	ACC.checking = false
 	if not isFree then ACC.saveToken(token) end
 	ACC.refreshStatus()
@@ -1699,7 +1700,9 @@ ACC.showLogin = function(msg, prefill)
 	else
 		local isFree = ACC.session ~= nil and ACC.session.free == true
 		ui.sub.Text = isFree and "Free version. Enter a key for full access." or "Enter the key you were given."
-		if (msg == nil or msg == "") and isFree then ACC.say("Free: limited bots, alerts arrive a moment later.", false)
+		local cap = isFree and tonumber(ACC.session.freeMax) or nil
+		local capText = (cap and cap > 0 and cap < 1e18) and ("Free: eggs up to $" .. fmt(cap) .. "/s, shown a moment late.") or "Free: shown a moment late."
+		if (msg == nil or msg == "") and isFree then ACC.say(capText, false)
 		else ACC.say(msg or "", msg ~= nil and msg ~= "") end
 	end
 end
