@@ -34,12 +34,6 @@ local CONFIG = {
 	MAX_CARDS  = 60,
 	TITLE      = "WORST - EGG FINDER",
 
-	-- Discord button in the login window: copies this link and tries to open Discord
-	DISCORD    = "https://discord.gg/w0rst",
-	-- seconds the free version is slower than paying clients (shown in the login window).
-	-- Used only if the relay server does not send its own "freeDelay" value.
-	FREE_DELAY = 2,
-
 	-- MINIMISED BOX: the "-" button turns the window into a small icon box; tap it to open the window again.
 	-- Pinned to the left edge, just above the game's Shop button (move it by changing MINI_POS).
 	MINI_ICON  = "https://github.com/WORSTAsaiya/Steal-an-Egg/blob/main/neW.png?raw=true",
@@ -652,6 +646,119 @@ do
 	end)
 end
 
+-- ------------------------------------------------ resize
+-- Hold ANY side or corner of the window and drag to resize it. The size is remembered.
+do
+	local SIZE_FILE = "WorstEggFinder_size.json"
+	local MIN_W, MIN_H = 260, 300
+	local EDGE, CORNER = 10, 16
+
+	local function viewport()
+		local cam = workspace.CurrentCamera
+		return cam and cam.ViewportSize or Vector2.new(1280, 720)
+	end
+
+	local function saveSize()
+		if type(writefile) ~= "function" then return end
+		pcall(writefile, SIZE_FILE, HttpService:JSONEncode({ main.Size.X.Offset, main.Size.Y.Offset }))
+	end
+
+	-- restore the last size (kept inside the screen)
+	do
+		local ok, d = pcall(function()
+			if type(isfile) == "function" and type(readfile) == "function" and isfile(SIZE_FILE) then
+				return HttpService:JSONDecode(readfile(SIZE_FILE))
+			end
+		end)
+		if ok and type(d) == "table" and type(d[1]) == "number" and type(d[2]) == "number" then
+			local vp = viewport()
+			local w = math.clamp(d[1], MIN_W, math.max(MIN_W, vp.X - 10))
+			local h = math.clamp(d[2], MIN_H, math.max(MIN_H, vp.Y - 10))
+			main.Size = UDim2.new(0, w, 0, h)
+		end
+	end
+
+	local active, startMouse, startSize, startPos, dirX, dirY
+
+	local function applyResize(i)
+		local d = Vector2.new(i.Position.X, i.Position.Y) - startMouse
+		local s = mainScale.Scale
+		if s <= 0 then s = 1 end
+		local vp = viewport()
+		local w, h = startSize.X, startSize.Y
+		local px, py = startPos.X.Offset, startPos.Y.Offset
+		if dirX ~= 0 then
+			w = math.clamp(startSize.X + dirX * d.X / s, MIN_W, math.max(MIN_W, math.floor(vp.X / s)))
+			if dirX < 0 then px = startPos.X.Offset + (startSize.X - w) * s end   -- left edge moves with the finger
+		end
+		if dirY ~= 0 then
+			h = math.clamp(startSize.Y + dirY * d.Y / s, MIN_H, math.max(MIN_H, math.floor(vp.Y / s)))
+			if dirY < 0 then py = startPos.Y.Offset + (startSize.Y - h) * s end   -- top edge moves with the finger
+		end
+		main.Size = UDim2.new(0, w, 0, h)
+		main.Position = UDim2.new(startPos.X.Scale, px, startPos.Y.Scale, py)
+	end
+
+	local function finish()
+		if not active then return end
+		active = nil
+		saveSize()
+		savePos()
+	end
+
+	local function makeHandle(name, dx, dy, size, pos)
+		local h = mk("Frame", {
+			Name = "Resize" .. name, Size = size, Position = pos, BackgroundTransparency = 1,
+			BorderSizePixel = 0, Active = true, ZIndex = 100,
+		}, main)
+		h.InputBegan:Connect(function(i)
+			if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+				active = i
+				startMouse = Vector2.new(i.Position.X, i.Position.Y)
+				startSize = Vector2.new(main.Size.X.Offset, main.Size.Y.Offset)
+				startPos = main.Position
+				dirX, dirY = dx, dy
+				i.Changed:Connect(function()
+					if i.UserInputState == Enum.UserInputState.End and active == i then finish() end
+				end)
+			end
+		end)
+		return h
+	end
+
+	-- sides
+	makeHandle("Left",   -1, 0, UDim2.new(0, EDGE, 1, -2 * CORNER), UDim2.new(0, 0, 0, CORNER))
+	makeHandle("Right",   1, 0, UDim2.new(0, EDGE, 1, -2 * CORNER), UDim2.new(1, -EDGE, 0, CORNER))
+	makeHandle("Top",     0, -1, UDim2.new(1, -2 * CORNER, 0, EDGE), UDim2.new(0, CORNER, 0, 0))
+	makeHandle("Bottom",  0, 1, UDim2.new(1, -2 * CORNER, 0, EDGE), UDim2.new(0, CORNER, 1, -EDGE))
+	-- corners
+	makeHandle("TopLeft",     -1, -1, UDim2.new(0, CORNER, 0, CORNER), UDim2.new(0, 0, 0, 0))
+	makeHandle("TopRight",     1, -1, UDim2.new(0, CORNER, 0, CORNER), UDim2.new(1, -CORNER, 0, 0))
+	makeHandle("BottomLeft",  -1, 1, UDim2.new(0, CORNER, 0, CORNER), UDim2.new(0, 0, 1, -CORNER))
+	makeHandle("BottomRight",  1, 1, UDim2.new(0, CORNER, 0, CORNER), UDim2.new(1, -CORNER, 1, -CORNER))
+
+	-- little grip dots in the bottom-right corner so you can see where to grab
+	local grip = mk("Frame", { Size = UDim2.new(0, 12, 0, 12), Position = UDim2.new(1, -18, 1, -18), BackgroundTransparency = 1, ZIndex = 99 }, main)
+	for _, p in ipairs({ { 8, 8 }, { 4, 8 }, { 8, 4 }, { 0, 8 }, { 8, 0 }, { 4, 4 } }) do
+		local dot = mk("Frame", { Size = UDim2.new(0, 2, 0, 2), Position = UDim2.new(0, p[1], 0, p[2]), BackgroundColor3 = C.ash, BorderSizePixel = 0, ZIndex = 99 }, grip)
+		corner(dot, 1)
+	end
+
+	UIS.InputChanged:Connect(function(i)
+		if not active then return end
+		if active.UserInputType == Enum.UserInputType.Touch then
+			if i == active then applyResize(i) end
+		elseif i.UserInputType == Enum.UserInputType.MouseMovement then
+			applyResize(i)
+		end
+	end)
+	UIS.InputEnded:Connect(function(i)
+		if active and (i == active or (active.UserInputType == Enum.UserInputType.MouseButton1 and i.UserInputType == Enum.UserInputType.MouseButton1)) then
+			finish()
+		end
+	end)
+end
+
 -- the minimised icon box, pinned above the game's Shop button
 do
 	local SIZE = tonumber(CONFIG.MINI_SIZE) or 60
@@ -1188,118 +1295,151 @@ local function metaText(a)
 	return table.concat(parts, "  •  ")
 end
 
-local CARD_H = 72
-local IMG_W  = CONFIG.IMAGES and 60 or 0
+local CARD_H = 70
+local IMG_W   = CONFIG.IMAGES and 60 or 0   -- space kept for the picture on the left
 
 local function makeCard(a, delay)
-	-- wrap = layout slot (grows open), c = outer dark frame that slides + fades in
+	-- wrap = layout slot (grows open), card = the visible frame that slides + fades in
 	local wrap = mk("Frame", {
 		Size = UDim2.new(1, -6, 0, 0), BackgroundTransparency = 1, ClipsDescendants = true, LayoutOrder = -a.seq,
 	}, list)
 	local c = mk("Frame", {
-		Size = UDim2.new(1, 0, 0, CARD_H), Position = UDim2.new(0, 36, 0, 0),
-		BackgroundColor3 = Color3.fromRGB(10, 10, 12),          -- thin dark rim (this colour showing around the inner frame)
+		Size = UDim2.new(1, 0, 0, CARD_H), Position = UDim2.new(0, 36, 0, 0), BackgroundColor3 = C.card,
 	}, wrap)
-	corner(c, 9)
+	corner(c, 8)
 
 	local mutName, mut = readMutation(a.mutation)
+	local th = mutName and THEMES[mutName:lower()] or nil
+	a._valHex = th and th.valHex or nil
+	local txtMain = th and th.text or C.white
+	local txtSub  = th and th.sub or C.ash
 
-	-- inner frame: flat ash card, barely-there vertical shade, thin border (takes the variety colour)
-	local inner = mk("Frame", {
-		Size = UDim2.new(1, -4, 1, -4), Position = UDim2.new(0, 2, 0, 2),
-		BackgroundColor3 = Color3.new(1, 1, 1), ClipsDescendants = true,
+	-- border takes the colour of the egg variety; themed cards get a thicker glowing one
+	local cardStroke = mk("UIStroke", {
+		Color = (th and th.glow) or (mut and mut.bg) or C.line,
+		Thickness = th and 2.5 or (mut and 2.2 or 1.5),
 	}, c)
-	corner(inner, 7)
-	mk("UIGradient", { Rotation = 90, Color = ColorSequence.new(Color3.fromRGB(38, 38, 43), Color3.fromRGB(28, 28, 32)) }, inner)
-	local innerStroke = mk("UIStroke", {
-		Color = (mut and not mut.rainbow) and mut.bg or C.line, Thickness = mut and 1.8 or 1.2,
-	}, inner)
-	if mut and mut.rainbow then mk("UIGradient", { Color = RAINBOW }, innerStroke) end
+	if (mut and mut.rainbow) or (th and th.rainbow) then
+		mk("UIGradient", { Color = RAINBOW }, cardStroke)
+	end
 
-	-- picture on a dark tile
+	local bgGrad, sweep, strokeGrad
+	if th then
+		c.BackgroundColor3 = Color3.new(1, 1, 1)          -- the gradient provides the colour
+		c.ClipsDescendants = true
+		bgGrad = mk("UIGradient", { Color = th.bg, Rotation = 28 }, c)
+		strokeGrad = cardStroke:FindFirstChildOfClass("UIGradient")
+		-- glossy top half
+		local gloss = mk("Frame", {
+			Size = UDim2.new(1, 0, 0.55, 0), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0,
+		}, c)
+		corner(gloss, 8)
+		mk("UIGradient", {
+			Rotation = 90,
+			Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.5), NumberSequenceKeypoint.new(1, 1) }),
+		}, gloss)
+		-- light sweep that glides across now and then
+		sweep = mk("Frame", {
+			Size = UDim2.new(0.22, 0, 2.2, 0), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(-0.3, 0, 0.5, 0),
+			Rotation = 18, BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0,
+		}, c)
+		mk("UIGradient", {
+			Transparency = NumberSequence.new({
+				NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0.3), NumberSequenceKeypoint.new(1, 1),
+			}),
+		}, sweep)
+	end
+
+	-- picture (egg / pet). Starts empty and fills in once downloaded.
 	local img
 	if CONFIG.IMAGES then
-		local tile = mk("Frame", {
-			Size = UDim2.new(0, 52, 0, 52), Position = UDim2.new(0, 7, 0, 8), BackgroundColor3 = C.box,
-		}, inner)
-		corner(tile, 8)
-		stroke(tile, C.line, 1)
+		local frame = mk("Frame", {
+			Size = UDim2.new(0, 52, 0, 52), Position = UDim2.new(0, 8, 0.5, -26), BackgroundColor3 = C.box,
+		}, c)
+		corner(frame, 8)
 		img = mk("ImageLabel", {
-			Size = UDim2.new(1, -6, 1, -6), Position = UDim2.new(0, 3, 0, 3), BackgroundTransparency = 1,
+			Size = UDim2.new(1, -4, 1, -4), Position = UDim2.new(0, 2, 0, 2), BackgroundTransparency = 1,
 			ScaleType = Enum.ScaleType.Fit, Image = "",
-		}, tile)
+		}, frame)
 		loadImage(imageUrlsFor(a.egg), function(asset)
 			if img and img.Parent then img.Image = asset end
 		end)
-
-		-- variety chip overlapping the bottom of the tile
-		if mutName then
-			local chipW = TextService:GetTextSize(mutName:upper(), 9, Enum.Font.GothamBlack, Vector2.new(200, 16)).X + 14
-			local chip = mk("Frame", {
-				Size = UDim2.new(0, chipW, 0, 14), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0, 33, 0, 58),
-				BackgroundColor3 = mut.bg, ZIndex = 3,
-			}, inner)
-			corner(chip, 4)
-			stroke(chip, Color3.fromRGB(10, 10, 12), 1.5)
-			if mut.rainbow then mk("UIGradient", { Color = RAINBOW }, chip) end
-			mk("TextLabel", {
-				Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Text = mutName:upper(),
-				TextColor3 = mut.fg, Font = Enum.Font.GothamBlack, TextSize = 9, ZIndex = 4,
-			}, chip)
-		end
 	end
 
 	local textX = 10 + IMG_W
-	local rightPad = 90   -- room for the Join button
 
-	-- row 1: name
+	-- row 1: pet name (+ variety chip on the right)
+	local chipW = 0
+	if mutName then
+		chipW = TextService:GetTextSize(mutName:upper(), 9, Enum.Font.GothamBlack, Vector2.new(200, 16)).X + 14
+		local chip = mk("Frame", {
+			Size = UDim2.new(0, chipW, 0, 16), Position = UDim2.new(1, -(88 + chipW), 0, 8),
+			BackgroundColor3 = th and DARK_TILE or mut.bg,
+		}, c)
+		corner(chip, 4)
+		if not th and mut.rainbow then mk("UIGradient", { Color = RAINBOW }, chip) end
+		local chipLabel = mk("TextLabel", {
+			Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Text = mutName:upper(),
+			TextColor3 = th and th.chipText or mut.fg, Font = Enum.Font.GothamBlack, TextSize = 9,
+		}, chip)
+		if th and th.rainbow then mk("UIGradient", { Color = RAINBOW }, chipLabel) end
+	end
 	mk("TextLabel", {
-		Size = UDim2.new(1, -(textX + rightPad), 0, 20), Position = UDim2.new(0, textX, 0, 6), BackgroundTransparency = 1,
-		Text = a.egg or "Egg", TextColor3 = C.white, Font = Enum.Font.GothamBlack, TextSize = 16,
+		Size = UDim2.new(1, -(textX + 88 + (chipW > 0 and chipW + 4 or 0)), 0, 20), Position = UDim2.new(0, textX, 0, 6),
+		BackgroundTransparency = 1,
+		Text = a.egg or "Egg", TextColor3 = txtMain, Font = Enum.Font.GothamBlack, TextSize = 15,
 		TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
-	}, inner)
+	}, c)
 
-	-- row 2: tier badge (brighter = rarer) + value
+	-- row 2: tier badge + value
 	local badgeStyle = TIER_BADGE[a.tier]
 	local badge = mk("Frame", {
-		Size = UDim2.new(0, 62, 0, 16), Position = UDim2.new(0, textX, 0, 28),
+		Size = UDim2.new(0, 68, 0, 16), Position = UDim2.new(0, textX, 0, 29),
 		BackgroundColor3 = badgeStyle and badgeStyle.bg or C.track,
-	}, inner)
+	}, c)
 	corner(badge, 4)
+	if th then mk("UIStroke", { Color = DARK_TILE, Thickness = 1.2 }, badge) end
 	mk("TextLabel", {
 		Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
 		Text = (a.tier ~= "" and a.tier or "?"):upper(), TextColor3 = badgeStyle and badgeStyle.fg or C.ashLite,
 		Font = Enum.Font.GothamBlack, TextSize = 9,
 	}, badge)
 	mk("TextLabel", {
-		Size = UDim2.new(1, -(textX + 62 + 6 + rightPad), 0, 16), Position = UDim2.new(0, textX + 68, 0, 28),
-		BackgroundTransparency = 1, RichText = true,
-		Text = valueText(a), Font = Enum.Font.GothamBlack, TextSize = 13, TextColor3 = C.white,
+		Size = UDim2.new(1, -(textX + 68 + 6 + 84), 0, 16), Position = UDim2.new(0, textX + 74, 0, 29), BackgroundTransparency = 1, RichText = true,
+		Text = valueText(a), Font = Enum.Font.GothamBlack, TextSize = 13, TextColor3 = txtMain,
 		TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
-	}, inner)
+	}, c)
 
-	-- row 3: kg / players / delay / age (the timer loop keeps updating this label)
+	-- row 3: kg / players / age
 	local sub = mk("TextLabel", {
-		Size = UDim2.new(1, -(textX + rightPad), 0, 16), Position = UDim2.new(0, textX, 0, 48), BackgroundTransparency = 1,
-		Text = metaText(a), TextColor3 = C.ash, Font = Enum.Font.GothamBold, TextSize = 10,
+		Size = UDim2.new(1, -(textX + 84), 0, 16), Position = UDim2.new(0, textX, 0, 48), BackgroundTransparency = 1,
+		Text = metaText(a), TextColor3 = txtSub, Font = Enum.Font.GothamBold, TextSize = 10,
 		TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
-	}, inner)
+	}, c)
 
-	-- Join: plain light-ash button, dark text, small squish on press
 	local join = mk("TextButton", {
-		Size = UDim2.new(0, 72, 0, 40), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0),
-		BackgroundColor3 = C.light, Text = "Join", TextColor3 = C.black, Font = Enum.Font.GothamBlack, TextSize = 16,
-		AutoButtonColor = false,
-	}, inner)
+		Size = UDim2.new(0, 70, 0, 40), Position = UDim2.new(1, -78, 0.5, -20), BackgroundColor3 = C.light,
+		Text = "Join", TextColor3 = C.black, Font = Enum.Font.GothamBlack, TextSize = 16,
+	}, c)
 	corner(join, 8)
-	local joinScale = mk("UIScale", {}, join)
-	join.MouseButton1Down:Connect(function() tween(joinScale, 0.08, { Scale = 0.94 }) end)
-	join.MouseButton1Up:Connect(function() tween(joinScale, 0.12, { Scale = 1 }) end)
-	join.MouseLeave:Connect(function() tween(joinScale, 0.12, { Scale = 1 }) end)
+	if th then
+		join.BackgroundColor3 = DARK_TILE
+		join.TextColor3 = C.white
+	end
 	join.MouseButton1Click:Connect(function()
 		if isExpired(a) then return end
 		joinServer(a)
 	end)
+
+	-- keep the shiny layers underneath the text and buttons
+	if th then
+		for _, ch in ipairs(c:GetChildren()) do
+			if ch:IsA("GuiObject") then ch.ZIndex = 2 end
+		end
+		for _, ch in ipairs(c:GetChildren()) do
+			if ch == sweep or (ch:IsA("Frame") and ch.Size.Y.Scale == 0.55) then ch.ZIndex = 1 end
+		end
+	end
 
 	local items = collect(c)
 	setAlpha(items, true)
@@ -1313,6 +1453,30 @@ local function makeCard(a, delay)
 		fadeItems(items, 0.28, false)
 		tween(c, 0.3, { Position = UDim2.new(0, 0, 0, 0) }, Enum.EasingStyle.Back)
 	end)
+
+	-- shine animations (only themed cards): pulsing glow, gliding sweep, flowing rainbow
+	if th then
+		task.delay((delay or 0) + 0.7, function()
+			if not wrap.Parent then return end
+			local pulse = TweenInfo.new(0.9, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true)
+			TweenService:Create(cardStroke, pulse, { Thickness = 3.4, Transparency = 0.35 }):Play()
+			if strokeGrad then
+				TweenService:Create(strokeGrad, TweenInfo.new(2.6, Enum.EasingStyle.Linear, Enum.EasingDirection.Out, -1, false), { Rotation = 360 }):Play()
+			end
+			if th.rainbow and bgGrad then
+				bgGrad.Offset = Vector2.new(-0.35, 0)
+				TweenService:Create(bgGrad, TweenInfo.new(2.4, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), { Offset = Vector2.new(0.35, 0) }):Play()
+			end
+		end)
+		task.spawn(function()
+			task.wait((delay or 0) + 0.5 + math.random() * 1.5)
+			while wrap.Parent and not stopped do
+				sweep.Position = UDim2.new(-0.3, 0, 0.5, 0)
+				tween(sweep, 0.9, { Position = UDim2.new(1.3, 0, 0.5, 0) }, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
+				task.wait(3.3)
+			end
+		end)
+	end
 end
 
 local function removeCard(a)
@@ -1493,7 +1657,6 @@ local function handleMessage(raw)
 		return
 	elseif d.type == "status" then
 		if d.freeMax and ACC.session.free then ACC.session.freeMax = tonumber(d.freeMax) end
-		if d.freeDelay and ACC.session.free then ACC.session.freeDelay = tonumber(d.freeDelay) end
 		ACC.setLeft(d.secondsLeft, d.bots)
 	elseif d.type == "history" and type(d.alerts) == "table" then
 		for i = #d.alerts, 1, -1 do addAlert(d.alerts[i], true) end
@@ -1751,7 +1914,7 @@ ACC.login = function(token, isFree)
 		return false, tostring(d.error or "Login failed."), (tonumber(res.StatusCode or res.status) == 401)
 	end
 	if ACC.session then ACC.resetFeed() end   -- a key replacing the free version: start from a clean list
-	ACC.session = { token = token, free = isFree == true, unlimited = d.unlimited == true or isFree == true, expireClock = os.clock() + (tonumber(d.secondsLeft) or 0), bots = d.bots, freeMax = tonumber(d.freeMax), freeDelay = tonumber(d.freeDelay) }
+	ACC.session = { token = token, free = isFree == true, unlimited = d.unlimited == true or isFree == true, expireClock = os.clock() + (tonumber(d.secondsLeft) or 0), bots = d.bots, freeMax = tonumber(d.freeMax) }
 	ACC.checking = false
 	if not isFree then ACC.saveToken(token) end
 	ACC.refreshStatus()
@@ -1783,37 +1946,6 @@ ACC.say = function(text, bad)
 	end
 end
 
-ACC.openDiscord = function()
-	local link = CONFIG.DISCORD
-	local short = (link:gsub("^https?://", ""))
-	local clip = setclipboard or toclipboard or set_clipboard or (syn and syn.write_clipboard)
-	local copied = false
-	if clip then copied = pcall(clip, link) and true or false end
-	ACC.say(copied and ("Link copied: " .. short) or ("Discord: " .. short), false)
-	-- try to open it: the Discord desktop app listens locally (PC); otherwise try the browser.
-	-- On phones neither usually works, so the copied link is the fallback: paste it in your browser.
-	task.spawn(function()
-		local opened = false
-		local code = link:match("discord%.gg/([%w%-_]+)")
-		if reqFn and code then
-			for port = 6463, 6472 do
-				local ok, res = pcall(reqFn, {
-					Url = "http://127.0.0.1:" .. port .. "/rpc?v=1", Method = "POST",
-					Headers = { ["Content-Type"] = "application/json", ["Origin"] = "https://discord.com" },
-					Body = HttpService:JSONEncode({ cmd = "INVITE_BROWSER", args = { code = code }, nonce = HttpService:GenerateGUID(false) }),
-				})
-				local sc = ok and type(res) == "table" and tonumber(res.StatusCode or res.status)
-				if sc and sc >= 200 and sc < 300 then opened = true break end
-			end
-		end
-		if not opened then
-			pcall(function() game:GetService("GuiService"):OpenBrowserWindow(link) end)
-		else
-			ACC.say(copied and ("Opening Discord. Link copied: " .. short) or "Opening Discord...", false)
-		end
-	end)
-end
-
 ACC.build = function()
 	if ACC.ui then return ACC.ui end
 	local dim = mk("TextButton", {
@@ -1821,8 +1953,8 @@ ACC.build = function()
 		Text = "", AutoButtonColor = false, ZIndex = 40, Visible = false,
 	}, body)
 	local card = mk("Frame", {
-		Size = UDim2.new(1, -28, 0, 234), AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.new(0.5, 0, 0, 170), BackgroundColor3 = C.popup,
+		Size = UDim2.new(1, -28, 0, 190), AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0.5, 0, 0, 155), BackgroundColor3 = C.popup,
 	}, dim)
 	corner(card, 10)
 	stroke(card, C.ash, 2)
@@ -1851,13 +1983,6 @@ ACC.build = function()
 	ui.status = label(UDim2.new(1, -28, 0, 40), UDim2.new(0, 14, 0, 144), "", C.ash, Enum.Font.GothamBold, 11)
 	ui.status.TextWrapped = true
 	ui.status.TextYAlignment = Enum.TextYAlignment.Top
-	ui.disc = mk("TextButton", {
-		Size = UDim2.new(1, -28, 0, 34), Position = UDim2.new(0, 14, 0, 190), BackgroundColor3 = C.select,
-		Text = "Join our discord to purchase", TextColor3 = C.white, Font = Enum.Font.GothamBold, TextSize = 12,
-	}, card)
-	corner(ui.disc, 8)
-	stroke(ui.disc, C.line, 1.5)
-	ui.disc.MouseButton1Click:Connect(function() ACC.openDiscord() end)
 	local x = mk("TextButton", {
 		Size = UDim2.new(0, 26, 0, 22), Position = UDim2.new(1, -36, 0, 8), BackgroundColor3 = C.line,
 		Text = "X", TextColor3 = C.white, Font = Enum.Font.GothamBold, TextSize = 12,
@@ -1932,8 +2057,6 @@ ACC.showLogin = function(msg, prefill)
 	ui.title.Text = on and "ACCOUNT" or "LOGIN"
 	ui.input.Visible = not on
 	ui.btn.Text = on and "Log out" or "Login"
-	ui.disc.Visible = not on                       -- paying clients do not need the purchase button
-	ui.card.Size = UDim2.new(1, -28, 0, on and 190 or 234)
 	if prefill and not on then ui.input.Text = prefill end
 	if on then
 		local S = ACC.session
@@ -1944,9 +2067,7 @@ ACC.showLogin = function(msg, prefill)
 		local isFree = ACC.session ~= nil and ACC.session.free == true
 		ui.sub.Text = isFree and "Free version. Enter a key for full access." or "Enter the key you were given."
 		local cap = isFree and tonumber(ACC.session.freeMax) or nil
-		local dl = tonumber(ACC.session and ACC.session.freeDelay) or CONFIG.FREE_DELAY
-		local slower = ("%g"):format(dl) .. (dl == 1 and " second" or " seconds") .. " slower"
-		local capText = (cap and cap > 0 and cap < 1e18) and ("Free: eggs up to $" .. fmt(cap) .. "/s and shown " .. slower .. ".") or ("Free: shown " .. slower .. ".")
+		local capText = (cap and cap > 0 and cap < 1e18) and ("Free: eggs up to $" .. fmt(cap) .. "/s, shown a moment late.") or "Free: shown a moment late."
 		if (msg == nil or msg == "") and isFree then ACC.say(capText, false)
 		else ACC.say(msg or "", msg ~= nil and msg ~= "") end
 	end
