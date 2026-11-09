@@ -6,7 +6,9 @@
 set -e
 
 # input comes from the keyboard even if the script was started oddly
-if ! { exec 3</dev/tty; } 2>/dev/null; then exec 3<&0; fi
+if [ -t 0 ]; then exec 3<&0
+elif { exec 3</dev/tty; } 2>/dev/null; then :
+else exec 3<&0; fi
 
 # ---- tools (skipped if already there) ----
 if [ -z "$DRY_RUN" ]; then
@@ -14,13 +16,13 @@ if [ -z "$DRY_RUN" ]; then
 fi
 
 # ---- root check ----
-if ! su -c "id" 2>/dev/null | grep -q "uid=0"; then
+if ! su -c "id" </dev/null 2>/dev/null | grep -q "uid=0"; then
   echo "No root (uid=0). This setup needs a rooted device."
   exit 1
 fi
 
 # ---- find the clones, in a fixed order ----
-installed=$(su -c "pm list packages" | sed 's/^package://' | tr -d '\r')
+installed=$(su -c "pm list packages" </dev/null | sed 's/^package://' | tr -d '\r')
 ORDER=(com.roblox.client com.roblox.clienu com.roblox.clienz com.roblox.clienv com.roblox.clien)
 FOUND=()
 for p in "${ORDER[@]}"; do
@@ -29,6 +31,7 @@ done
 if [ ${#FOUND[@]} -gt 3 ]; then FOUND=("${FOUND[@]:0:3}"); fi
 if [ ${#FOUND[@]} -eq 0 ]; then echo "No Roblox clones found."; exit 1; fi
 
+stty sane 2>/dev/null || true
 echo "Found ${#FOUND[@]} Roblox app(s): ${FOUND[*]}"
 
 valid_user() { [[ "$1" =~ ^[A-Za-z0-9_]{3,20}$ ]]; }
