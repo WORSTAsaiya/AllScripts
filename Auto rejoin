@@ -11,9 +11,29 @@ if [ -t 0 ]; then exec 3<&0
 elif { exec 3</dev/tty; } 2>/dev/null; then :
 else exec 3<&0; fi
 
-# ---- tools (skipped if already there) ----
+# ---- tools: update, install, and self-repair a broken curl/mirror ----
 if [ -z "$DRY_RUN" ]; then
-  pkg install -y which android-tools tmux termux-api jq curl sqlite >/dev/null 2>&1 || true
+  export DEBIAN_FRONTEND=noninteractive
+  APT_OPTS="-o Dpkg::Options::=--force-confold"
+
+  install_tools() {
+    apt update -y >/dev/null 2>&1 || true
+    apt full-upgrade -y $APT_OPTS >/dev/null 2>&1 || true
+    pkg install -y which android-tools tmux termux-api jq curl sqlite >/dev/null 2>&1 || true
+  }
+
+  echo "Updating tools (first run can take a few minutes)..."
+  install_tools
+
+  # if curl is broken, switch to the official Cloudflare mirror and redo it
+  if ! curl --version >/dev/null 2>&1; then
+    echo "curl is broken, switching mirror and repairing..."
+    echo "deb https://packages-cf.termux.dev/apt/termux-main stable main" > "$PREFIX/etc/apt/sources.list"
+    install_tools
+    pkg install --reinstall -y openssl libcurl curl >/dev/null 2>&1 || true
+  fi
+
+  curl --version >/dev/null 2>&1 || { echo "curl is still broken. Run termux-change-repo manually, then rerun."; exit 1; }
 fi
 
 # ---- root check ----
