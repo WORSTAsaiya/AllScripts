@@ -34,6 +34,12 @@ local CONFIG = {
 	MAX_CARDS  = 60,
 	TITLE      = "WORST - EGG FINDER",
 
+	-- MINIMISED BOX: the "-" button turns the window into a small icon box; tap it to open the window again.
+	-- Pinned to the left edge, just above the game's Shop button (move it by changing MINI_POS).
+	MINI_ICON  = "https://github.com/WORSTAsaiya/Steal-an-Egg/blob/main/neW.png?raw=true",
+	MINI_SIZE  = 60,
+	MINI_POS   = UDim2.new(0, 14, 0.39, 0),   -- the box's bottom-left corner
+
 	-- SPEED: the window opens and the data connection starts straight away.
 	-- Turn these on only if your executor runs the script before the game is ready.
 	WAIT_FOR_GAME      = true,
@@ -355,7 +361,8 @@ end
 
 local function fetchOne(url)
 	if imgAsset[url] ~= nil then return imgAsset[url] end
-	local path = IMG_DIR .. "/" .. url:match("([^/]+)$"):gsub("[^%w%._%-]", "_")
+	local fname = (url:match("([^/]+)$") or "img"):gsub("%?.*$", ""):gsub("[^%w%._%-]", "_")
+	local path = IMG_DIR .. "/" .. fname
 	local ok, asset = pcall(function()
 		if not isfile(path) then
 			local res = reqFn({ Url = url, Method = "GET" })
@@ -429,6 +436,15 @@ local auto       = { on = false, minValue = 0 }   -- auto join
 local sessionEnd = nil                            -- shared "eggs disappear" deadline (os.clock)
 -- account / login state (a single table on purpose: keeps this script under Lua's 200-locals limit)
 local ACC = { session = nil, gen = 0, busy = false, checking = true, device = "", connBad = false }
+-- UI effects + minimised state (one table on purpose: keeps this script under Lua's 200-locals limit)
+local FX = {
+	min = false, unread = 0,
+	shine = ColorSequence.new({
+		ColorSequenceKeypoint.new(0,   Color3.fromRGB(70, 70, 78)),
+		ColorSequenceKeypoint.new(0.5, Color3.fromRGB(255, 255, 255)),
+		ColorSequenceKeypoint.new(1,   Color3.fromRGB(70, 70, 78)),
+	}),
+}
 
 -- auto join settings survive teleports (file, or passed through queue_on_teleport)
 local SETTINGS_FILE = "WorstEggFinder_settings.json"
@@ -518,13 +534,19 @@ local gui = mk("ScreenGui", {
 }, parentGui)
 
 local main = mk("Frame", {
-	Size = UDim2.new(0, 320, 0, 452),
-	Position = UDim2.new(0.5, -160, 0, 50),
-	BackgroundColor3 = C.panel,
+	Size = UDim2.new(0, 336, 0, 476),
+	Position = UDim2.new(0.5, -168, 0, 50),
+	BackgroundColor3 = Color3.new(1, 1, 1),   -- the gradient below gives the colour
 	ClipsDescendants = true,
 }, gui)
-corner(main, 10)
-stroke(main, C.line, 2)
+corner(main, 14)
+mk("UIGradient", {
+	Rotation = 90,
+	Color = ColorSequence.new(Color3.fromRGB(26, 26, 30), Color3.fromRGB(11, 11, 13)),
+}, main)
+-- thick border with a shine that slowly travels around it
+FX.stroke = mk("UIStroke", { Color = Color3.new(1, 1, 1), Thickness = 3 }, main)
+FX.grad = mk("UIGradient", { Color = FX.shine }, FX.stroke)
 local mainScale = mk("UIScale", { Scale = 0.9 }, main)
 
 -- ------------------------------------------------ remember window position
@@ -556,24 +578,54 @@ do
 end
 
 -- title bar (drag handle)
-local title = mk("Frame", { Size = UDim2.new(1, 0, 0, 30), BackgroundColor3 = C.titlebar }, main)
-corner(title, 10)
+local title = mk("Frame", { Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = Color3.new(1, 1, 1) }, main)
+corner(title, 14)
+mk("UIGradient", { Rotation = 90, Color = ColorSequence.new(Color3.fromRGB(40, 40, 45), Color3.fromRGB(10, 10, 12)) }, title)
+
+-- shimmer line under the title
+FX.line = mk("Frame", {
+	Size = UDim2.new(1, -20, 0, 2), Position = UDim2.new(0, 10, 1, -3), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0,
+}, title)
+FX.shimmer = mk("UIGradient", {
+	Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0.05), NumberSequenceKeypoint.new(1, 1),
+	}),
+}, FX.line)
+
+local titleX = 12
+if CAN_IMG then
+	titleX = 44
+	FX.logo = mk("ImageLabel", {
+		Size = UDim2.new(0, 28, 0, 28), Position = UDim2.new(0, 10, 0.5, -14), BackgroundTransparency = 1,
+		ScaleType = Enum.ScaleType.Fit, Image = "",
+	}, title)
+	loadImage({ CONFIG.MINI_ICON }, function(asset)
+		if FX.logo and FX.logo.Parent then FX.logo.Image = asset end
+	end)
+end
 mk("TextLabel", {
-	Size = UDim2.new(1, -70, 1, 0), Position = UDim2.new(0, 10, 0, 0), BackgroundTransparency = 1,
-	Text = CONFIG.TITLE, TextColor3 = C.white, Font = Enum.Font.GothamBlack, TextSize = 14,
-	TextXAlignment = Enum.TextXAlignment.Left,
+	Size = UDim2.new(1, -(titleX + 100), 1, 0), Position = UDim2.new(0, titleX, 0, 0), BackgroundTransparency = 1,
+	Text = CONFIG.TITLE, TextColor3 = C.white, Font = Enum.Font.GothamBlack, TextSize = 15,
+	TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
 }, title)
 
+-- live dot: pulses while connected, goes grey when not
+FX.dot = mk("Frame", {
+	Size = UDim2.new(0, 9, 0, 9), Position = UDim2.new(1, -90, 0.5, -4), BackgroundColor3 = C.ash,
+}, title)
+corner(FX.dot, 5)
+
 local btnMin = mk("TextButton", {
-	Size = UDim2.new(0, 26, 0, 22), Position = UDim2.new(1, -60, 0, 4), BackgroundColor3 = C.card,
-	Text = "-", TextColor3 = C.white, Font = Enum.Font.GothamBold, TextSize = 16,
+	Size = UDim2.new(0, 28, 0, 26), Position = UDim2.new(1, -70, 0.5, -13), BackgroundColor3 = C.card,
+	Text = "-", TextColor3 = C.white, Font = Enum.Font.GothamBold, TextSize = 18,
 }, title)
-corner(btnMin, 6)
+corner(btnMin, 7)
+stroke(btnMin, C.line, 1.5)
 local btnClose = mk("TextButton", {
-	Size = UDim2.new(0, 26, 0, 22), Position = UDim2.new(1, -30, 0, 4), BackgroundColor3 = C.line,
-	Text = "X", TextColor3 = C.white, Font = Enum.Font.GothamBold, TextSize = 12,
+	Size = UDim2.new(0, 28, 0, 26), Position = UDim2.new(1, -38, 0.5, -13), BackgroundColor3 = C.line,
+	Text = "X", TextColor3 = C.white, Font = Enum.Font.GothamBold, TextSize = 13,
 }, title)
-corner(btnClose, 6)
+corner(btnClose, 7)
 
 -- drag
 do
@@ -594,28 +646,69 @@ do
 	end)
 end
 
-local body = mk("Frame", { Size = UDim2.new(1, 0, 1, -30), Position = UDim2.new(0, 0, 0, 30), BackgroundTransparency = 1 }, main)
+-- the minimised icon box, pinned above the game's Shop button
+do
+	local SIZE = tonumber(CONFIG.MINI_SIZE) or 60
+	local mini = mk("TextButton", {
+		Name = "MiniBox", Size = UDim2.new(0, SIZE, 0, SIZE), AnchorPoint = Vector2.new(0, 1),
+		Position = CONFIG.MINI_POS or UDim2.new(0, 14, 0.39, 0), BackgroundColor3 = Color3.new(1, 1, 1),
+		Text = "", AutoButtonColor = false, Visible = false,
+	}, gui)
+	corner(mini, 14)
+	mk("UIGradient", { Rotation = 90, Color = ColorSequence.new(Color3.fromRGB(34, 34, 38), Color3.fromRGB(10, 10, 12)) }, mini)
+	FX.miniScale = mk("UIScale", { Scale = 1 }, mini)
+	FX.miniStroke = mk("UIStroke", { Color = Color3.new(1, 1, 1), Thickness = 3 }, mini)
+	FX.miniGrad = mk("UIGradient", { Color = FX.shine }, FX.miniStroke)
+
+	local fallback = mk("TextLabel", {
+		Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Text = "W", TextColor3 = C.white,
+		Font = Enum.Font.GothamBlack, TextSize = 28,
+	}, mini)
+	local icon = mk("ImageLabel", {
+		Size = UDim2.new(1, -14, 1, -14), Position = UDim2.new(0, 7, 0, 7), BackgroundTransparency = 1,
+		ScaleType = Enum.ScaleType.Fit, Image = "",
+	}, mini)
+	loadImage({ CONFIG.MINI_ICON }, function(asset)
+		if icon and icon.Parent then icon.Image = asset; fallback.Visible = false end
+	end)
+
+	-- number of new alerts that arrived while minimised
+	FX.badge = mk("TextLabel", {
+		Size = UDim2.new(0, 22, 0, 22), Position = UDim2.new(1, -15, 0, -7), BackgroundColor3 = C.white,
+		Text = "0", TextColor3 = C.black, Font = Enum.Font.GothamBlack, TextSize = 12, Visible = false, ZIndex = 3,
+	}, mini)
+	corner(FX.badge, 11)
+	mk("UIStroke", { Color = C.black, Thickness = 2 }, FX.badge)
+
+	mini.MouseButton1Click:Connect(function() FX.restore() end)
+	FX.mini = mini
+end
+
+local body = mk("Frame", { Size = UDim2.new(1, 0, 1, -38), Position = UDim2.new(0, 0, 0, 38), BackgroundTransparency = 1 }, main)
 
 -- row 1: MIN JOIN (slider) | AUTO JOIN (toggle)
-local autoRow = mk("Frame", { Size = UDim2.new(1, -12, 0, 46), Position = UDim2.new(0, 6, 0, 6), BackgroundTransparency = 1 }, body)
+local autoRow = mk("Frame", { Size = UDim2.new(1, -16, 0, 52), Position = UDim2.new(0, 8, 0, 8), BackgroundTransparency = 1 }, body)
 mk("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }, autoRow)
 
 -- row 2: SHOW MIN VALUE | RARITY | STATUS
-local statRow = mk("Frame", { Size = UDim2.new(1, -12, 0, 46), Position = UDim2.new(0, 6, 0, 58), BackgroundTransparency = 1 }, body)
+local statRow = mk("Frame", { Size = UDim2.new(1, -16, 0, 52), Position = UDim2.new(0, 8, 0, 66), BackgroundTransparency = 1 }, body)
 mk("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }, statRow)
 
 local function statBox(parent, cols, order, name)
 	local box = mk("Frame", { Size = UDim2.new(1 / cols, cols == 3 and -3 or -2, 1, 0), BackgroundColor3 = C.box, LayoutOrder = order }, parent)
-	corner(box, 6)
-	stroke(box, C.line, 1.5)
+	corner(box, 9)
+	local bs = mk("UIStroke", { Color = C.line, Thickness = 2 }, box)
 	mk("TextLabel", {
-		Size = UDim2.new(1, 0, 0, 14), Position = UDim2.new(0, 0, 0, 3), BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 0, 14), Position = UDim2.new(0, 0, 0, 5), BackgroundTransparency = 1,
 		Text = name, TextColor3 = C.ash, Font = Enum.Font.GothamBold, TextSize = 9,
 	}, box)
 	local btn = mk("TextButton", {
-		Size = UDim2.new(1, -4, 0, 22), Position = UDim2.new(0, 2, 0, 19), BackgroundTransparency = 1,
-		Text = "", TextColor3 = C.white, Font = Enum.Font.GothamBlack, TextSize = 15, AutoButtonColor = false,
+		Size = UDim2.new(1, -4, 0, 26), Position = UDim2.new(0, 2, 0, 21), BackgroundTransparency = 1,
+		Text = "", TextColor3 = C.white, Font = Enum.Font.GothamBlack, TextSize = 16, AutoButtonColor = false,
 	}, box)
+	-- hover: the border lights up
+	btn.MouseEnter:Connect(function() tween(bs, 0.15, { Color = C.ashLite }) end)
+	btn.MouseLeave:Connect(function() tween(bs, 0.2, { Color = C.line }) end)
 	return btn, box
 end
 
@@ -656,13 +749,13 @@ ACC.refreshStatus = function()
 end
 
 mk("TextLabel", {
-	Size = UDim2.new(1, -12, 0, 16), Position = UDim2.new(0, 6, 0, 108), BackgroundTransparency = 1,
+	Size = UDim2.new(1, -16, 0, 16), Position = UDim2.new(0, 8, 0, 122), BackgroundTransparency = 1,
 	Text = "Tap SHOW MIN VALUE or RARITY to filter the list.",
 	TextColor3 = C.ash, Font = Enum.Font.Gotham, TextSize = 10,
 }, body)
 
 local list = mk("ScrollingFrame", {
-	Size = UDim2.new(1, -12, 1, -136), Position = UDim2.new(0, 6, 0, 128), BackgroundTransparency = 1,
+	Size = UDim2.new(1, -16, 1, -150), Position = UDim2.new(0, 8, 0, 142), BackgroundTransparency = 1,
 	BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = C.ash, CanvasSize = UDim2.new(0, 0, 0, 0),
 	AutomaticCanvasSize = Enum.AutomaticSize.Y,
 }, body)
@@ -677,7 +770,7 @@ local emptyLabel = mk("TextLabel", {
 -- a transparent blocker under the popups: tapping anywhere else closes them
 local openPopup = nil
 local blocker = mk("TextButton", {
-	Size = UDim2.new(1, 0, 1, -108), Position = UDim2.new(0, 0, 0, 108), BackgroundTransparency = 1,
+	Size = UDim2.new(1, 0, 1, -120), Position = UDim2.new(0, 0, 0, 120), BackgroundTransparency = 1,
 	Text = "", AutoButtonColor = false, Visible = false, ZIndex = 10,
 }, body)
 
@@ -709,18 +802,18 @@ end
 blocker.MouseButton1Click:Connect(function() hidePopup(openPopup) end)
 
 -- ----------------------------------------------------------- value sliders
-local POPUP_Y = 110   -- popups open just under the second row
+local POPUP_Y = 122   -- popups open just under the second row
 
 -- onValue(v)  every time the value changes (also while dragging)
 -- onLive()    while dragging, throttled      onDone()  when the finger lets go
 local function makeSlider(titleText, onValue, onLive, onDone)
 	local frame = mk("Frame", {
-		Size = UDim2.new(1, -12, 0, 98), Position = UDim2.new(0, 6, 0, POPUP_Y), BackgroundColor3 = C.popup,
+		Size = UDim2.new(1, -16, 0, 98), Position = UDim2.new(0, 8, 0, POPUP_Y), BackgroundColor3 = C.popup,
 		Visible = false, ZIndex = 20,
 	}, body)
 	corner(frame, 10)
 	stroke(frame, C.ash, 2)
-	local pop = { frame = frame, pos = UDim2.new(0, 6, 0, POPUP_Y) }
+	local pop = { frame = frame, pos = UDim2.new(0, 8, 0, POPUP_Y) }
 
 	mk("TextLabel", {
 		Size = UDim2.new(0.5, 0, 0, 20), Position = UDim2.new(0, 12, 0, 8), BackgroundTransparency = 1,
@@ -837,12 +930,12 @@ local RARITY = {
 }
 
 local dropFrame = mk("Frame", {
-	Size = UDim2.new(0, 124, 0, 8 + RARITY.visible * RARITY.row), Position = UDim2.new(0, 108, 0, 110), BackgroundColor3 = C.popup,
+	Size = UDim2.new(0, 124, 0, 8 + RARITY.visible * RARITY.row), Position = UDim2.new(0, 116, 0, 122), BackgroundColor3 = C.popup,
 	Visible = false, ZIndex = 20,
 }, body)
 corner(dropFrame, 10)
 stroke(dropFrame, C.ash, 2)
-local dropPop = { frame = dropFrame, pos = UDim2.new(0, 108, 0, 110) }
+local dropPop = { frame = dropFrame, pos = UDim2.new(0, 116, 0, 122) }
 
 -- the list scrolls: only the first rows show until you drag/scroll down
 local dropScroll = mk("ScrollingFrame", {
@@ -1111,7 +1204,7 @@ local function makeCard(a, delay)
 	-- border takes the colour of the egg variety; themed cards get a thicker glowing one
 	local cardStroke = mk("UIStroke", {
 		Color = (th and th.glow) or (mut and mut.bg) or C.line,
-		Thickness = th and 2 or (mut and 1.8 or 1),
+		Thickness = th and 2.5 or (mut and 2.2 or 1.5),
 	}, c)
 	if (mut and mut.rainbow) or (th and th.rainbow) then
 		mk("UIGradient", { Color = RAINBOW }, cardStroke)
@@ -1359,6 +1452,7 @@ local function addAlert(a, skipSync)
 	a.tier = PET_TIER[norm(a.egg)] or tostring(a.tier or "")
 
 	table.insert(alerts, 1, a)
+	if FX.min and FX.bump and passes(a) and (tonumber(a.age) or 0) < 8000 then FX.bump() end
 	while #alerts > CONFIG.MAX_CARDS do
 		removeCard(table.remove(alerts))
 	end
@@ -1366,20 +1460,42 @@ local function addAlert(a, skipSync)
 	return a
 end
 
--- minimise / close
-local minimised = false
-btnMin.MouseButton1Click:Connect(function()
-	minimised = not minimised
-	hidePopup(openPopup)
-	if minimised then
-		tween(main, 0.22, { Size = UDim2.new(0, 320, 0, 30) })
-		task.delay(0.22, function() if minimised then body.Visible = false end end)
-	else
-		body.Visible = true
-		tween(main, 0.28, { Size = UDim2.new(0, 320, 0, 452) }, Enum.EasingStyle.Back)
+-- minimise: the window shrinks into the icon box above the Shop button; tap the box to bring it back
+FX.bump = function()
+	FX.unread = FX.unread + 1
+	FX.badge.Text = FX.unread > 99 and "99+" or tostring(FX.unread)
+	FX.badge.Visible = true
+	if FX.miniScale then
+		FX.miniScale.Scale = 1.18
+		tween(FX.miniScale, 0.25, { Scale = 1 }, Enum.EasingStyle.Back)
 	end
-	btnMin.Text = minimised and "+" or "-"
-end)
+end
+FX.minimize = function()
+	if FX.min then return end
+	FX.min = true
+	FX.unread = 0
+	FX.badge.Visible = false
+	hidePopup(openPopup)
+	tween(mainScale, 0.18, { Scale = 0.6 }, Enum.EasingStyle.Back, Enum.EasingDirection.In)
+	task.delay(0.19, function()
+		if not FX.min or stopped then return end
+		main.Visible = false
+		FX.mini.Visible = true
+		FX.miniScale.Scale = 0.5
+		tween(FX.miniScale, 0.3, { Scale = 1 }, Enum.EasingStyle.Back)
+	end)
+end
+FX.restore = function()
+	if not FX.min then return end
+	FX.min = false
+	FX.unread = 0
+	FX.badge.Visible = false
+	FX.mini.Visible = false
+	main.Visible = true
+	mainScale.Scale = 0.6
+	tween(mainScale, 0.3, { Scale = 1 }, Enum.EasingStyle.Back)
+end
+btnMin.MouseButton1Click:Connect(FX.minimize)
 btnClose.MouseButton1Click:Connect(function()
 	stopped = true
 	env.EGG_HUB_RUNNING = nil
@@ -1397,6 +1513,7 @@ task.spawn(function()
 			if not e.expired and isExpired(a) then styleExpired(e) end
 		end
 		ACC.refreshStatus()
+		if FX.dot then FX.dot.BackgroundColor3 = (ACC.session and not ACC.connBad) and Color3.fromRGB(90, 255, 150) or C.ash end
 		local S = ACC.session
 		if S and not S.unlimited and os.clock() >= S.expireClock and ACC.logout then ACC.logout("Your time has run out.") end
 		task.wait(1)
@@ -1573,6 +1690,23 @@ do
 	fadeItems(mainItems, 0.3, false)
 	tween(mainScale, 0.38, { Scale = 1 }, Enum.EasingStyle.Back)
 end
+
+-- looping animations (started once the window has faded in): travelling border shine, pulsing live dot,
+-- sliding shimmer under the title, breathing "waiting" text, glowing minimised box
+task.delay(0.7, function()
+	if stopped then return end
+	pcall(function()
+		local spin  = TweenInfo.new(4, Enum.EasingStyle.Linear, Enum.EasingDirection.Out, -1, false)
+		local pulse = TweenInfo.new(0.9, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true)
+		TweenService:Create(FX.grad, spin, { Rotation = 360 }):Play()
+		TweenService:Create(FX.miniGrad, spin, { Rotation = 360 }):Play()
+		TweenService:Create(FX.dot, pulse, { BackgroundTransparency = 0.7 }):Play()
+		TweenService:Create(FX.miniStroke, pulse, { Thickness = 4.5 }):Play()
+		TweenService:Create(emptyLabel, TweenInfo.new(1.1, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), { TextTransparency = 0.65 }):Play()
+		FX.shimmer.Offset = Vector2.new(-1, 0)
+		TweenService:Create(FX.shimmer, TweenInfo.new(2.4, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, false), { Offset = Vector2.new(1, 0) }):Play()
+	end)
+end)
 
 -- ------------------------------------------------------------------ login
 -- Nothing is fetched and no egg is listed until a key has been accepted by the relay.
