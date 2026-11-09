@@ -1843,6 +1843,7 @@ local function relayPayload(hit, players)
 		kg       = kgText or "",
 		mutation = (mut ~= "NONE") and mut or "",
 		players  = tostring(players) .. "/" .. tostring(Players.MaxPlayers),
+		bot      = ACCT_TAG,   -- which account found it: the relay routes alerts to client keys by this
 	})
 
 	local img  = petImage(hit.name)
