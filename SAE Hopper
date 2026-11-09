@@ -139,7 +139,7 @@ local CONFIG = {
 	-- anti-AFK instead (Settings / Anti-AFK in the Delta menu).
 
 	-- rarities worth reporting
-	TARGET = { Eternal = true, Divine = true, Secret = true },   -- the tiers the bot cog knows how to render
+	TARGET = { Eternal = true, Divine = true, Secret = true },   -- the tiers sent to Discord (bot cog) and that open a hop window. ALL rarities are scanned and sent to the joiner hub
 
 	-- players a full server holds; also the top of the landing-reject range
 	SERVER_CAPACITY = 7,
@@ -214,8 +214,12 @@ local CONFIG = {
 	-- window per 5-minute wave); when it closes every account goes back to sitting
 	-- still. Halloween Dimension eggs never open a window. Set IDLE_UNTIL_EGG = false
 	-- to go back to hopping all the time.
-	IDLE_UNTIL_EGG = true,
+	IDLE_UNTIL_EGG = false,
 	HUNT_DURATION = 270,
+
+	-- Eggs that are NOT Secret/Eternal/Divine (Cosmic, Mythic, Legendary, ... Common) are sent to the
+	-- joiner hub only (never to Discord). Max of them sent per server visit, strongest first (0 = no limit).
+	HUB_MAX_OTHER = 10,
 
 	-- Kept for parity with the desktop config. Unused here - camping was
 	-- removed so the hunter always keeps hopping.
@@ -1069,11 +1073,12 @@ local function scan(assets, eggState)
 	for _, rec in ipairs(data.Records) do
 		local cfg    = directory and directory[rec.AssetCategory]
 		local rarity = rarityOf(cfg)
-		if rarity and CONFIG.TARGET[tostring(rarity)] then
+		if rarity then
 			local earnFinal, earnBase = earningPerSec(cfg, rec)
 			hits[#hits + 1] = {
 				record = rec,
 				rarity = tostring(rarity),
+				rare   = CONFIG.TARGET[tostring(rarity)] == true,
 				name   = (cfg and (cfg.DisplayName or cfg._id)) or rec.AssetCategory,
 				weight = weightKg(cfg, rec),
 				earn   = earnFinal,
@@ -1805,7 +1810,7 @@ function CONFIG.publishToHub(a)
 	end)
 end
 
-local function relayPayload(hit, players)
+local function relayPayload(hit, players, hubOnly)
 	local tier = tostring(hit.rarity)
 	local mut  = mutationText(hit)
 	local kg, kgText, valueText, num, zoneName
@@ -1860,6 +1865,8 @@ local function relayPayload(hit, players)
 		players  = tostring(players) .. "/" .. tostring(Players.MaxPlayers),
 		bot      = ACCT_TAG,   -- which account found it: the relay routes alerts to client keys by this
 	})
+
+	if hubOnly then return nil end   -- non-rare egg: joiner hub only, no Discord message
 
 	local img  = petImage(hit.name)
 	local data = jsonEncode({
@@ -2050,6 +2057,32 @@ end
 -- remembers (and stops re-reporting) the ones that really went through.
 local function post(hits, players)
 	local sent = {}
+	if #hits == 0 then
+		return sent
+	end
+
+	-- Split: Secret/Eternal/Divine (and Halloween) go to Discord + hub as before.
+	-- Every other rarity goes to the joiner hub ONLY, strongest first, so the Discord
+	-- bot cog never sees a rarity it cannot render and no webhook cooldown is spent.
+	local rareHits, otherHits = {}, {}
+	for _, hit in ipairs(hits) do
+		if hit.rare == false then
+			otherHits[#otherHits + 1] = hit
+		else
+			rareHits[#rareHits + 1] = hit
+		end
+	end
+	if #otherHits > 0 then
+		table.sort(otherHits, function(a, b) return (tonumber(a.earn) or 0) > (tonumber(b.earn) or 0) end)
+		local cap = tonumber(CONFIG.HUB_MAX_OTHER) or 0
+		for i, hit in ipairs(otherHits) do
+			if cap <= 0 or i <= cap then
+				pcall(relayPayload, hit, players, true)
+			end
+			sent[#sent + 1] = hit   -- counted as delivered so it is not re-sent and the hop can go ahead
+		end
+	end
+	hits = rareHits
 	if #hits == 0 then
 		return sent
 	end
@@ -2875,8 +2908,15 @@ local function huntActive()
 end
 
 -- called when a fresh target egg (never Halloween) is seen
-function CONFIG.startHunt()
+function CONFIG.startHunt(list)
 	if CONFIG.IDLE_UNTIL_EGG ~= true or not huntFilesOk() then return end
+	if type(list) == "table" then
+		local anyRare = false
+		for _, h in ipairs(list) do
+			if h.rare ~= false then anyRare = true break end
+		end
+		if not anyRare then return end
+	end
 	if huntActive() then return end
 	local s = readHuntStart()
 	-- one window per wave: a leftover egg seen right after a window closes must not reopen it
@@ -2945,7 +2985,7 @@ local function tryReportFreshOnly(hits)
 	if #fresh == 0 then
 		return 0
 	end
-	CONFIG.startHunt()
+	CONFIG.startHunt(fresh)
 	log(("found %d fresh egg(s) on this server - posting"):format(#fresh))
 	local sent = post(fresh, #Players:GetPlayers())
 	for _, hit in ipairs(sent) do
@@ -2971,7 +3011,7 @@ local function tryReportAny(hits)
 	if #fresh == 0 then
 		return false
 	end
-	CONFIG.startHunt()
+	CONFIG.startHunt(fresh)
 	log(("quick-scan found %d target egg(s) - posting"):format(#fresh))
 	local sent = post(fresh, #Players:GetPlayers())
 	for _, hit in ipairs(sent) do
@@ -3528,7 +3568,7 @@ local function main()
 					end
 				end
 			else
-				CONFIG.startHunt()
+				CONFIG.startHunt(fresh)
 				log(("FOUND %d target egg(s) (%d already reported), %d/%d players - posting")
 					:format(#fresh, #hits - #fresh, players, CONFIG.SERVER_CAPACITY))
 				notify(("found %d target egg(s)"):format(#fresh))
