@@ -23,6 +23,11 @@ local CONFIG = {
 	-- (Put your own old key here only in YOUR copy if you want to skip the login window.)
 	KEY        = "",
 
+	-- FREE VERSION: with no key, the joiner still shows alerts, but only from the few bots you allow on
+	-- the site (SAE HOPPERS > Free version slider), and 2 seconds later than paying clients.
+	-- Set to false if you want a key to be required again.
+	FREE       = true,
+
 	-- optional: raw link to THIS script so it reloads itself after each teleport
 	SCRIPT_URL = "",
 
@@ -600,6 +605,12 @@ ACC.refreshStatus = function()
 		if lbl then lbl.Text = "STATUS" end
 		hubVal.Text = ACC.checking and "..." or "Login"
 		hubVal.TextColor3 = C.white
+		return
+	end
+	if ACC.session.free then
+		if lbl then lbl.Text = "STATUS" end
+		hubVal.Text = "Free"
+		hubVal.TextColor3 = ACC.connBad and C.ash or C.white
 		return
 	end
 	if lbl then lbl.Text = "TIME LEFT" end
@@ -1334,7 +1345,9 @@ local function handleMessage(raw)
 	local ok, d = pcall(function() return HttpService:JSONDecode(raw) end)
 	if not ok or type(d) ~= "table" then return end
 	if d.type == "kicked" then
-		ACC.logout(tostring(d.reason or "Logged out."))
+		local S = ACC.session
+		if S and S.free then ACC.logout(tostring(d.reason or "Logged out."), true, true)   -- free is off / full: ask for a key
+		else ACC.logout(tostring(d.reason or "Logged out.")) end
 	elseif not ACC.session then
 		return
 	elseif d.type == "status" then
@@ -1540,7 +1553,25 @@ ACC.startFeed = function()
 end
 
 -- returns ok, errorText, rejected   (rejected = the relay said no; false = could not reach it)
-ACC.login = function(token)
+-- throws away the current list and stops the running feed (used by logout and when a key replaces the free version)
+ACC.resetFeed = function()
+	ACC.gen = ACC.gen + 1
+	wsLive = false
+	for _, a in ipairs(alerts) do removeCard(a) end
+	alerts = {}
+	sessionEnd = nil
+	lastId = 0
+	autoDone = {}
+	pollPrimed = false
+end
+
+-- joins the free feed (no key). Returns ok, errorText like ACC.login
+ACC.startFree = function()
+	if not CONFIG.FREE then return false, "Log in to see eggs. Tap STATUS." end
+	return ACC.login("@free", true)
+end
+
+ACC.login = function(token, isFree)
 	if not reqFn then return false, "This executor can't make web requests.", false end
 	local okR, res = pcall(reqFn, {
 		Url = CONFIG.HUB_HTTP .. "/client/login", Method = "POST",
@@ -1553,34 +1584,29 @@ ACC.login = function(token)
 	if d.ok ~= true then
 		return false, tostring(d.error or "Login failed."), (tonumber(res.StatusCode or res.status) == 401)
 	end
-	ACC.session = { token = token, unlimited = d.unlimited == true, expireClock = os.clock() + (tonumber(d.secondsLeft) or 0), bots = d.bots }
+	if ACC.session then ACC.resetFeed() end   -- a key replacing the free version: start from a clean list
+	ACC.session = { token = token, free = isFree == true, unlimited = d.unlimited == true or isFree == true, expireClock = os.clock() + (tonumber(d.secondsLeft) or 0), bots = d.bots }
 	ACC.checking = false
-	ACC.saveToken(token)
+	if not isFree then ACC.saveToken(token) end
 	ACC.refreshStatus()
 	syncCards()
 	ACC.startFeed()
 	return true
 end
 
-ACC.logout = function(reason, keepToken)
+ACC.logout = function(reason, keepToken, noFree)
 	ACC.session = nil
 	ACC.checking = false
-	ACC.gen = ACC.gen + 1          -- stops the running feed
-	wsLive = false
+	ACC.resetFeed()                -- stops the running feed and clears the list
 	ACC.connBad = false
 	if not keepToken then ACC.clearToken() end
-	for _, a in ipairs(alerts) do removeCard(a) end
-	alerts = {}
-	sessionEnd = nil
-	lastId = 0
-	autoDone = {}
-	pollPrimed = false
 	syncCards()
 	ACC.refreshStatus()
-	if ACC.ui and ACC.ui.open then
-		ACC.showLogin(reason)                 -- already open: just refresh it in place
+	if CONFIG.FREE and not noFree then
+		-- back to the free version, with the login window open so they can enter another key
+		task.spawn(function() ACC.startFree(); ACC.showLogin(reason) end)
 	else
-		ACC.pending = { msg = reason }        -- shown when the player presses Login
+		ACC.showLogin(reason)
 	end
 end
 
@@ -1597,14 +1623,10 @@ ACC.build = function()
 		Size = UDim2.new(1, 0, 1, 0), BackgroundColor3 = C.black, BackgroundTransparency = 0.2,
 		Text = "", AutoButtonColor = false, ZIndex = 40, Visible = false,
 	}, body)
-	local card = mk("Frame", {
-		Size = UDim2.new(1, -28, 0, 190), AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.new(0.5, 0, 0, 155), BackgroundColor3 = C.popup,
-	}, dim)
+	local card = mk("Frame", { Size = UDim2.new(1, -28, 0, 190), Position = UDim2.new(0, 14, 0, 60), BackgroundColor3 = C.popup }, dim)
 	corner(card, 10)
 	stroke(card, C.ash, 2)
-	local scale = mk("UIScale", { Scale = 0.8 }, card)   -- pop in / pop out
-	local ui = { dim = dim, card = card, scale = scale, open = false }
+	local ui = { dim = dim }
 	local function label(size, pos, text, color, font, ts)
 		return mk("TextLabel", {
 			Size = size, Position = pos, BackgroundTransparency = 1, Text = text, TextColor3 = color,
@@ -1633,11 +1655,11 @@ ACC.build = function()
 		Text = "X", TextColor3 = C.white, Font = Enum.Font.GothamBold, TextSize = 12,
 	}, card)
 	corner(x, 6)
-	x.MouseButton1Click:Connect(function() ACC.hideLogin() end)
+	x.MouseButton1Click:Connect(function() dim.Visible = false end)
 
 	local function submit()
 		if ACC.busy then return end
-		if ACC.session then ACC.logout("Logged out.") return end
+		if ACC.session and not ACC.session.free then ACC.logout("Logged out.") return end
 		local t = (ui.input.Text or ""):gsub("%s+", "")
 		if t == "" then ACC.say("Enter your key first.", true) return end
 		ACC.busy = true
@@ -1649,48 +1671,22 @@ ACC.build = function()
 			ui.btn.Text = "Login"
 			if ok then
 				ui.input.Text = ""
-				ACC.hideLogin()
+				dim.Visible = false
 			else
 				ACC.say(err or "Login failed.", true)
 			end
 		end)
 	end
 	ui.btn.MouseButton1Click:Connect(submit)
-	ui.input.FocusLost:Connect(function(enter) if enter and not ACC.session then submit() end end)
-	ui.items = collect(dim)
+	ui.input.FocusLost:Connect(function(enter) if enter and (not ACC.session or ACC.session.free) then submit() end end)
 	ACC.ui = ui
 	return ui
 end
 
-ACC.hideLogin = function()
-	local ui = ACC.ui
-	if not ui or not ui.open then return end
-	ui.open = false
-	fadeItems(ui.items, 0.16, true, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
-	tween(ui.scale, 0.18, { Scale = 0.8 }, Enum.EasingStyle.Back, Enum.EasingDirection.In)
-	task.delay(0.2, function()
-		if not ui.open then ui.dim.Visible = false end
-	end)
-end
-
--- Only ever opened by the player (STATUS / Login button). Messages that come up while the
--- window is closed (bad saved key, kicked, time ran out) wait in ACC.pending and are shown
--- the next time the player presses Login.
 ACC.showLogin = function(msg, prefill)
 	local ui = ACC.build()
-	if not ui.open then
-		ui.open = true
-		ui.dim.Visible = true
-		setAlpha(ui.items, true)
-		ui.scale.Scale = 0.8
-		fadeItems(ui.items, 0.2, false)
-		tween(ui.scale, 0.3, { Scale = 1 }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
-	end
-	if msg == nil and prefill == nil and ACC.pending then
-		msg, prefill = ACC.pending.msg, ACC.pending.prefill
-	end
-	ACC.pending = nil
-	local on = ACC.session ~= nil
+	ui.dim.Visible = true
+	local on = ACC.session ~= nil and not ACC.session.free
 	ui.title.Text = on and "ACCOUNT" or "LOGIN"
 	ui.input.Visible = not on
 	ui.btn.Text = on and "Log out" or "Login"
@@ -1701,8 +1697,10 @@ ACC.showLogin = function(msg, prefill)
 		local b = S.bots
 		ACC.say((type(b) == "table" and b.total) and ("Bots: " .. tostring(b.assigned) .. " of " .. tostring(b.total) .. " active") or "", false)
 	else
-		ui.sub.Text = "Enter the key you were given."
-		ACC.say(msg or "", msg ~= nil and msg ~= "")
+		local isFree = ACC.session ~= nil and ACC.session.free == true
+		ui.sub.Text = isFree and "Free version. Enter a key for full access." or "Enter the key you were given."
+		if (msg == nil or msg == "") and isFree then ACC.say("Free: limited bots, alerts arrive a moment later.", false)
+		else ACC.say(msg or "", msg ~= nil and msg ~= "") end
 	end
 end
 
@@ -1722,15 +1720,17 @@ task.spawn(function()
 	if saved then
 		local ok, err, rejected = ACC.login(saved)
 		if ok then return end
-		ACC.checking = false
-		ACC.refreshStatus()
-		syncCards()
 		if rejected then ACC.clearToken() end
-		-- no pop-up on execute: the message waits until the player presses Login
-		ACC.pending = { msg = err, prefill = (not rejected) and saved or nil }
-	else
+		ACC.startFree()   -- a bad or expired key falls back to the free version
 		ACC.checking = false
 		ACC.refreshStatus()
 		syncCards()
+		ACC.showLogin(err, (not rejected) and saved or nil)
+	else
+		local okF, errF = ACC.startFree()
+		ACC.checking = false
+		ACC.refreshStatus()
+		syncCards()
+		if not okF then ACC.showLogin(errF) end   -- the login window only pops up if free is off or unreachable
 	end
 end)
