@@ -80,6 +80,13 @@ local CONFIG = {
 	-- Example: ACCOUNTS = { "alt_one", "alt_two", "alt_three" },
 	ACCOUNTS = {"gzrfdzpgikrd", "worsthops", "worsthops4", "worsthops3"},
 
+	-- RELAY CLAIMS (replaces the ACCOUNTS list): right before teleporting, the account asks the
+	-- relay "is this server free?". The relay gives each server to ONE of your accounts per 5-minute
+	-- wave, so 50+ accounts never share a server and nothing has to be listed. While this is true the
+	-- ACCOUNTS list above is ignored. If the relay can't be reached, the account just hops as normal.
+	-- Set it to false to go back to the ACCOUNTS list.
+	CLAIM_SERVERS = true,
+
 	-- The ONE webhook every egg alert goes to (your bot cog reads it and posts the embed).
 	RELAY_WEBHOOK = "https://discord.com/api/webhooks/1553898268226887855/fG9vg0e9vhb_dUCi0xWqNzYr5-2w8QwelJ282YrUZWI7KPrjdH3V8gqmG7JX7zqSPHEP",
 
@@ -201,6 +208,14 @@ local CONFIG = {
 	-- never camps: the only thing that stops the hop is the wave hold
 	-- (4:30-5:05 of every 5-minute cycle).
 	HOP_ON_EMPTY = true,
+
+	-- IDLE-UNTIL-EGG MODE: accounts stay put and only watch their server. A fresh
+	-- Secret/Eternal/Divine spawn opens a hop window of this many seconds (at most one
+	-- window per 5-minute wave); when it closes every account goes back to sitting
+	-- still. Halloween Dimension eggs never open a window. Set IDLE_UNTIL_EGG = false
+	-- to go back to hopping all the time.
+	IDLE_UNTIL_EGG = true,
+	HUNT_DURATION = 270,
 
 	-- Kept for parity with the desktop config. Unused here - camping was
 	-- removed so the hunter always keeps hopping.
@@ -2402,7 +2417,7 @@ local mySlot, slotCount = 1, 1
 do
 	local me = Players.LocalPlayer and Players.LocalPlayer.Name or ""
 	local list = CONFIG.ACCOUNTS
-	if type(list) == "table" and #list > 1 then
+	if CONFIG.CLAIM_SERVERS ~= true and type(list) == "table" and #list > 1 then
 		slotCount = #list
 		local found = false
 		for i, n in ipairs(list) do
@@ -2713,6 +2728,13 @@ local function hopRound()
 		if targets and idx <= #targets then
 			local cand = targets[idx]
 
+			-- another of your accounts already has this server this wave? skip it
+			if not deadIds[cand.id] and CONFIG.CLAIM_SERVERS == true and CONFIG.claimServer
+				and not CONFIG.claimServer(cand.id) then
+				log("skipping " .. cand.id .. " - another of your accounts has it")
+				deadIds[cand.id] = true
+			end
+
 			-- Skip servers that already failed this hop round (deadIds mirrors desktop hunter)
 			if deadIds[cand.id] then
 				log(("skipping %s - already failed this hop round"):format(cand.id))
@@ -2829,7 +2851,54 @@ end
 -- rounds. If a round exhausts MAX_TELEPORT_RETRIES, the candidate list was
 -- stale or Roblox was busy - wait HOP_ROUND_PAUSE and start a fresh round
 -- with a new server list. This matches the desktop hunter's resilience.
-local function hop()
+-- ------------------------------------------------------------ hunt window
+-- The window start time lives in a file so it survives teleports (every hop
+-- reloads this script). No file functions = old behaviour (always hop).
+local HUNT_FILE = "egg-grabber-delta-hunt.txt"
+local HUNT_CYCLE = 300
+
+local function huntFilesOk()
+	return type(readfile) == "function" and type(writefile) == "function"
+end
+
+local function readHuntStart()
+	local c = safeRead(HUNT_FILE)
+	return c and tonumber(c:match("%d+")) or nil
+end
+
+local function huntActive()
+	if CONFIG.IDLE_UNTIL_EGG ~= true or not huntFilesOk() then return true end
+	local s = readHuntStart()
+	if not s then return false end
+	local age = os.time() - s
+	return age >= 0 and age < (tonumber(CONFIG.HUNT_DURATION) or 270)
+end
+
+-- called when a fresh target egg (never Halloween) is seen
+function CONFIG.startHunt()
+	if CONFIG.IDLE_UNTIL_EGG ~= true or not huntFilesOk() then return end
+	if huntActive() then return end
+	local s = readHuntStart()
+	-- one window per wave: a leftover egg seen right after a window closes must not reopen it
+	if s and math.floor(s / HUNT_CYCLE) == math.floor(os.time() / HUNT_CYCLE) then return end
+	safeWrite(HUNT_FILE, tostring(os.time()))
+	log(("rare egg spotted - hop window open for %ds"):format(tonumber(CONFIG.HUNT_DURATION) or 270))
+end
+
+local lastIdleLog = 0
+local function idleLog()
+	if os.clock() - lastIdleLog >= 30 then
+		lastIdleLog = os.clock()
+		log("no rare egg out - staying put (idle until one spawns)")
+	end
+end
+
+-- force = true skips the idle gate (broken server that must be escaped)
+local function hop(force)
+	if not force and not huntActive() then
+		CONFIG.hbStatus = "Waiting for egg"
+		return false
+	end
 	CONFIG.hbStatus = "Hopping"
 	if CONFIG.sendBeat then task.spawn(CONFIG.sendBeat) end   -- tell the relay right now
 	if not CONFIG.HOP then
@@ -2876,6 +2945,7 @@ local function tryReportFreshOnly(hits)
 	if #fresh == 0 then
 		return 0
 	end
+	CONFIG.startHunt()
 	log(("found %d fresh egg(s) on this server - posting"):format(#fresh))
 	local sent = post(fresh, #Players:GetPlayers())
 	for _, hit in ipairs(sent) do
@@ -2901,6 +2971,7 @@ local function tryReportAny(hits)
 	if #fresh == 0 then
 		return false
 	end
+	CONFIG.startHunt()
 	log(("quick-scan found %d target egg(s) - posting"):format(#fresh))
 	local sent = post(fresh, #Players:GetPlayers())
 	for _, hit in ipairs(sent) do
@@ -3308,7 +3379,7 @@ local function main()
 	end
 	if not assets then
 		log("still not loaded: " .. tostring(eggState) .. " - hopping to another server")
-		if hop() then
+		if hop(true) then
 			return
 		end
 		-- Neither loading nor hopping worked. Do not end the run: raise, and
@@ -3447,6 +3518,8 @@ local function main()
 			if #fresh == 0 then
 				if hoppingPaused() then
 					log("holding for spawn wave")
+				elseif not huntActive() then
+					idleLog()
 				else
 					log(("all %d target egg(s) visible already reported (%d/%d) - hopping to search for fresh")
 						:format(#hits, players, CONFIG.SERVER_CAPACITY))
@@ -3455,6 +3528,7 @@ local function main()
 					end
 				end
 			else
+				CONFIG.startHunt()
 				log(("FOUND %d target egg(s) (%d already reported), %d/%d players - posting")
 					:format(#fresh, #hits - #fresh, players, CONFIG.SERVER_CAPACITY))
 				notify(("found %d target egg(s)"):format(#fresh))
@@ -3496,6 +3570,8 @@ local function main()
 
 			if hoppingPaused() then
 				log("holding for spawn wave")
+			elseif not huntActive() then
+				idleLog()
 			else
 				log("no target eggs on this server - hopping to search elsewhere")
 				if hop() then
@@ -3604,6 +3680,33 @@ function CONFIG.sendBeat()
 		end
 	end
 end
+-- asks the relay for a server. true = go ahead. Also true when the relay can't be reached or
+-- is slow (2.5s), so a relay problem never stops the hunt.
+function CONFIG.claimServer(id)
+	local url = (tostring(CONFIG.HUB_URL or ""):gsub("/publish/?$", "")) .. "/claim"
+	local key = CONFIG.hubKey()
+	if type(httpRequest) ~= "function" or key == "" or key:find("PUT_FINDER", 1, true) then return true end
+	local body = jsonEncode({ bot = ACCT_TAG, id = id })
+	if not body then return true end
+	local done, granted = false, true
+	task.spawn(function()
+		local ok, res = pcall(httpRequest, {
+			Url = url, Method = "POST",
+			Headers = { ["Content-Type"] = "application/json", ["x-key"] = key },
+			Body = body,
+		})
+		local code = ok and type(res) == "table" and (res.StatusCode or res.status) or nil
+		if code == 200 then
+			local d = jsonDecode(res.Body)
+			if type(d) == "table" and d.granted == false then granted = false end
+		end
+		done = true
+	end)
+	local t0 = os.clock()
+	while not done and os.clock() - t0 < 2.5 do task.wait(0.05) end
+	return granted
+end
+
 task.spawn(function()
 	while not stopped() do
 		CONFIG.sendBeat()
