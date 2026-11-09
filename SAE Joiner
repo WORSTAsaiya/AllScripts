@@ -31,7 +31,7 @@ local CONFIG = {
 	-- optional: raw link to THIS script so it reloads itself after each teleport
 	SCRIPT_URL = "",
 
-	MAX_CARDS  = 30,
+	MAX_CARDS  = 60,
 	TITLE      = "WORST - EGG FINDER",
 
 	-- SPEED: the window opens and the data connection starts straight away.
@@ -230,6 +230,28 @@ local function hopperRunning()
 	return false
 end
 if hopperRunning() then warn("[Joiner] SAE HOPPERS is running on this device - the Joiner can't be used here.") return end
+
+-- HOPPER ACCOUNTS: the relay knows which accounts are hoppers (they send it heartbeats / are on its roster).
+-- Ask it BEFORE anything is built, so on a hopper account no window ever appears and nothing starts.
+-- (If the relay can't be reached the Joiner just starts; the checks further down still catch it later.)
+if not CONFIG.DEMO then
+	local rq = (syn and syn.request) or (http and http.request) or http_request or request
+	if rq then
+		local okQ, resQ = pcall(rq, {
+			Url = CONFIG.HUB_HTTP .. "/client/login", Method = "POST",
+			Headers = { ["Content-Type"] = "application/json" },
+			Body = HttpService:JSONEncode({ token = "@free", device = "hopper-check", player = LocalPlayer.Name }),
+		})
+		if okQ and type(resQ) == "table" then
+			local codeQ = tonumber(resQ.StatusCode or resQ.status)
+			local bodyQ = tostring(resQ.Body or resQ.body or "")
+			if codeQ == 403 and bodyQ:find("Hopper accounts", 1, true) then
+				warn("[Joiner] This account runs SAE HOPPERS - the Joiner can't be used here.")
+				return
+			end
+		end
+	end
+end
 
 if env.EGG_HUB_RUNNING then return end
 env.EGG_HUB_RUNNING = true
@@ -793,37 +815,68 @@ local joinPop, setJoinSlider = makeSlider("JOIN MIN / SEC", function(v)
 end, nil, saveSettings)
 
 -- ----------------------------------------------------------- RARITY dropdown
+-- one table (not many locals) so the script stays under Lua's 200-locals limit
+local RARITY = {
+	row = 28,        -- height of one dropdown row
+	visible = 4,     -- rows shown before scrolling: All, Rare, Divine, Eternal
+	top = { Secret = true, Eternal = true, Divine = true },   -- what the "Rare (S/E/D)" option means
+	options = {
+		{ id = "All",       label = "All",          short = "All" },
+		{ id = "RareTop",   label = "Rare (S/E/D)", short = "S/E/D" },   -- Secret, Eternal, Divine only
+		{ id = "Divine",    label = "Divine",       short = "Divine" },
+		{ id = "Eternal",   label = "Eternal",      short = "Eternal" },
+		{ id = "Secret",    label = "Secret",       short = "Secret" },
+		{ id = "Cosmic",    label = "Cosmic",       short = "Cosmic" },
+		{ id = "Mythic",    label = "Mythic",       short = "Mythic" },
+		{ id = "Legendary", label = "Legendary",    short = "Legendary" },
+		{ id = "Epic",      label = "Epic",         short = "Epic" },
+		{ id = "Rare",      label = "Rare",         short = "Rare" },
+		{ id = "Uncommon",  label = "Uncommon",     short = "Uncommon" },
+		{ id = "Common",    label = "Common",       short = "Common" },
+	},
+}
+
 local dropFrame = mk("Frame", {
-	Size = UDim2.new(0, 104, 0, 4 + 4 * 28), Position = UDim2.new(0, 108, 0, 110), BackgroundColor3 = C.popup,
+	Size = UDim2.new(0, 124, 0, 8 + RARITY.visible * RARITY.row), Position = UDim2.new(0, 108, 0, 110), BackgroundColor3 = C.popup,
 	Visible = false, ZIndex = 20,
 }, body)
 corner(dropFrame, 10)
 stroke(dropFrame, C.ash, 2)
 local dropPop = { frame = dropFrame, pos = UDim2.new(0, 108, 0, 110) }
 
-local RARITY_OPTIONS = { "Secret", "Eternal", "Divine", "All" }
+-- the list scrolls: only the first rows show until you drag/scroll down
+local dropScroll = mk("ScrollingFrame", {
+	Size = UDim2.new(1, -8, 1, -8), Position = UDim2.new(0, 4, 0, 4), BackgroundTransparency = 1,
+	BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = C.ash,
+	CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+	ScrollingDirection = Enum.ScrollingDirection.Y,
+}, dropFrame)
+mk("UIListLayout", { Padding = UDim.new(0, RARITY.row - 26), SortOrder = Enum.SortOrder.LayoutOrder }, dropScroll)
+
 local optButtons = {}
 local syncCards  -- forward declaration
 
-local function setRarity(name)
-	filters.rarity = name
-	rarityVal.Text = name
-	for n, b in pairs(optButtons) do
-		b.BackgroundColor3 = (n == name) and C.select or C.card
+local function setRarity(id)
+	filters.rarity = id
+	for _, o in ipairs(RARITY.options) do
+		if o.id == id then rarityVal.Text = o.short end
+	end
+	for k, b in pairs(optButtons) do
+		b.BackgroundColor3 = (k == id) and C.select or C.card
 	end
 	hidePopup(dropPop)
 	syncCards()
 end
 
-for i, name in ipairs(RARITY_OPTIONS) do
+for i, o in ipairs(RARITY.options) do
 	local b = mk("TextButton", {
-		Size = UDim2.new(1, -8, 0, 26), Position = UDim2.new(0, 4, 0, 4 + (i - 1) * 28),
-		BackgroundColor3 = (name == "All") and C.select or C.card,
-		Text = name, TextColor3 = C.white, Font = Enum.Font.GothamBlack, TextSize = 13,
-	}, dropFrame)
+		Size = UDim2.new(1, -6, 0, 26), LayoutOrder = i,
+		BackgroundColor3 = (o.id == "All") and C.select or C.card,
+		Text = o.label, TextColor3 = C.white, Font = Enum.Font.GothamBlack, TextSize = 12,
+	}, dropScroll)
 	corner(b, 6)
-	optButtons[name] = b
-	b.MouseButton1Click:Connect(function() setRarity(name) end)
+	optButtons[o.id] = b
+	b.MouseButton1Click:Connect(function() setRarity(o.id) end)
 end
 dropPop.items = collect(dropFrame)
 
@@ -883,7 +936,12 @@ end
 
 local function passes(a)
 	if (a.valueNum or 0) < filters.minValue then return false end
-	if filters.rarity ~= "All" and a.tier ~= filters.rarity then return false end
+	local r = filters.rarity
+	if r == "RareTop" then
+		if not RARITY.top[a.tier] then return false end
+	elseif r ~= "All" and a.tier ~= r then
+		return false
+	end
 	return true
 end
 
@@ -1130,7 +1188,7 @@ local function makeCard(a, delay)
 	-- row 2: tier badge + value
 	local badgeStyle = TIER_BADGE[a.tier]
 	local badge = mk("Frame", {
-		Size = UDim2.new(0, 56, 0, 16), Position = UDim2.new(0, textX, 0, 29),
+		Size = UDim2.new(0, 68, 0, 16), Position = UDim2.new(0, textX, 0, 29),
 		BackgroundColor3 = badgeStyle and badgeStyle.bg or C.track,
 	}, c)
 	corner(badge, 4)
@@ -1141,7 +1199,7 @@ local function makeCard(a, delay)
 		Font = Enum.Font.GothamBlack, TextSize = 9,
 	}, badge)
 	mk("TextLabel", {
-		Size = UDim2.new(1, -(textX + 56 + 6 + 84), 0, 16), Position = UDim2.new(0, textX + 62, 0, 29), BackgroundTransparency = 1, RichText = true,
+		Size = UDim2.new(1, -(textX + 68 + 6 + 84), 0, 16), Position = UDim2.new(0, textX + 74, 0, 29), BackgroundTransparency = 1, RichText = true,
 		Text = valueText(a), Font = Enum.Font.GothamBlack, TextSize = 13, TextColor3 = txtMain,
 		TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
 	}, c)
@@ -1361,6 +1419,7 @@ local function handleMessage(raw)
 	local ok, d = pcall(function() return HttpService:JSONDecode(raw) end)
 	if not ok or type(d) ~= "table" then return end
 	if d.type == "kicked" then
+		if tostring(d.reason or ""):find("Hopper accounts", 1, true) then return ACC.killHopper() end
 		local S = ACC.session
 		if S and S.free then ACC.logout(tostring(d.reason or "Logged out."), true, true)   -- free is off / full: ask for a key
 		else ACC.logout(tostring(d.reason or "Logged out.")) end
@@ -1407,6 +1466,7 @@ local function runPolling(seconds, gen)
 			Url = ("%s/recent?key=%s&dev=%s&player=%s&since=%d"):format(CONFIG.HUB_HTTP, ACC.q(S.token), ACC.q(ACC.device), ACC.q(LocalPlayer.Name), lastId),
 			Method = "GET",
 		})
+		if ok and res and res.StatusCode == 403 then ACC.killHopper() return end
 		if ok and res and res.StatusCode == 401 then
 			if ACC.live(gen) then ACC.logout("Session ended. Log in again.") end
 			return
@@ -1444,6 +1504,7 @@ local function pull(autoJoin, gen)
 		Url = ("%s/recent?key=%s&dev=%s&player=%s&since=%d"):format(CONFIG.HUB_HTTP, ACC.q(S.token), ACC.q(ACC.device), ACC.q(LocalPlayer.Name), lastId),
 		Method = "GET",
 	})
+	if ok and res and res.StatusCode == 403 then ACC.killHopper() return end
 	if ok and res and res.StatusCode == 401 then
 		if ACC.live(gen) then ACC.logout("Session ended. Log in again.") end
 		return
@@ -1599,6 +1660,10 @@ ACC.login = function(token, isFree)
 	local okJ, d = pcall(function() return HttpService:JSONDecode(res.Body) end)
 	if not okJ or type(d) ~= "table" then return false, "Server error. Try again.", false end
 	if d.ok ~= true then
+		if tostring(d.error or ""):find("Hopper accounts", 1, true) then
+			ACC.killHopper()
+			return false, "", false
+		end
 		return false, tostring(d.error or "Login failed."), (tonumber(res.StatusCode or res.status) == 401)
 	end
 	if ACC.session then ACC.resetFeed() end   -- a key replacing the free version: start from a clean list
@@ -1759,6 +1824,17 @@ ACC.showLogin = function(msg, prefill)
 		if (msg == nil or msg == "") and isFree then ACC.say(capText, false)
 		else ACC.say(msg or "", msg ~= nil and msg ~= "") end
 	end
+end
+
+-- hopper account detected while running: stop every feed and remove the window completely
+ACC.killHopper = function()
+	if stopped then return end
+	stopped = true
+	ACC.gen = ACC.gen + 1
+	env.EGG_HUB_RUNNING = nil
+	env.EGG_HUB_SYNC = nil
+	warn("[Joiner] This account runs SAE HOPPERS - the Joiner can't be used here.")
+	pcall(function() gui:Destroy() end)
 end
 
 ACC.device = ACC.getDevice()
