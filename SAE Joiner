@@ -217,6 +217,20 @@ local TextService     = game:GetService("TextService")
 local LocalPlayer     = Players.LocalPlayer
 
 local env = (getgenv and getgenv()) or _G
+
+-- Hopper accounts can't use the Joiner. SAE HOPPERS sets EGG_GRABBER_RUNNING while it runs and keeps a marker file
+-- fresh (covers the moment right after a hop, before the hopper has started again).
+local HOPPER_MARK = "worst-hopper-active.txt"
+local function hopperRunning()
+	if env.EGG_GRABBER_RUNNING == true then return true end
+	if type(isfile) == "function" and type(readfile) == "function" then
+		local ok, t = pcall(function() if isfile(HOPPER_MARK) then return tonumber(readfile(HOPPER_MARK)) end end)
+		if ok and t and math.abs(os.time() - t) < 120 then return true end
+	end
+	return false
+end
+if hopperRunning() then warn("[Joiner] SAE HOPPERS is running on this device - the Joiner can't be used here.") return end
+
 if env.EGG_HUB_RUNNING then return end
 env.EGG_HUB_RUNNING = true
 
@@ -399,7 +413,7 @@ local SETTINGS_FILE = "WorstEggFinder_settings.json"
 
 local function saveSettings()
 	if type(writefile) ~= "function" then return end
-	pcall(writefile, SETTINGS_FILE, HttpService:JSONEncode({ autoOn = auto.on, autoMin = auto.minValue }))
+	pcall(writefile, SETTINGS_FILE, HttpService:JSONEncode({ autoOn = auto.on, autoMin = auto.minValue, showMin = filters.minValue }))
 end
 
 local function loadSettings()
@@ -417,6 +431,7 @@ local function loadSettings()
 	if t then
 		auto.on = t.autoOn == true
 		auto.minValue = tonumber(t.autoMin) or 0
+		filters.minValue = tonumber(t.showMin) or 0
 	end
 	-- these settings were carried over by a hop: Auto Join turns itself off so it
 	-- cannot hop away while you are stealing the egg
@@ -766,10 +781,10 @@ local function syncNow()
 end
 
 -- SHOW MIN VALUE: which cards are listed
-local sliderPop = makeSlider("SHOW MIN / SEC", function(v)
+local sliderPop, setShowSlider = makeSlider("SHOW MIN / SEC", function(v)
 	filters.minValue = v
 	minVal.Text = fmt(v)
-end, syncNow, syncNow)
+end, syncNow, function() syncNow(); saveSettings() end)
 
 -- MIN JOIN: how valuable an egg must be before AUTO JOIN takes it
 local joinPop, setJoinSlider = makeSlider("JOIN MIN / SEC", function(v)
@@ -840,6 +855,7 @@ autoVal.MouseButton1Click:Connect(toggleAuto)
 -- restore the saved auto join settings (they survive teleports)
 loadSettings()
 setJoinSlider(valueToPos(auto.minValue))
+setShowSlider(valueToPos(filters.minValue))   -- SHOW MIN VALUE keeps its value after re-execute
 refreshAutoUI(false)
 
 -- ------------------------------------------------------------------ logic
@@ -936,7 +952,7 @@ local function joinServer(a)
 	local q = queue_on_teleport or queueonteleport
 	if q and CONFIG.SCRIPT_URL ~= "" then
 		local tjson = HttpService:JSONEncode({ egg = a.egg, jobId = a.jobId, tier = a.tier })
-		local sjson = HttpService:JSONEncode({ autoOn = auto.on, autoMin = auto.minValue })
+		local sjson = HttpService:JSONEncode({ autoOn = auto.on, autoMin = auto.minValue, showMin = filters.minValue })
 		pcall(q, ('getgenv().EGG_HUB_RUNNING=nil; getgenv().EGG_JOIN_TARGET=game:GetService("HttpService"):JSONDecode([==[%s]==]); getgenv().EGG_JOIN_SETTINGS=game:GetService("HttpService"):JSONDecode([==[%s]==]); loadstring(game:HttpGet("%s"))()'):format(tjson, sjson, CONFIG.SCRIPT_URL))
 	end
 
@@ -1365,7 +1381,7 @@ end
 local function runWebSocket(gen)
 	local S = ACC.session
 	if not (S and WebSocket and WebSocket.connect) then return false end
-	local url = ("%s/?key=%s&dev=%s"):format(CONFIG.HUB_WS, ACC.q(S.token), ACC.q(ACC.device))
+	local url = ("%s/?key=%s&dev=%s&player=%s"):format(CONFIG.HUB_WS, ACC.q(S.token), ACC.q(ACC.device), ACC.q(LocalPlayer.Name))
 	local ok, ws = pcall(WebSocket.connect, url)
 	if not ok or not ws then return false end
 	setHub("LIVE", true)
@@ -1388,7 +1404,7 @@ local function runPolling(seconds, gen)
 	while ACC.live(gen) and os.clock() - t0 < seconds do
 		local S = ACC.session
 		local ok, res = pcall(reqFn, {
-			Url = ("%s/recent?key=%s&dev=%s&since=%d"):format(CONFIG.HUB_HTTP, ACC.q(S.token), ACC.q(ACC.device), lastId),
+			Url = ("%s/recent?key=%s&dev=%s&player=%s&since=%d"):format(CONFIG.HUB_HTTP, ACC.q(S.token), ACC.q(ACC.device), ACC.q(LocalPlayer.Name), lastId),
 			Method = "GET",
 		})
 		if ok and res and res.StatusCode == 401 then
@@ -1425,7 +1441,7 @@ local function pull(autoJoin, gen)
 	local S = ACC.session
 	if not (reqFn and S and ACC.live(gen)) then return end
 	local ok, res = pcall(reqFn, {
-		Url = ("%s/recent?key=%s&dev=%s&since=%d"):format(CONFIG.HUB_HTTP, ACC.q(S.token), ACC.q(ACC.device), lastId),
+		Url = ("%s/recent?key=%s&dev=%s&player=%s&since=%d"):format(CONFIG.HUB_HTTP, ACC.q(S.token), ACC.q(ACC.device), ACC.q(LocalPlayer.Name), lastId),
 		Method = "GET",
 	})
 	if ok and res and res.StatusCode == 401 then
@@ -1577,7 +1593,7 @@ ACC.login = function(token, isFree)
 	local okR, res = pcall(reqFn, {
 		Url = CONFIG.HUB_HTTP .. "/client/login", Method = "POST",
 		Headers = { ["Content-Type"] = "application/json" },
-		Body = HttpService:JSONEncode({ token = token, device = ACC.device }),
+		Body = HttpService:JSONEncode({ token = token, device = ACC.device, player = LocalPlayer.Name }),
 	})
 	if not okR or type(res) ~= "table" then return false, "Could not reach the server.", false end
 	local okJ, d = pcall(function() return HttpService:JSONDecode(res.Body) end)
@@ -1605,9 +1621,9 @@ ACC.logout = function(reason, keepToken, noFree)
 	ACC.refreshStatus()
 	if CONFIG.FREE and not noFree then
 		-- back to the free version, with the login window open so they can enter another key
-		task.spawn(function() ACC.startFree(); ACC.showLogin(reason) end)
+		task.spawn(function() ACC.startFree(); ACC.notifyLogin(reason) end)
 	else
-		ACC.showLogin(reason)
+		ACC.showLogin(reason)   -- no free version to fall back to: the login window opens
 	end
 end
 
@@ -1624,10 +1640,14 @@ ACC.build = function()
 		Size = UDim2.new(1, 0, 1, 0), BackgroundColor3 = C.black, BackgroundTransparency = 0.2,
 		Text = "", AutoButtonColor = false, ZIndex = 40, Visible = false,
 	}, body)
-	local card = mk("Frame", { Size = UDim2.new(1, -28, 0, 190), Position = UDim2.new(0, 14, 0, 60), BackgroundColor3 = C.popup }, dim)
+	local card = mk("Frame", {
+		Size = UDim2.new(1, -28, 0, 190), AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0.5, 0, 0, 155), BackgroundColor3 = C.popup,
+	}, dim)
 	corner(card, 10)
 	stroke(card, C.ash, 2)
-	local ui = { dim = dim }
+	local scale = mk("UIScale", { Scale = 0.8 }, card)   -- pop in / pop out
+	local ui = { dim = dim, card = card, scale = scale, open = false }
 	local function label(size, pos, text, color, font, ts)
 		return mk("TextLabel", {
 			Size = size, Position = pos, BackgroundTransparency = 1, Text = text, TextColor3 = color,
@@ -1656,7 +1676,7 @@ ACC.build = function()
 		Text = "X", TextColor3 = C.white, Font = Enum.Font.GothamBold, TextSize = 12,
 	}, card)
 	corner(x, 6)
-	x.MouseButton1Click:Connect(function() dim.Visible = false end)
+	x.MouseButton1Click:Connect(function() ACC.hideLogin() end)
 
 	local function submit()
 		if ACC.busy then return end
@@ -1672,7 +1692,7 @@ ACC.build = function()
 			ui.btn.Text = "Login"
 			if ok then
 				ui.input.Text = ""
-				dim.Visible = false
+				ACC.hideLogin()
 			else
 				ACC.say(err or "Login failed.", true)
 			end
@@ -1680,13 +1700,47 @@ ACC.build = function()
 	end
 	ui.btn.MouseButton1Click:Connect(submit)
 	ui.input.FocusLost:Connect(function(enter) if enter and (not ACC.session or ACC.session.free) then submit() end end)
+	ui.items = collect(dim)
 	ACC.ui = ui
 	return ui
 end
 
+ACC.hideLogin = function()
+	local ui = ACC.ui
+	if not ui or not ui.open then return end
+	ui.open = false
+	fadeItems(ui.items, 0.16, true, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+	tween(ui.scale, 0.18, { Scale = 0.8 }, Enum.EasingStyle.Back, Enum.EasingDirection.In)
+	task.delay(0.2, function()
+		if not ui.open then ui.dim.Visible = false end
+	end)
+end
+
+-- Only opened by the player (STATUS / Login button). Messages that come up while the window is
+-- closed (bad saved key, kicked, time ran out, free unreachable) wait in ACC.pending and are shown
+-- the next time the player presses Login.
+ACC.notifyLogin = function(msg, prefill)
+	if ACC.ui and ACC.ui.open then
+		ACC.showLogin(msg, prefill)            -- already open: just refresh it in place
+	else
+		ACC.pending = { msg = msg, prefill = prefill }
+	end
+end
+
 ACC.showLogin = function(msg, prefill)
 	local ui = ACC.build()
-	ui.dim.Visible = true
+	if not ui.open then
+		ui.open = true
+		ui.dim.Visible = true
+		setAlpha(ui.items, true)
+		ui.scale.Scale = 0.8
+		fadeItems(ui.items, 0.2, false)
+		tween(ui.scale, 0.3, { Scale = 1 }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+	end
+	if msg == nil and prefill == nil and ACC.pending then
+		msg, prefill = ACC.pending.msg, ACC.pending.prefill
+	end
+	ACC.pending = nil
 	local on = ACC.session ~= nil and not ACC.session.free
 	ui.title.Text = on and "ACCOUNT" or "LOGIN"
 	ui.input.Visible = not on
@@ -1708,6 +1762,19 @@ ACC.showLogin = function(msg, prefill)
 end
 
 ACC.device = ACC.getDevice()
+task.spawn(function()
+	while not stopped do
+		task.wait(5)
+		if hopperRunning() then
+			stopped = true
+			env.EGG_HUB_RUNNING = nil
+			env.EGG_HUB_SYNC = nil
+			warn("[Joiner] SAE HOPPERS started on this device - closing the Joiner.")
+			pcall(function() gui:Destroy() end)
+			break
+		end
+	end
+end)
 hubVal.MouseButton1Click:Connect(function() ACC.showLogin() end)
 
 -- ...and only then check the saved key, so no card exists yet to be caught by it
@@ -1728,7 +1795,7 @@ task.spawn(function()
 		ACC.checking = false
 		ACC.refreshStatus()
 		syncCards()
-		ACC.showLogin(err, (not rejected) and saved or nil)
+		ACC.notifyLogin(err, (not rejected) and saved or nil)   -- no pop up on execute: waits for the Login button
 	else
 		local okF, errF = ACC.startFree()
 		ACC.checking = false
