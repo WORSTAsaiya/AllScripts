@@ -136,7 +136,7 @@ local C = {
 	card      = Color3.fromRGB(14, 14, 14),
 	stroke    = Color3.fromRGB(105, 105, 105),
 	text      = Color3.fromRGB(242, 242, 242),
-	sub       = Color3.fromRGB(150, 150, 150),
+	sub       = Color3.fromRGB(205, 205, 205),   -- secondary text (was 150: too dim over the animated background)
 	accent    = Color3.fromRGB(120, 120, 120),
 	iconBg    = Color3.fromRGB(36, 36, 36),
 	iconFg    = Color3.fromRGB(205, 205, 205),
@@ -1036,6 +1036,17 @@ do
 end
 
 local Config = {}
+-- Readability for EVERY text of the window: Gotham (thin) -> GothamMedium and a soft dark outline, so text stays clear
+-- over the animated background. Called for all existing texts before the open animation and for every text added later.
+function Config.readable(d)
+	if not (d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox")) then return end
+	if d.Text == "✓" or d.Text == "X" then return end
+	if d.Font == Enum.Font.Gotham then d.Font = Enum.Font.GothamMedium end
+	if d.TextStrokeTransparency >= 1 then
+		d.TextStrokeColor3 = Color3.new(0, 0, 0)
+		d.TextStrokeTransparency = 0.55
+	end
+end
 Config.override  = {}   -- control id -> value that is SAVED instead of the live one (empty here)
 Config.pageLists = {}   -- tab name -> the scrolling list of a one-page tab
 Config.execName = function()   -- the executor's name as it reports itself ("Unknown" when it doesn't)
@@ -7131,6 +7142,9 @@ do
 			put(e, grp and grp.a or alphaNow)   -- new things that show up while fading start at the current opacity
 		end
 	end
+
+	for _, d in ipairs(window:GetDescendants()) do Config.readable(d) end
+	window.DescendantAdded:Connect(function(d) if alive then Config.readable(d) end end)
 
 	FX.introA = 0   -- the ash particles / bottom glow multiply their own transparency with this (they rewrite it every frame)
 	add(window)
