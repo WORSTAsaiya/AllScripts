@@ -1,4 +1,5 @@
 #!/data/data/com.termux/files/usr/bin/bash
+# Layout is picked automatically (freeform if enabled on the device, else split-screen with 2 apps).
 # Usage:  bash setup.sh            (it asks how many accounts, then each username)
 #         bash setup.sh user1 user2  (or give the usernames directly)
 # Usernames are matched IN ORDER to the clones it finds:
@@ -21,6 +22,14 @@ if ! su -c "id" </dev/null 2>/dev/null | grep -q "uid=0"; then
   exit 1
 fi
 
+# ---- layout: freeform if the device has it switched on, otherwise split-screen (max 2 apps) ----
+# override with:  LAYOUT=split bash setup.sh   or   LAYOUT=freeform bash setup.sh
+if [ -z "$LAYOUT" ]; then
+  ff=$(su -c "settings get global enable_freeform_support" </dev/null 2>/dev/null | tr -d '\r\n')
+  if [ "$ff" = "1" ]; then LAYOUT=freeform; else LAYOUT=split; fi
+fi
+if [ "$LAYOUT" = "split" ]; then MAXA=2; else MAXA=3; fi
+
 # ---- find the clones, in a fixed order ----
 installed=$(su -c "pm list packages" </dev/null | sed 's/^package://' | tr -d '\r')
 ORDER=(com.roblox.client com.roblox.clienu com.roblox.clienz com.roblox.clienv com.roblox.clien)
@@ -28,10 +37,11 @@ FOUND=()
 for p in "${ORDER[@]}"; do
   echo "$installed" | grep -qx "$p" && FOUND+=("$p")
 done
-if [ ${#FOUND[@]} -gt 3 ]; then FOUND=("${FOUND[@]:0:3}"); fi
+if [ ${#FOUND[@]} -gt $MAXA ]; then FOUND=("${FOUND[@]:0:$MAXA}"); fi
 if [ ${#FOUND[@]} -eq 0 ]; then echo "No Roblox clones found."; exit 1; fi
 
 stty sane 2>/dev/null || true
+echo "Layout: $LAYOUT (max $MAXA accounts on this device)"
 echo "Found ${#FOUND[@]} Roblox app(s): ${FOUND[*]}"
 
 valid_user() { [[ "$1" =~ ^[A-Za-z0-9_]{3,20}$ ]]; }
@@ -40,7 +50,7 @@ USERS=()
 if [ $# -gt 0 ]; then
   # non-interactive: bash setup.sh user1 user2 ...
   if [ $# -gt ${#FOUND[@]} ]; then
-    echo "You gave $# usernames but only ${#FOUND[@]} app(s) are installed."
+    echo "You gave $# usernames but this device ($LAYOUT layout) can run ${#FOUND[@]} account(s)."
     exit 1
   fi
   for u in "$@"; do
@@ -81,6 +91,7 @@ TERMUX_SLOT="0 33 360 653"
 # ---- config.sh ----
 {
   echo "PLACE=107778070777162"
+  echo "LAYOUT=$LAYOUT"
   echo "PACKAGES=(${PKGS[*]})"
   printf "declare -A USER_OF=("
   k=0
@@ -91,12 +102,20 @@ TERMUX_SLOT="0 33 360 653"
   for p in "${PKGS[@]}"; do echo "  [$p]=\"${SLOTS[$i]}\""; i=$((i+1)); done
   echo ")"
   echo "TERMUX_SLOT=\"$TERMUX_SLOT\""
+  echo "declare -A MODE=("
+  i=0
+  for p in "${PKGS[@]}"; do
+    if [ "$LAYOUT" = "split" ]; then m=$((3+i)); else m=5; fi
+    echo "  [$p]=$m"; i=$((i+1))
+  done
+  echo ")"
 } > ~/config.sh
 
 # ---- place.sh ----
 cat > ~/place.sh << 'EOF'
 #!/data/data/com.termux/files/usr/bin/bash
 source ~/config.sh
+[ "$LAYOUT" = split ] && exit 0
 stack=$(su -c "am stack list")
 place_one() {
   local pkg=$1 slot=$2 id
@@ -110,6 +129,8 @@ EOF
 # ---- fix.sh ----
 cat > ~/fix.sh << 'EOF'
 #!/data/data/com.termux/files/usr/bin/bash
+source ~/config.sh
+[ "$LAYOUT" = split ] && exit 0
 su -c "am start --windowingMode 5 -n com.termux/com.termux.app.TermuxActivity" >/dev/null 2>&1
 sleep 1
 bash ~/place.sh >/dev/null 2>&1
@@ -121,10 +142,10 @@ cat > ~/go.sh << 'EOF'
 source ~/config.sh
 for pkg in "${PACKAGES[@]}"; do su -c "am force-stop $pkg"; done
 sleep 2
-su -c "am start --windowingMode 5 -n com.termux/com.termux.app.TermuxActivity"
+[ "$LAYOUT" = split ] || su -c "am start --windowingMode 5 -n com.termux/com.termux.app.TermuxActivity"
 sleep 3
 for pkg in "${PACKAGES[@]}"; do
-  su -c "am start --windowingMode 5 -a android.intent.action.VIEW -d 'roblox://placeID=$PLACE' -p $pkg"
+  su -c "am start --windowingMode ${MODE[$pkg]} -a android.intent.action.VIEW -d 'roblox://placeID=$PLACE' -p $pkg"
   sleep 20
   bash ~/place.sh
 done
@@ -156,7 +177,7 @@ launch() {
   echo "[$(date +%T)] launching $pkg (${USER_OF[$pkg]})"
   su -c "am force-stop $pkg"
   sleep 2
-  su -c "am start --windowingMode 5 -a android.intent.action.VIEW -d 'roblox://placeID=$PLACE' -p $pkg"
+  su -c "am start --windowingMode ${MODE[$pkg]} -a android.intent.action.VIEW -d 'roblox://placeID=$PLACE' -p $pkg"
   sleep 8; bash ~/place.sh >/dev/null 2>&1
   LAUNCHED[$pkg]=$(date +%s)
   FAILS[$pkg]=0
