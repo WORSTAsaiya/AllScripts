@@ -1,0 +1,206 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Usage:  bash setup.sh            (it asks how many accounts, then each username)
+#         bash setup.sh user1 user2  (or give the usernames directly)
+# Usernames are matched IN ORDER to the clones it finds:
+#   com.roblox.client, com.roblox.clienu, then whichever of clienz / clienv / clien is installed.
+set -e
+
+# input comes from the keyboard even if the script was started oddly
+if ! { exec 3</dev/tty; } 2>/dev/null; then exec 3<&0; fi
+
+# ---- tools (skipped if already there) ----
+if [ -z "$DRY_RUN" ]; then
+  pkg install -y which android-tools tmux termux-api jq curl >/dev/null 2>&1 || true
+fi
+
+# ---- root check ----
+if ! su -c "id" 2>/dev/null | grep -q "uid=0"; then
+  echo "No root (uid=0). This setup needs a rooted device."
+  exit 1
+fi
+
+# ---- find the clones, in a fixed order ----
+installed=$(su -c "pm list packages" | sed 's/^package://' | tr -d '\r')
+ORDER=(com.roblox.client com.roblox.clienu com.roblox.clienz com.roblox.clienv com.roblox.clien)
+FOUND=()
+for p in "${ORDER[@]}"; do
+  echo "$installed" | grep -qx "$p" && FOUND+=("$p")
+done
+if [ ${#FOUND[@]} -gt 3 ]; then FOUND=("${FOUND[@]:0:3}"); fi
+if [ ${#FOUND[@]} -eq 0 ]; then echo "No Roblox clones found."; exit 1; fi
+
+echo "Found ${#FOUND[@]} Roblox app(s): ${FOUND[*]}"
+
+valid_user() { [[ "$1" =~ ^[A-Za-z0-9_]{3,20}$ ]]; }
+
+USERS=()
+if [ $# -gt 0 ]; then
+  # non-interactive: bash setup.sh user1 user2 ...
+  if [ $# -gt ${#FOUND[@]} ]; then
+    echo "You gave $# usernames but only ${#FOUND[@]} app(s) are installed."
+    exit 1
+  fi
+  for u in "$@"; do
+    valid_user "$u" || { echo "'$u' is not a valid Roblox username."; exit 1; }
+    USERS+=("$u")
+  done
+else
+  # interactive
+  while true; do
+    printf "How many accounts? (1-%d): " "${#FOUND[@]}"
+    read -r -u 3 count
+    if [[ "$count" =~ ^[0-9]+$ ]] && [ "$count" -ge 1 ] && [ "$count" -le ${#FOUND[@]} ]; then break; fi
+    echo "Type a number from 1 to ${#FOUND[@]}."
+  done
+  for ((k=0; k<count; k++)); do
+    while true; do
+      printf "[%s] username: " "${FOUND[$k]}"
+      read -r -u 3 u
+      u=$(echo "$u" | tr -d '[:space:]')
+      if valid_user "$u"; then USERS+=("$u"); break; fi
+      echo "  Not valid. Use the Roblox username (3-20 letters, numbers or _), not the display name."
+    done
+  done
+fi
+
+N=${#USERS[@]}
+PKGS=("${FOUND[@]:0:$N}")
+
+echo
+echo "Setting up:"
+for ((k=0; k<N; k++)); do echo "  [${PKGS[$k]}] = \"${USERS[$k]}\""; done
+echo
+
+# ---- window slots on a 720x1280 screen (left top right bottom); Termux takes the top-left ----
+SLOTS=("0 653 360 1273" "360 33 720 653" "360 653 720 1273")
+TERMUX_SLOT="0 33 360 653"
+
+# ---- config.sh ----
+{
+  echo "PLACE=107778070777162"
+  echo "PACKAGES=(${PKGS[*]})"
+  printf "declare -A USER_OF=("
+  k=0
+  for p in "${PKGS[@]}"; do printf " [%s]=%s" "$p" "${USERS[$k]}"; k=$((k+1)); done
+  echo " )"
+  echo "declare -A SLOT=("
+  i=0
+  for p in "${PKGS[@]}"; do echo "  [$p]=\"${SLOTS[$i]}\""; i=$((i+1)); done
+  echo ")"
+  echo "TERMUX_SLOT=\"$TERMUX_SLOT\""
+} > ~/config.sh
+
+# ---- place.sh ----
+cat > ~/place.sh << 'EOF'
+#!/data/data/com.termux/files/usr/bin/bash
+source ~/config.sh
+stack=$(su -c "am stack list")
+place_one() {
+  local pkg=$1 slot=$2 id
+  id=$(echo "$stack" | grep "^ *taskId=[0-9]*: $pkg/" | head -1 | sed 's/.*taskId=\([0-9]*\):.*/\1/')
+  [ -n "$id" ] && su -c "am task resize $id $slot"
+}
+for pkg in "${PACKAGES[@]}"; do place_one "$pkg" "${SLOT[$pkg]}"; done
+place_one com.termux "$TERMUX_SLOT"
+EOF
+
+# ---- fix.sh ----
+cat > ~/fix.sh << 'EOF'
+#!/data/data/com.termux/files/usr/bin/bash
+su -c "am start --windowingMode 5 -n com.termux/com.termux.app.TermuxActivity" >/dev/null 2>&1
+sleep 1
+bash ~/place.sh >/dev/null 2>&1
+EOF
+
+# ---- go.sh ----
+cat > ~/go.sh << 'EOF'
+#!/data/data/com.termux/files/usr/bin/bash
+source ~/config.sh
+for pkg in "${PACKAGES[@]}"; do su -c "am force-stop $pkg"; done
+sleep 2
+su -c "am start --windowingMode 5 -n com.termux/com.termux.app.TermuxActivity"
+sleep 3
+for pkg in "${PACKAGES[@]}"; do
+  su -c "am start --windowingMode 5 -a android.intent.action.VIEW -d 'roblox://placeID=$PLACE' -p $pkg"
+  sleep 20
+  bash ~/place.sh
+done
+sleep 10
+bash ~/place.sh
+EOF
+
+# ---- roblox.sh (watchdog) ----
+cat > ~/roblox.sh << 'EOF'
+#!/data/data/com.termux/files/usr/bin/bash
+source ~/config.sh
+LOAD_WAIT=45
+CHECK_EVERY=20
+GRACE=180
+FAILS_NEEDED=3
+declare -A ID_OF LAUNCHED FAILS
+
+names=$(printf '%s\n' "${USER_OF[@]}" | jq -R . | jq -sc .)
+resp=$(curl -s -m 15 -X POST https://users.roblox.com/v1/usernames/users -H "Content-Type: application/json" -d "{\"usernames\":$names,\"excludeBannedUsers\":true}")
+for pkg in "${PACKAGES[@]}"; do
+  ID_OF[$pkg]=$(echo "$resp" | jq -r --arg n "${USER_OF[$pkg]}" '.data[] | select(.name==$n) | .id')
+  LAUNCHED[$pkg]=$(date +%s)
+  FAILS[$pkg]=0
+  echo "$pkg -> ${USER_OF[$pkg]} (${ID_OF[$pkg]})"
+done
+
+launch() {
+  local pkg=$1
+  echo "[$(date +%T)] launching $pkg (${USER_OF[$pkg]})"
+  su -c "am force-stop $pkg"
+  sleep 2
+  su -c "am start --windowingMode 5 -a android.intent.action.VIEW -d 'roblox://placeID=$PLACE' -p $pkg"
+  sleep 8; bash ~/place.sh >/dev/null 2>&1
+  LAUNCHED[$pkg]=$(date +%s)
+  FAILS[$pkg]=0
+  sleep $LOAD_WAIT
+}
+
+get_presence() {
+  local ids
+  ids=$(printf '%s\n' "${ID_OF[@]}" | jq -R 'tonumber' | jq -sc .)
+  curl -s -m 15 -X POST https://presence.roproxy.com/v1/presence/users -H "Content-Type: application/json" -d "{\"userIds\":$ids}"
+}
+
+while true; do
+  pres=$(get_presence)
+  pres_ok=0
+  echo "$pres" | jq -e '.userPresences' >/dev/null 2>&1 && pres_ok=1
+  [ $pres_ok -eq 0 ] && echo "[$(date +%T)] presence unavailable, only checking processes"
+  for pkg in "${PACKAGES[@]}"; do
+    if [ -z "$(su -c "pidof $pkg")" ]; then
+      echo "[$(date +%T)] $pkg process is down"
+      launch "$pkg"
+      continue
+    fi
+    [ $pres_ok -eq 1 ] || continue
+    t=$(echo "$pres" | jq -r --argjson id "${ID_OF[$pkg]}" '.userPresences[] | select(.userId==$id) | .userPresenceType')
+    [ -z "$t" ] && continue
+    if [ "$t" = "2" ]; then
+      FAILS[$pkg]=0
+    elif [ $(( $(date +%s) - ${LAUNCHED[$pkg]} )) -gt $GRACE ]; then
+      FAILS[$pkg]=$(( ${FAILS[$pkg]} + 1 ))
+      echo "[$(date +%T)] $pkg (${USER_OF[$pkg]}) not in game, strike ${FAILS[$pkg]}/$FAILS_NEEDED"
+      [ ${FAILS[$pkg]} -ge $FAILS_NEEDED ] && launch "$pkg"
+    fi
+  done
+  bash ~/fix.sh
+  sleep $CHECK_EVERY
+done
+EOF
+
+chmod +x ~/place.sh ~/fix.sh ~/go.sh ~/roblox.sh
+echo "---- config.sh ----"
+cat ~/config.sh
+
+[ -n "$DRY_RUN" ] && { echo "(dry run: not starting)"; exit 0; }
+
+# ---- start ----
+termux-wake-lock
+tmux kill-server 2>/dev/null || true
+tmux new -d -s start 'bash ~/go.sh; tmux new -d -s roblox "bash ~/roblox.sh > ~/roblox.log 2>&1"'
+echo "Started. Check progress with:  cat ~/roblox.log"
