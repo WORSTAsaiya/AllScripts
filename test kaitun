@@ -1,0 +1,240 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Installs Delta (downloaded in your browser, because the site has a security check)
+# and makes clones of it: com.roblox.clienu, clienz, clienv, ...
+# Needs root. Run:  bash clone.sh
+# Logging in to the accounts is left to you.
+set -e
+
+DELTA_PAGE="https://delta.filenetwork.vip/android.html"
+MAIN=com.roblox.client
+BASE=com.roblox.clien        # clone = BASE + one letter (same length as $MAIN so it can be patched in place)
+MAXTOTAL=20                  # original + clones, same limit as setup.sh
+WORK="$HOME/clonework"
+LETTERS="uzvabcdefghijklmnopqrswxy"   # every letter except t (that is "client")
+
+# input comes from the keyboard even if the script was started oddly
+if [ -t 0 ]; then exec 3<&0
+elif { exec 3</dev/tty; } 2>/dev/null; then :
+else exec 3<&0; fi
+
+# ---- root check ----
+if ! su -c "id" </dev/null 2>/dev/null | grep -q "uid=0"; then
+  echo "No root (uid=0). Turn on root for Termux first, then run this again."
+  exit 1
+fi
+
+# ---- tools: only installed/updated if something is missing ----
+need=0
+for c in python openssl apksigner curl; do command -v "$c" >/dev/null 2>&1 || need=1; done
+if [ $need -eq 1 ]; then
+  export DEBIAN_FRONTEND=noninteractive
+  APT_OPTS="-o Dpkg::Options::=--force-confold"
+  install_tools() {
+    apt update -y >/dev/null 2>&1 || true
+    apt full-upgrade -y $APT_OPTS >/dev/null 2>&1 || true
+    pkg install -y python openssl-tool apksigner curl >/dev/null 2>&1 || true
+  }
+  echo "Installing tools (first run can take several minutes, apksigner needs Java)..."
+  install_tools
+  if ! curl --version >/dev/null 2>&1; then
+    echo "curl is broken, switching mirror and repairing..."
+    echo "deb https://packages-cf.termux.dev/apt/termux-main stable main" > "$PREFIX/etc/apt/sources.list"
+    install_tools
+    pkg install --reinstall -y openssl libcurl curl >/dev/null 2>&1 || true
+  fi
+fi
+for c in python openssl apksigner; do
+  command -v "$c" >/dev/null 2>&1 || { echo "Could not install '$c'. Run termux-change-repo, then run this again."; exit 1; }
+done
+
+rsh() { su -c "$1" </dev/null 2>/dev/null | tr -d '\r'; }      # root command, stdout only
+installed() { rsh "pm list packages" | sed 's/^package://'; }
+ask_yn() {   # ask_yn "question" default(y/n)
+  local a
+  printf "%s [%s]: " "$1" "$2"; read -r -u 3 a; a=${a:-$2}
+  [[ "$a" =~ ^[Yy] ]]
+}
+
+# ---- 1. Delta ----
+need_install=1
+if installed | grep -qx "$MAIN"; then
+  echo "$MAIN is already installed."
+  if ask_yn "Is it the Delta version?" y; then need_install=0; fi
+fi
+
+if [ $need_install -eq 1 ]; then
+  find_apk() { rsh "ls -t /sdcard/Download" | grep -E '^Delta.*\.apk$' | grep -v '_clone' | head -1; }
+  f=$(find_apk || true)
+  if [ -z "$f" ]; then
+    echo "The Delta site has a security check, so the file must be downloaded in your browser."
+    echo "Opening the page now. Tap the Android download button and let it finish."
+    rsh "am start -a android.intent.action.VIEW -d '$DELTA_PAGE'" >/dev/null || true
+    echo "Waiting for the APK to show up in /sdcard/Download ..."
+    while true; do
+      sleep 5
+      f=$(find_apk || true)
+      if [ -n "$f" ]; then
+        s1=$(rsh "stat -c %s '/sdcard/Download/$f'")
+        sleep 4
+        s2=$(rsh "stat -c %s '/sdcard/Download/$f'")
+        if [ -n "$s1" ] && [ "$s1" = "$s2" ] && [ "$s2" -gt 50000000 ]; then break; fi
+      fi
+    done
+  fi
+  echo "Installing $f ..."
+  out=$(su -c "pm install -r '/sdcard/Download/$f'" </dev/null 2>&1 || true)
+  echo "$out"
+  if echo "$out" | grep -q "UPDATE_INCOMPATIBLE"; then
+    echo "The Roblox already on this phone has a different signature."
+    if ask_yn "Uninstall it (its data is erased) and install Delta?" y; then
+      rsh "pm uninstall $MAIN" >/dev/null || true
+      su -c "pm install -r '/sdcard/Download/$f'" </dev/null 2>&1 || true
+    fi
+  fi
+  installed | grep -qx "$MAIN" || { echo "Delta did not install. See the message above."; exit 1; }
+  echo "Delta installed."
+fi
+
+# ---- 2. how many clones ----
+total=$(installed | grep -cE "^${BASE}[a-z]?\$" || true)
+room=$((MAXTOTAL - total))
+echo
+echo "Roblox/Delta apps on this phone: $total (limit $MAXTOTAL). You can add $room more."
+[ "$room" -le 0 ] && { echo "Nothing to add."; exit 0; }
+while true; do
+  printf "How many clones do you want to make? (0-%d, 0 = none): " "$room"
+  read -r -u 3 want
+  if [[ "$want" =~ ^[0-9]+$ ]] && [ "$want" -le "$room" ]; then break; fi
+  echo "Type a number from 0 to $room."
+done
+[ "$want" -eq 0 ] && { echo "No clones made."; exit 0; }
+
+# pick unused letters
+used=$(installed | grep -E "^${BASE}[a-z]\$" | sed "s/^${BASE//./\\.}//")
+PICK=()
+for ((i=0; i<${#LETTERS}; i++)); do
+  l=${LETTERS:$i:1}
+  echo "$used" | grep -qx "$l" && continue
+  PICK+=("$l")
+  [ ${#PICK[@]} -ge "$want" ] && break
+done
+
+# ---- 3. prepare: source APK, signing key, patcher ----
+mkdir -p "$WORK"
+SRC="$WORK/src.apk"
+paths=$(rsh "pm path $MAIN" | sed 's/^package://' | grep .)
+if [ "$(echo "$paths" | wc -l)" -ne 1 ]; then
+  echo "$MAIN is a split APK (several files), which this script can't clone. Use MT Manager instead."
+  exit 1
+fi
+echo "Copying the installed Delta APK..."
+su -c "cat '$paths'" </dev/null > "$SRC"
+
+if [ ! -f "$WORK/key.pk8" ]; then
+  openssl req -x509 -newkey rsa:2048 -nodes -keyout "$WORK/key.pem" -out "$WORK/cert.pem" -days 36500 -subj "/CN=clone" >/dev/null 2>&1
+  openssl pkcs8 -topk8 -nocrypt -in "$WORK/key.pem" -outform DER -out "$WORK/key.pk8"
+fi
+
+cat > "$WORK/clone_apk.py" << 'PYEOF'
+import sys, struct, zipfile
+
+src, dst, newpkg, extras_file = sys.argv[1:5]
+OLD = "com.roblox.client"
+assert len(newpkg) == len(OLD) < 128
+
+try:
+    extras = [l.strip() for l in open(extras_file) if l.strip()]
+except OSError:
+    extras = []
+
+def swap_string(data, a, b):
+    """Replace a string-pool entry that is EXACTLY a (utf-16 and utf-8 pools), same length only."""
+    n = len(a)
+    pairs = (
+        (struct.pack("<H", n) + a.encode("utf-16-le") + b"\0\0",
+         struct.pack("<H", n) + b.encode("utf-16-le") + b"\0\0"),
+        (bytes([n, n]) + a.encode() + b"\0",
+         bytes([n, n]) + b.encode() + b"\0"),
+    )
+    for o, nw in pairs:
+        data = data.replace(o, nw)
+    return data
+
+def patch(name, data):
+    if name not in ("AndroidManifest.xml", "resources.arsc"):
+        return data
+    # the package name itself, plus any authority/permission name Android reported as conflicting
+    pairs = [(OLD, newpkg)]
+    for e in extras:
+        if e.startswith(OLD) and len(e) > len(OLD) and len(e) < 128:
+            pairs.append((e, newpkg + e[len(OLD):]))
+    for a, b in pairs:
+        data = swap_string(data, a, b)
+    if name == "resources.arsc":   # fixed-size package name field in the arsc package header
+        data = data.replace(struct.pack("<I", 0x7f) + OLD.encode("utf-16-le") + b"\0\0",
+                            struct.pack("<I", 0x7f) + newpkg.encode("utf-16-le") + b"\0\0")
+    return data
+
+zin = zipfile.ZipFile(src)
+with zipfile.ZipFile(dst, "w") as zout:
+    for zi in zin.infolist():
+        name = zi.filename
+        if name.startswith("META-INF/") and name.upper().endswith((".RSA", ".DSA", ".EC", ".SF", ".MF")):
+            continue                      # old signature, apksigner adds a new one
+        data = patch(name, zin.read(zi))
+        ni = zipfile.ZipInfo(name, zi.date_time)
+        ni.external_attr = zi.external_attr
+        ni.create_system = zi.create_system
+        ni.compress_type = zi.compress_type
+        if zi.compress_type == zipfile.ZIP_STORED and not name.endswith("/"):
+            a = 4096 if name.endswith(".so") else 4      # keep stored files aligned like zipalign
+            base = zout.fp.tell() + 30 + len(name.encode("utf-8"))
+            need = (-base) % a
+            if need:
+                L = need if need >= 4 else need + a
+                ni.extra = struct.pack("<HH", 0xD935, L - 4) + b"\0" * (L - 4)
+        if zi.compress_type == zipfile.ZIP_DEFLATED:
+            zout.writestr(ni, data, compresslevel=1)
+        else:
+            zout.writestr(ni, data)
+PYEOF
+
+# ---- 4. make the clones ----
+make_clone() {
+  local letter=$1 pkg="${BASE}$1" extras="$WORK/extras_$1.txt" try out toks fresh
+  : > "$extras"
+  for try in 1 2 3 4 5 6; do
+    python "$WORK/clone_apk.py" "$SRC" "$WORK/u.apk" "$pkg" "$extras" || { echo "  patching failed"; return 1; }
+    rm -f "$WORK/s.apk"
+    apksigner sign --key "$WORK/key.pk8" --cert "$WORK/cert.pem" --min-sdk-version 26 \
+      --out "$WORK/s.apk" "$WORK/u.apk" || { echo "  signing failed"; return 1; }
+    su -c "cp '$WORK/s.apk' /data/local/tmp/clone.apk && chmod 644 /data/local/tmp/clone.apk" </dev/null
+    out=$(su -c "pm install -r /data/local/tmp/clone.apk" </dev/null 2>&1 || true)
+    su -c "rm -f /data/local/tmp/clone.apk" </dev/null
+    if echo "$out" | grep -q "Success"; then return 0; fi
+    # a clash on a provider/permission name that contains the original package name: rename it and retry
+    toks=$(echo "$out" | grep -oE 'com\.roblox\.client[A-Za-z0-9_.]+' | sed 's/[.]*$//' | sort -u || true)
+    fresh=""
+    [ -n "$toks" ] && fresh=$(echo "$toks" | grep -vxFf "$extras" || true)
+    if [ -z "$fresh" ]; then echo "  $out"; return 1; fi
+    echo "$fresh" >> "$extras"
+    echo "  name clash, renaming and retrying: $(echo $fresh)"
+  done
+  return 1
+}
+
+echo
+echo "Making ${#PICK[@]} clone(s). Each one takes a minute or so..."
+ok=(); bad=()
+for l in "${PICK[@]}"; do
+  echo "-> ${BASE}$l"
+  if make_clone "$l" && installed | grep -qx "${BASE}$l"; then ok+=("${BASE}$l"); echo "   installed"
+  else bad+=("${BASE}$l"); echo "   FAILED"; fi
+done
+rm -f "$WORK/u.apk" "$WORK/s.apk" "$SRC"
+
+echo
+echo "Installed: ${ok[*]:-none}"
+[ ${#bad[@]} -gt 0 ] && echo "Failed: ${bad[*]}  (clone these with MT Manager instead, using the same package names)"
+echo
+echo "Next: open Delta and each clone, log in to your accounts, then run the auto-rejoin script."
