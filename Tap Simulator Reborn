@@ -40,6 +40,9 @@
 --//     window left open by an earlier attempt is closed before a new giver / receiver job starts, so a retry no longer collides with it.
 --// 22. A trade now holds up to 40 pets (was 20): MAX_OFFER in this script, MT_CHUNK + the 40 limit in Tapsim.js, and every "20" message / check on the Trade page of worst.html.
 
+--// 32. Config folder is now "WORST TSR" (one folder per game). World 2 itself is bought automatically (TimeRiftService.UnlockRequested, 20QN coins) when the
+--//     Auto Unlock Islands run needs it. Island purchase popup: click signals + mouse, and hidden if it still will not close. Menus a craft trip leaves open
+--//     (blurred screen) are closed through the game's MenuController. NEW Events tab: Auto Expedition (+ island / crew dropdowns), via the game's ExpeditionVoyages module.
 --// 31. Craft jobs: when the game answers "The selected pets cannot be crafted." (e.g. the pets are "Frozen: At sea" on an Expedition) exactly those pets are skipped for 1 hour; your other copies of the same pet still craft. The failure line also names the pet.
 --// 30. Auto Rebirth in World 2: same request, but pays with Currencies.RiftCoins and counts Statistics.RiftRebirths (price checked against the server's real price).
 --// 29. Auto Double Jump buys "Rift +1 Jump" (RiftDoubleJump, RiftGems) while you are in World 2, "+1 Jump" in World 1. Auto Chest Coins also claims
@@ -303,7 +306,7 @@ local WINDOW_W, WINDOW_H = 1435, 869
 local DEFAULT_TAB = "Home"
 
 -- how see-through the cards / rows are (0 = solid, 1 = invisible). Raise it to show more of the background.
-local CARD_T = 0.7   -- how see-through the cards / rows are (0 = solid, 1 = invisible): higher shows more of the animated background
+local CARD_T = 0.5   -- how see-through the cards / rows are (0 = solid, 1 = invisible): higher shows more of the animated background
 
 -- Colors
 local C = {
@@ -312,7 +315,7 @@ local C = {
 	card      = Color3.fromRGB(14, 14, 14),
 	stroke    = Color3.fromRGB(105, 105, 105),
 	text      = Color3.fromRGB(242, 242, 242),
-	sub       = Color3.fromRGB(150, 150, 150),
+	sub       = Color3.fromRGB(205, 205, 205),   -- secondary text (was 150: too dim over the animated background)
 	accent    = Color3.fromRGB(120, 120, 120),
 	iconBg    = Color3.fromRGB(36, 36, 36),
 	iconFg    = Color3.fromRGB(205, 205, 205),
@@ -1081,7 +1084,7 @@ end)
 --============================================================================
 
 local HttpService = game:GetService("HttpService")
-local STORE_DIR = "WORST"
+local STORE_DIR = "WORST TSR"   -- this game's own folder (config.json, configs, images ...): other games running the same hub no longer overwrite it
 local hasFiles = typeof(writefile) == "function" and typeof(readfile) == "function" and typeof(isfile) == "function"
 
 local Store = {}
@@ -1165,7 +1168,7 @@ do
 			corner(imgs[i], UDim.new(0, 28))
 		end
 		corner(new("Frame", { -- dark layer so the text stays readable
-			Size = UDim2.fromScale(1, 1), BackgroundColor3 = C.window, BackgroundTransparency = 0.7, BorderSizePixel = 0, ZIndex = 0,
+			Size = UDim2.fromScale(1, 1), BackgroundColor3 = C.window, BackgroundTransparency = 0.5, BorderSizePixel = 0, ZIndex = 0,
 		}, holder), UDim.new(0, 28))
 		-- PreloadAsync can take minutes (or never return) with executor files, and everything below waits for it: the panel stayed
 		-- solid and the animation never started. Preload in the background instead of waiting for it.
@@ -1647,6 +1650,84 @@ local function buildLogic()
 				Config.bad[p.key] = os.clock() + 120
 				warn("[Machines] could not reach the machine spot at " .. tostring(p.island) .. " - using the next closest one for 2 minutes")
 			end
+		end
+
+		-- ===== shared UI helpers =====
+		local GuiService = game:GetService("GuiService")
+		local VIM = game:GetService("VirtualInputManager")
+		-- true once World 2 (TimeRift) has been bought (Progression.UnlockedWorlds.TimeRift)
+		function Config.world2Unlocked()
+			local d = playerData()
+			local u = d and type(d.Progression) == "table" and d.Progression.UnlockedWorlds
+			return type(u) == "table" and u.TimeRift == true
+		end
+		-- Presses a GUI button the way a player would: fires its click signals AND sends a real mouse click on its middle
+		-- (the plain mouse click alone did not always register on the island purchase popup).
+		function Config.pressButton(obj)
+			if not obj then return false end
+			local btn = obj
+			for _ = 1, 6 do
+				if not btn or btn:IsA("GuiButton") then break end
+				btn = btn.Parent
+			end
+			if not (btn and btn:IsA("GuiButton")) then btn = obj:FindFirstChildWhichIsA("GuiButton", true) end
+			if btn then
+				for _, sig in ipairs({ "MouseButton1Down", "MouseButton1Click", "MouseButton1Up", "Activated" }) do
+					pcall(function()
+						if type(getconnections) == "function" then
+							for _, c in ipairs(getconnections(btn[sig])) do pcall(function() c:Fire() end) end
+						elseif type(firesignal) == "function" then
+							firesignal(btn[sig])
+						end
+					end)
+				end
+			end
+			pcall(function()
+				local sg = obj
+				while sg and not sg:IsA("ScreenGui") do sg = sg.Parent end
+				local off = (sg and sg.IgnoreGuiInset) and Vector2.new(0, 0) or GuiService:GetGuiInset()
+				local pos = obj.AbsolutePosition + obj.AbsoluteSize / 2
+				local x, y = pos.X + off.X, pos.Y + off.Y
+				VIM:SendMouseMoveEvent(x, y, game)
+				task.wait(0.05)
+				VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
+				task.wait(0.05)
+				VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
+			end)
+			return true
+		end
+		-- Closes every game menu that is still open (the machine / expedition windows that blur the screen when a feature leaves them behind).
+		-- Uses the game's own MenuController (IsOpen / Close, the same calls its Expeditions pad makes). Returns how many it closed.
+		function Config.closeOpenMenus()
+			local pg = lp:FindFirstChildOfClass("PlayerGui")
+			if not pg then return 0 end
+			local okMC, mc = pcall(function() return require(RS.Controllers.UI.MenuController) end)
+			if not (okMC and type(mc) == "table") then return 0 end
+			local guis, seen = {}, {}
+			for _, parent in ipairs({ pg:FindFirstChild("Tabs"), pg }) do
+				if parent then
+					for _, g in ipairs(parent:GetChildren()) do
+						if g:IsA("ScreenGui") and g.Enabled and not seen[g.Name] then
+							seen[g.Name] = true
+							guis[#guis + 1] = g
+						end
+					end
+				end
+			end
+			local closed = 0
+			for _, g in ipairs(guis) do
+				local okO, open = pcall(function() return mc:IsOpen(g.Name) end)
+				if okO and open == true then
+					pcall(function() mc:Close(g.Name) end)
+					closed = closed + 1
+					task.wait(0.35)
+					if g.Parent and g.Enabled then   -- still showing: press the menu's own close button
+						local close = g:FindFirstChild("Close", true)
+						if close then Config.pressButton(close) task.wait(0.35) end
+					end
+				end
+			end
+			return closed
 		end
 	end)()
 
@@ -4266,6 +4347,7 @@ local function buildLogic()
 		if not acquireTrip("Auto Craft", function() return active(id) end, setStatus) then return "stopped" end
 		local ok, r = pcall(goCraft, id, targets)
 		releaseTrip("Auto Craft")
+		pcall(Config.closeOpenMenus)   -- the machine window the pad opened would stay open (blurred screen) once Hatch takes over again
 		if not ok then
 			warn("[Craft] error: " .. tostring(r))
 			return "fail"
@@ -4581,6 +4663,7 @@ local function buildLogic()
 				return body() or "ok"
 			end)
 			releaseTrip(name)
+			pcall(Config.closeOpenMenus)   -- same: close the machine window before Hatch goes on
 			if not ok then
 				warn("[Pets] error: " .. tostring(result))
 				pcall(statusFn, "[Debug] Trip failed: " .. tostring(result))
@@ -8620,7 +8703,7 @@ local function buildLogic()
 								end
 								if target and target.AbsoluteSize.X > 0 and target.AbsoluteSize.Y > 0 then
 									lastPress = now
-									pcall(clickCenterOf, target)
+									pcall(Config.pressButton, target)
 								end
 								return
 							end
@@ -8672,7 +8755,7 @@ local function buildLogic()
 			local amt = islandPopupButtons()
 			if amt and amt.AbsoluteSize.X > 0 and amt.AbsoluteSize.Y > 0 then
 				lastPress, pressedAt = os.clock(), os.clock()
-				pcall(clickCenterOf, amt)
+				pcall(Config.pressButton, amt)
 				return true
 			end
 			return false
@@ -8682,10 +8765,22 @@ local function buildLogic()
 			local _, no = islandPopupButtons()
 			if no and no.AbsoluteSize.X > 0 and no.AbsoluteSize.Y > 0 then
 				lastPress, pressedAt = os.clock(), 0
-				pcall(clickCenterOf, no)
+				pcall(Config.pressButton, no)
 				return true
 			end
 			return false
+		end
+		-- Last resort: the popup is still on screen after pressing "No" several times (or after buying through the remote): hide it.
+		local function forceCloseIslandPopup()
+			local _, no = islandPopupButtons()
+			if not no then return end
+			local sg = no
+			while sg and not sg:IsA("ScreenGui") do sg = sg.Parent end
+			warn("[Islands] the purchase popup would not close - closing it")
+			pcall(Config.closeOpenMenus)
+			task.wait(0.3)
+			local _, no2 = islandPopupButtons()
+			if no2 and sg and sg.Parent then sg.Enabled = false end
 		end
 		local runId, activeTween, pausedHatch = 0, nil, false
 		-- True while this island-travel run is still the current one.
@@ -8871,6 +8966,54 @@ local function buildLogic()
 		-- True if step i (its island) is in World 2.
 		local function isW2Step(i) return STEPS[i] ~= nil and isW2Name(STEPS[i].name) end
 
+		-- World 2 must be bought once (20QN coins): touching the portal makes the game send EntryEncountered {Action = "Purchase", Price},
+		-- the client then fires TimeRiftService.RE.UnlockRequested with no arguments, the server answers UnlockResult and walks you in by itself.
+		local W2_UNLOCK_PRICE, w2Price, w2Hooked = 20000000000000000000, nil, false
+		local function buyWorld2(id, doorCF)
+			local svc2 = RS.RemoteServices:FindFirstChild("TimeRiftService")
+			local re2 = svc2 and svc2:FindFirstChild("RE")
+			local req = re2 and re2:FindFirstChild("UnlockRequested")
+			if not req then return true end   -- unknown layout: just try the portal
+			if not w2Hooked then
+				w2Hooked = true
+				local ev = re2:FindFirstChild("EntryEncountered")
+				if ev then
+					connect(ev.OnClientEvent, function(info)
+						if type(info) == "table" and info.Action == "Purchase" and tonumber(info.Price) then w2Price = tonumber(info.Price) end
+					end)
+				end
+			end
+			while live(id) do
+				if Config.world2Unlocked() or inWorld2() then return true end
+				local okD, data = pcall(function() return require(RS.Controllers.Core.DataController):GetReplica().Data end)
+				local coins = (okD and type(data) == "table" and type(data.Currencies) == "table" and tonumber(data.Currencies.Coins)) or 0
+				local price = w2Price or W2_UNLOCK_PRICE
+				if coins >= price then
+					status("World 2 is locked: walking into its portal to buy it...")
+					if doorCF then
+						pcall(tweenTo, doorCF, id)
+						pcall(teleportTo, doorCF)
+						nap(id, 1)
+					end
+					status(string.format("World 2: buying it (%.3g coins)...", price))
+					pcall(function() req:FireServer() end)
+					local t0 = os.clock()
+					while live(id) and os.clock() - t0 < 8 and not Config.world2Unlocked() do task.wait(0.25) end
+					if Config.world2Unlocked() then
+						nap(id, 1.5)
+						return live(id)
+					end
+				elseif id == nil then
+					status(string.format("World 2 is not unlocked and costs %.3g coins (you have %.3g)", price, coins))
+					return false
+				else
+					status(string.format("World 2 costs %.3g coins - you have %.3g, waiting...", price, coins))
+					nap(id, 10)
+				end
+			end
+			return false
+		end
+
 		-- Makes sure you are in World 2: Travel to Heaven, walk into Workspace.World2Portal.Doorway, wait until Progression.World changes.
 		-- Returns true once you are in World 2 (also when you already were).
 		local function ensureWorld2(id)
@@ -8893,6 +9036,9 @@ local function buildLogic()
 				end
 				local cf = door and portalCFrame(door)
 				if cf then
+					if not Config.world2Unlocked() then
+						if not buyWorld2(id, cf) then return false end
+					end
 					status(string.format("World 2: walking into the portal (try %d)...", n))
 					pcall(tweenTo, cf, id)
 					pcall(teleportTo, cf)   -- make sure the doorway is really touched
@@ -9151,6 +9297,7 @@ local function buildLogic()
 										if not closeIslandPopup() then break end
 										task.wait(0.5)
 									end
+									forceCloseIslandPopup()
 									break
 								end
 								if not active(id) then break end
@@ -9160,6 +9307,7 @@ local function buildLogic()
 										if not closeIslandPopup() then break end
 										task.wait(0.5)
 									end
+									forceCloseIslandPopup()
 									break
 								end
 								status(string.format("%s: not bought yet (try %d) - retrying", step.name, tries))
@@ -17820,6 +17968,231 @@ local DesertChest = (function()
 end)()
 
 
+-- ---- Auto Expedition -------------------------------------------------------
+-- Sends a crew of 5 pets to sea, waits until they are back, collects the loot and sends the next crew.
+-- Uses the game's own ExpeditionVoyages module (Send / Collect / RunIn / IsBack ...), so the request formats are exactly the game's:
+--   Send(mapId, islandId, {petIds})  ->  ExpeditionService.RF.Send        Collect("Regular")  ->  ExpeditionService.RF.Collect
+-- The server wants you standing on the Expeditions pad ("TooFar" otherwise), so the feature teleports there for Send / Collect.
+local Expedition = (function()
+	local RS = game:GetService("ReplicatedStorage")
+	-- the spot at / next to the Expeditions pad (Ice Age, World 2)
+	local PAD_CF = CFrame.new(1671.4427490234375, 1366.7764892578125, 6910.1357421875, -0.28408315777778625, -1.733393695246832e-08, -0.9587996602058411, 3.6980427609023536e-08, 1, -2.9035735593652134e-08, 0.9587996602058411, -4.3705384200620756e-08, -0.28408315777778625)
+	local MAP_ID = "StarterIsles"
+	local CHECK_EVERY = 20   -- seconds between checks while the crew is at sea
+	local on, generation = false, 0
+	local AUTO = "Auto (progress, then the longest)"
+	local islandOptions, islandIds = { AUTO }, {}
+	local selectedIsland = AUTO
+	local CREWS = { "Highest loot bonus", "Weakest pets" }
+	local selectedCrew = CREWS[1]
+	do
+		local ok, MapConfig = pcall(function() return require(RS.Shared.Game.ExpeditionMapConfig) end)
+		if ok and type(MapConfig) == "table" and MapConfig.Maps and MapConfig.Maps[MAP_ID] then
+			for _, isl in ipairs(MapConfig.Maps[MAP_ID].Islands) do
+				local label = string.format("%s (%dh)", isl.Id == "MysteryIsland" and "Mystery Island" or tostring(isl.Name), tonumber(isl.Hours) or 0)
+				islandOptions[#islandOptions + 1] = label
+				islandIds[label] = isl.Id
+			end
+		end
+	end
+	local DESC = "Sends a crew of 5 spare pets to the island you choose, waits while they are at sea, then collects the loot at the Expeditions pad and sends the next crew. See the card below for how the crew is picked."
+	local toggle = {
+		type = "toggle", name = "Auto Expedition", icon = "🧭", default = false,
+		desc = DESC,
+	}
+	local islandEntry = {
+		type = "dropdown", name = "Expedition island", icon = "🏝️", width = 260,
+		desc = "Auto = the first island you have not completed yet (each one unlocks the next), then the longest one. Or pick one island | if that island is not open yet, Auto is used instead.",
+		options = islandOptions, default = AUTO,
+		callback = function(option) selectedIsland = tostring(option) end,
+	}
+	local crewEntry = {
+		type = "dropdown", name = "Expedition crew", icon = "🐾", width = 260,
+		desc = "How the 5 pets are picked from your spare pets (never equipped, locked, Secret, 30M or already away). Pets that can still level always go first. Highest loot bonus = the rarest pets first (each rarity has its own loot bonus), the weaker one among equals. Weakest pets = your lowest power pets first, so nothing good is away.",
+		options = CREWS, default = CREWS[1],
+		callback = function(option) selectedCrew = tostring(option) end,
+	}
+	-- Kaitun-style checklist (same card as Pet Defense > Drop Boosts): a check = that rule is ON, click it to turn the rule off (X)
+	local crewCard = {
+		type = "checkcard", name = "Expedition Crew", noSave = true, master = toggle, skip = {},
+		title = "How Auto Expedition picks its crew",
+		sub = "Equipped pets and pets already away are never sent. The rest follow these rules.",
+		items = {
+			{ key = "locked", title = "Locked pets stay home",   l1 = "Pets you locked are never sent.", l2 = "" },
+			{ key = "secret", title = "Secret pets stay home",   l1 = "Your Secret pets are never sent.", l2 = "" },
+			{ key = "m30",    title = "30M pets stay home",      l1 = "Pets named 30M... are never sent.", l2 = "" },
+			{ key = "level",  title = "Pets that can level first", l1 = "Max level pets only go when no other is left.", l2 = "" },
+		},
+		tip = "Then the Expedition crew setting orders them. Click a check to turn that rule off (X) - click again to turn it back on.",
+	}
+	-- Sets the status text of Auto Expedition.
+	local function say(message)
+		if toggle._desc and toggle._desc.Parent then toggle._desc.Text = message end
+	end
+	-- Returns your player data.
+	local function getData()
+		local ok, d = pcall(function() return require(RS.Controllers.Core.DataController):GetReplica().Data end)
+		return ok and type(d) == "table" and d or nil
+	end
+	-- the 5 pets to send (nil / empty when no spare pet is left)
+	local function pickCrew(data, MapConfig, Formula)
+		local owned = data.Pets and data.Pets.Owned
+		if type(owned) ~= "table" then return {} end
+		local equipped = {}
+		for _, id in ipairs((data.Pets and data.Pets.Equipped) or {}) do equipped[id] = true end
+		local list = {}
+		for id, p in pairs(owned) do
+			if type(p) == "table" and p.Frozen == nil and p.FrozenAlso == nil and p.PendingSerial ~= true
+				and not equipped[id] and (crewCard.skip.locked == true or p.Locked ~= true)
+				and (crewCard.skip.secret == true or tostring(p.Rarity or ""):sub(1, 6) ~= "Secret")
+				and (crewCard.skip.m30 == true or tostring(p.Name or ""):sub(1, 3) ~= "30M") then
+				list[#list + 1] = p
+			end
+		end
+		local function maxed(p)
+			local ok, r = pcall(Formula.IsMaxLevel, p)
+			return ok and r == true
+		end
+		local weakest = selectedCrew == CREWS[2]
+		table.sort(list, function(a, b)
+			local ma, mb = maxed(a), maxed(b)
+			if ma ~= mb and crewCard.skip.level ~= true then return mb end   -- pets that can still level come first
+			if not weakest then
+				local ba, bb = MapConfig.CrewBonus[a.Rarity] or 3, MapConfig.CrewBonus[b.Rarity] or 3
+				if ba ~= bb then return ba > bb end
+			end
+			local pa, pb = tonumber(a.Power) or 0, tonumber(b.Power) or 0
+			if pa ~= pb then return pa < pb end   -- among equals the weaker pet goes
+			return tostring(a.Id) < tostring(b.Id)
+		end)
+		local crew = {}
+		for i = 1, math.min(MapConfig.MaxCrew or 5, #list) do crew[i] = list[i].Id or tostring(i) end
+		return crew
+	end
+	-- the island to send the crew to
+	local function chooseIsland(Voyages)
+		local want = islandIds[selectedIsland]
+		if want then
+			local isl = Voyages.FindIsland(MAP_ID, want)
+			if isl then
+				local state = Voyages.State(MAP_ID, isl)
+				if state == "Open" or state == "Done" then return isl end
+			end
+		end
+		return Voyages.Suggested(MAP_ID)
+	end
+	-- teleports onto the Expeditions pad (drop teleport, then exactly onto the spot). True when there.
+	local function goPad(cur)
+		local char = player.Character
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		if hrp and (hrp.Position - PAD_CF.Position).Magnitude <= 8 then return true end
+		local arrived = Config.dropTeleport and Config.dropTeleport(cur, PAD_CF, say)
+		if not cur() then return false end
+		local h2 = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+		if h2 then h2.CFrame = PAD_CF end
+		task.wait(0.8)
+		return arrived == true
+	end
+	-- Main loop of Auto Expedition.
+	local function run(id)
+		local function cur() return alive and on and generation == id end
+		local ok, Voyages, MapConfig, Formula = pcall(function()
+			return require(RS.Modules.Client.Game.ExpeditionVoyages), require(RS.Shared.Game.ExpeditionMapConfig), require(RS.Shared.Game.ExpeditionFormula)
+		end)
+		if not ok then say("Expeditions unavailable: " .. tostring(Voyages)); return end
+		local slot = MapConfig.Maps[MAP_ID].Slot
+		local priority = Logic and Logic.priority
+		-- runs fn() while holding the machine trip (pauses Hatch), then closes the map window the pad opens
+		local function atPad(fn)
+			local held = (priority and priority.acquireTrip and priority.acquireTrip("Expedition", cur, say)) or cur()
+			if not (held and cur()) then return end
+			local okTrip, err = pcall(function()
+				if goPad(cur) and cur() then fn() else say("Could not reach the Expeditions pad - retrying later") end
+			end)
+			if not okTrip then warn("[WORST Expedition] error: " .. tostring(err)) end
+			if priority and priority.releaseTrip then priority.releaseTrip("Expedition") end
+			pcall(Config.closeOpenMenus)
+		end
+		while cur() do
+			local data = getData()
+			local wait = CHECK_EVERY
+			if not data then
+				say("Waiting for player data...")
+			elseif type(data.Expeditions) ~= "table" then
+				say("No expedition data on this account")
+				wait = 60
+			else
+				local current = Voyages.RunIn(slot)
+				if current then
+					if Voyages.IsBack(current) then
+						say("Crew is back - collecting...")
+						atPad(function()
+							local res, err = Voyages.Collect(slot)
+							if res then
+								say(string.format("Collected %s | %d loot rolls", tostring(current.Island.Id), type(res.Loot) == "table" and #res.Loot or 0))
+								print("[WORST Expedition] collected " .. tostring(current.Island.Id))
+							else
+								say("Collect failed: " .. tostring(err))
+								warn("[WORST Expedition] collect failed: " .. tostring(err))
+								wait = 30
+							end
+						end)
+						if wait == CHECK_EVERY then wait = 3 end   -- send the next crew right away
+					else
+						local left = Voyages.Remaining(current)
+						say(string.format("%s at sea | back in %s | %d pets away", tostring(current.Island.Id), Voyages.FormatTime(left), #(current.Crew or {})))
+						wait = math.min(CHECK_EVERY, math.max(2, left + 1))
+					end
+				else
+					local island = chooseIsland(Voyages)
+					if not island then
+						say("No island is open to send a crew to")
+						wait = 60
+					else
+						local crew = pickCrew(data, MapConfig, Formula)
+						if #crew == 0 then
+							say("No spare pets to send (equipped, locked, Secret, 30M and pets already away stay home)")
+							wait = 60
+						else
+							say(string.format("Sending %d pets to %s...", #crew, tostring(island.Id)))
+							atPad(function()
+								local newRun, err = Voyages.Send(MAP_ID, island.Id, crew)
+								if newRun then
+									say(string.format("Sent %d pets to %s | back in %s", #crew, tostring(island.Id), Voyages.FormatTime(Voyages.Remaining(newRun))))
+									print("[WORST Expedition] sent " .. #crew .. " pets to " .. tostring(island.Id))
+								else
+									say("Send failed: " .. tostring(err))
+									warn("[WORST Expedition] send failed: " .. tostring(err))
+									wait = 30
+								end
+							end)
+							if wait == CHECK_EVERY then wait = 5 end
+						end
+					end
+				end
+			end
+			local t0 = os.clock()
+			while cur() and os.clock() - t0 < wait do task.wait(0.5) end
+		end
+	end
+	toggle.callback = function(value)
+		on = value == true
+		generation = generation + 1
+		if on then
+			say("Starting...")
+			local id = generation
+			task.spawn(function() run(id) end)
+		else
+			if Logic and Logic.priority and Logic.priority.releaseTrip then pcall(Logic.priority.releaseTrip, "Expedition") end
+			say(DESC)
+		end
+	end
+	table.insert(cleanupHooks, function() on = false; generation = generation + 1 end)
+	return { toggle = toggle, island = islandEntry, crew = crewEntry, card = crewCard }
+end)()
+
+
+
 -- ---- Miscellaneous tab features --------------------------------------------
 
 -- Miscellaneous tab: server hopping / rejoin / join by Job ID / join a low-population server / walk + jump speed
@@ -18366,6 +18739,7 @@ local TAB_SCRIPTS = {
 			return entries
 		end)() },
 		{ name = "Auto Pet Defense", entries = Logic.petdef and { Logic.petdef.toggle, Logic.petdef.mode, Logic.petdef.grab, Logic.petdef.grabcard, Logic.petdef.info } or {} },
+		{ name = "Auto Expedition", entries = { Expedition.toggle, Expedition.island, Expedition.crew, Expedition.card } },
 		{ name = "Halloween", closed = true, closedMsg = "This event no longer exists", entries = {} },   -- event is over: the page button shows "Closed" and only opens a popup
 	} } or {},
 	Trade = { pages = {
@@ -22695,6 +23069,18 @@ function Config.questCardInfo(host, entry)
 	end)
 end
 
+-- Readability for EVERY text of the window: Gotham (thin) -> GothamMedium and a soft dark outline, so text stays clear
+-- over the animated background. Called for all existing texts before the open animation and for every text added later.
+function Config.readable(d)
+	if not (d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox")) then return end
+	if d.Text == "✓" or d.Text == "X" then return end
+	if d.Font == Enum.Font.Gotham then d.Font = Enum.Font.GothamMedium end
+	if d.TextStrokeTransparency >= 1 then
+		d.TextStrokeColor3 = Color3.new(0, 0, 0)
+		d.TextStrokeTransparency = 0.55
+	end
+end
+
 ---------------------------------------------------------------- page builder
 local builders = {
 	button = buildButton, toggle = buildToggle, slider = buildSlider, dropdown = buildDropdown,
@@ -24693,6 +25079,9 @@ do
 			put(e, grp and grp.a or alphaNow)   -- new things that show up while fading start at the current opacity
 		end
 	end
+
+	for _, d in ipairs(window:GetDescendants()) do Config.readable(d) end
+	window.DescendantAdded:Connect(function(d) if alive then Config.readable(d) end end)
 
 	FX.introA = 0   -- the ash particles / bottom glow multiply their own transparency with this (they rewrite it every frame)
 	add(window)
