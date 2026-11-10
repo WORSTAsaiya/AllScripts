@@ -646,119 +646,6 @@ do
 	end)
 end
 
--- ------------------------------------------------ resize
--- Hold ANY side or corner of the window and drag to resize it. The size is remembered.
-do
-	local SIZE_FILE = "WorstEggFinder_size.json"
-	local MIN_W, MIN_H = 260, 300
-	local EDGE, CORNER = 10, 16
-
-	local function viewport()
-		local cam = workspace.CurrentCamera
-		return cam and cam.ViewportSize or Vector2.new(1280, 720)
-	end
-
-	local function saveSize()
-		if type(writefile) ~= "function" then return end
-		pcall(writefile, SIZE_FILE, HttpService:JSONEncode({ main.Size.X.Offset, main.Size.Y.Offset }))
-	end
-
-	-- restore the last size (kept inside the screen)
-	do
-		local ok, d = pcall(function()
-			if type(isfile) == "function" and type(readfile) == "function" and isfile(SIZE_FILE) then
-				return HttpService:JSONDecode(readfile(SIZE_FILE))
-			end
-		end)
-		if ok and type(d) == "table" and type(d[1]) == "number" and type(d[2]) == "number" then
-			local vp = viewport()
-			local w = math.clamp(d[1], MIN_W, math.max(MIN_W, vp.X - 10))
-			local h = math.clamp(d[2], MIN_H, math.max(MIN_H, vp.Y - 10))
-			main.Size = UDim2.new(0, w, 0, h)
-		end
-	end
-
-	local active, startMouse, startSize, startPos, dirX, dirY
-
-	local function applyResize(i)
-		local d = Vector2.new(i.Position.X, i.Position.Y) - startMouse
-		local s = mainScale.Scale
-		if s <= 0 then s = 1 end
-		local vp = viewport()
-		local w, h = startSize.X, startSize.Y
-		local px, py = startPos.X.Offset, startPos.Y.Offset
-		if dirX ~= 0 then
-			w = math.clamp(startSize.X + dirX * d.X / s, MIN_W, math.max(MIN_W, math.floor(vp.X / s)))
-			if dirX < 0 then px = startPos.X.Offset + (startSize.X - w) * s end   -- left edge moves with the finger
-		end
-		if dirY ~= 0 then
-			h = math.clamp(startSize.Y + dirY * d.Y / s, MIN_H, math.max(MIN_H, math.floor(vp.Y / s)))
-			if dirY < 0 then py = startPos.Y.Offset + (startSize.Y - h) * s end   -- top edge moves with the finger
-		end
-		main.Size = UDim2.new(0, w, 0, h)
-		main.Position = UDim2.new(startPos.X.Scale, px, startPos.Y.Scale, py)
-	end
-
-	local function finish()
-		if not active then return end
-		active = nil
-		saveSize()
-		savePos()
-	end
-
-	local function makeHandle(name, dx, dy, size, pos)
-		local h = mk("Frame", {
-			Name = "Resize" .. name, Size = size, Position = pos, BackgroundTransparency = 1,
-			BorderSizePixel = 0, Active = true, ZIndex = 100,
-		}, main)
-		h.InputBegan:Connect(function(i)
-			if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
-				active = i
-				startMouse = Vector2.new(i.Position.X, i.Position.Y)
-				startSize = Vector2.new(main.Size.X.Offset, main.Size.Y.Offset)
-				startPos = main.Position
-				dirX, dirY = dx, dy
-				i.Changed:Connect(function()
-					if i.UserInputState == Enum.UserInputState.End and active == i then finish() end
-				end)
-			end
-		end)
-		return h
-	end
-
-	-- sides
-	makeHandle("Left",   -1, 0, UDim2.new(0, EDGE, 1, -2 * CORNER), UDim2.new(0, 0, 0, CORNER))
-	makeHandle("Right",   1, 0, UDim2.new(0, EDGE, 1, -2 * CORNER), UDim2.new(1, -EDGE, 0, CORNER))
-	makeHandle("Top",     0, -1, UDim2.new(1, -2 * CORNER, 0, EDGE), UDim2.new(0, CORNER, 0, 0))
-	makeHandle("Bottom",  0, 1, UDim2.new(1, -2 * CORNER, 0, EDGE), UDim2.new(0, CORNER, 1, -EDGE))
-	-- corners
-	makeHandle("TopLeft",     -1, -1, UDim2.new(0, CORNER, 0, CORNER), UDim2.new(0, 0, 0, 0))
-	makeHandle("TopRight",     1, -1, UDim2.new(0, CORNER, 0, CORNER), UDim2.new(1, -CORNER, 0, 0))
-	makeHandle("BottomLeft",  -1, 1, UDim2.new(0, CORNER, 0, CORNER), UDim2.new(0, 0, 1, -CORNER))
-	makeHandle("BottomRight",  1, 1, UDim2.new(0, CORNER, 0, CORNER), UDim2.new(1, -CORNER, 1, -CORNER))
-
-	-- little grip dots in the bottom-right corner so you can see where to grab
-	local grip = mk("Frame", { Size = UDim2.new(0, 12, 0, 12), Position = UDim2.new(1, -18, 1, -18), BackgroundTransparency = 1, ZIndex = 99 }, main)
-	for _, p in ipairs({ { 8, 8 }, { 4, 8 }, { 8, 4 }, { 0, 8 }, { 8, 0 }, { 4, 4 } }) do
-		local dot = mk("Frame", { Size = UDim2.new(0, 2, 0, 2), Position = UDim2.new(0, p[1], 0, p[2]), BackgroundColor3 = C.ash, BorderSizePixel = 0, ZIndex = 99 }, grip)
-		corner(dot, 1)
-	end
-
-	UIS.InputChanged:Connect(function(i)
-		if not active then return end
-		if active.UserInputType == Enum.UserInputType.Touch then
-			if i == active then applyResize(i) end
-		elseif i.UserInputType == Enum.UserInputType.MouseMovement then
-			applyResize(i)
-		end
-	end)
-	UIS.InputEnded:Connect(function(i)
-		if active and (i == active or (active.UserInputType == Enum.UserInputType.MouseButton1 and i.UserInputType == Enum.UserInputType.MouseButton1)) then
-			finish()
-		end
-	end)
-end
-
 -- the minimised icon box, pinned above the game's Shop button
 do
 	local SIZE = tonumber(CONFIG.MINI_SIZE) or 60
@@ -1637,11 +1524,12 @@ end)
 ACC.q = function(v) return HttpService:UrlEncode(tostring(v)) end
 -- a feed lives only while a login is active and nothing newer (another login / a logout) has started since
 ACC.live = function(g) return not stopped and ACC.session ~= nil and g == ACC.gen end
-ACC.setLeft = function(sec, bots)
+ACC.setLeft = function(sec, bots, name)
 	local S = ACC.session
 	if not S then return end
 	if tonumber(sec) then S.unlimited = false; S.expireClock = os.clock() + tonumber(sec) end
 	if type(bots) == "table" then S.bots = bots end
+	if type(name) == "string" then S.name = name end
 	ACC.refreshStatus()
 end
 
@@ -1657,7 +1545,7 @@ local function handleMessage(raw)
 		return
 	elseif d.type == "status" then
 		if d.freeMax and ACC.session.free then ACC.session.freeMax = tonumber(d.freeMax) end
-		ACC.setLeft(d.secondsLeft, d.bots)
+		ACC.setLeft(d.secondsLeft, d.bots, d.label)
 	elseif d.type == "history" and type(d.alerts) == "table" then
 		for i = #d.alerts, 1, -1 do addAlert(d.alerts[i], true) end
 		syncCards()
@@ -1914,7 +1802,7 @@ ACC.login = function(token, isFree)
 		return false, tostring(d.error or "Login failed."), (tonumber(res.StatusCode or res.status) == 401)
 	end
 	if ACC.session then ACC.resetFeed() end   -- a key replacing the free version: start from a clean list
-	ACC.session = { token = token, free = isFree == true, unlimited = d.unlimited == true or isFree == true, expireClock = os.clock() + (tonumber(d.secondsLeft) or 0), bots = d.bots, freeMax = tonumber(d.freeMax) }
+	ACC.session = { token = token, free = isFree == true, unlimited = d.unlimited == true or isFree == true, expireClock = os.clock() + (tonumber(d.secondsLeft) or 0), bots = d.bots, name = (type(d.label) == "string") and d.label or nil, freeMax = tonumber(d.freeMax) }
 	ACC.checking = false
 	if not isFree then ACC.saveToken(token) end
 	ACC.refreshStatus()
@@ -1968,6 +1856,13 @@ ACC.build = function()
 	end
 	ui.title = label(UDim2.new(1, -50, 0, 20), UDim2.new(0, 14, 0, 10), "LOGIN", C.white, Enum.Font.GothamBlack, 15)
 	ui.sub = label(UDim2.new(1, -28, 0, 16), UDim2.new(0, 14, 0, 32), "", C.ash, Enum.Font.Gotham, 11)
+	-- big centered "Logged in as: Name" (only shown while logged in with a key)
+	ui.who = mk("TextLabel", {
+		Size = UDim2.new(1, -28, 0, 52), Position = UDim2.new(0, 14, 0, 44), BackgroundTransparency = 1, Text = "",
+		TextColor3 = C.white, Font = Enum.Font.GothamBlack, TextSize = 22, TextScaled = true, TextWrapped = true,
+		TextXAlignment = Enum.TextXAlignment.Center, TextYAlignment = Enum.TextYAlignment.Center, Visible = false,
+	}, card)
+	mk("UITextSizeConstraint", { MaxTextSize = 24, MinTextSize = 12 }, ui.who)
 	ui.input = mk("TextBox", {
 		Size = UDim2.new(1, -28, 0, 36), Position = UDim2.new(0, 14, 0, 58), BackgroundColor3 = C.box, Text = "",
 		PlaceholderText = "Paste your key here", PlaceholderColor3 = C.ash, TextColor3 = C.white,
@@ -2060,10 +1955,21 @@ ACC.showLogin = function(msg, prefill)
 	if prefill and not on then ui.input.Text = prefill end
 	if on then
 		local S = ACC.session
-		ui.sub.Text = S.unlimited and "Logged in. No time limit." or "Logged in."
+		ui.sub.Text = ""
+		ui.who.Visible = true
+		if S.unlimited then ui.who.Text = "Logged in\nNo time limit"
+		elseif S.name and S.name ~= "" then ui.who.Text = "Logged in as:\n" .. S.name
+		else ui.who.Text = "Logged in" end
 		local b = S.bots
-		ACC.say((type(b) == "table" and b.total) and ("Bots: " .. tostring(b.assigned) .. " of " .. tostring(b.total) .. " active") or "", false)
+		local n = (type(b) == "table") and tonumber(b.total) or nil
+		ACC.say(n and ("You have " .. tostring(n) .. (n == 1 and " bot" or " bots")) or "", false)
+		ui.status.TextXAlignment = Enum.TextXAlignment.Center
+		ui.status.TextSize = 14
+		ui.status.TextColor3 = C.white
 	else
+		ui.who.Visible = false
+		ui.status.TextXAlignment = Enum.TextXAlignment.Left
+		ui.status.TextSize = 11
 		local isFree = ACC.session ~= nil and ACC.session.free == true
 		ui.sub.Text = isFree and "Free version. Enter a key for full access." or "Enter the key you were given."
 		local cap = isFree and tonumber(ACC.session.freeMax) or nil
