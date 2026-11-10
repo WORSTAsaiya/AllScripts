@@ -5,8 +5,8 @@
 	grabber's, but every alert is sent in the ORIGINAL notifier format: one
 	webhook message that starts with EGGKG + JSON, which your Discord bot cog
 	("2worst_kg") turns into the usual embed (kg, mutation, base -> final value,
-	kg / value role pings). There is no Roblox user-id lock; the only lock is the
-	place id below, so it runs on any account inside Steal An Egg.
+	kg / value role pings). There is no Roblox user-id lock and NO place-id lock
+	any more: it starts in whatever place you run it in.
 	NO WORKSPACE FILE NEEDED: host this file somewhere that serves raw text, set
 	the link in the loader, and run the same loader on every device:
 	    getgenv().EGG_SCRIPT_URL = "YOUR_RAW_LINK"
@@ -48,6 +48,11 @@
 	    CONFIG.WEBHOOK_HALLOWEEN with the VIP ping. They are (almost) always up,
 	    so this is purely additive - never a reason to hop, hold or scan for a
 	    boss.
+	  * WAVE HOLD IS ENFORCED EVERYWHERE: from 4:30 to 5:05 of every 5-minute
+	    cycle no hop is started, and a hop that is still retrying when 4:30
+	    arrives stops at once (hop(), the pacing wait and the retry loop all
+	    check hoppingPaused()). Only force hops (a server that cannot load)
+	    ignore it.
 
 	HOW IT RESTARTS AFTER A HOP
 	  Every hop queues a tiny bootstrap that reloads this file after the new
@@ -90,8 +95,8 @@ local CONFIG = {
 	-- The ONE webhook every egg alert goes to (your bot cog reads it and posts the embed).
 	RELAY_WEBHOOK = "https://discord.com/api/webhooks/1553898268226887855/fG9vg0e9vhb_dUCi0xWqNzYr5-2w8QwelJ282YrUZWI7KPrjdH3V8gqmG7JX7zqSPHEP",
 
-	-- The one game this script may run in (Steal An Egg). Anywhere else it exits
-	-- immediately, so it is safe to leave in Delta's AutoExec folder.
+	-- UNUSED now: the place-id check was removed, so the script runs in any
+	-- place. Kept only so old loaders that read this key do not break.
 	PLACE_ID = 107778070777162,
 
 	-- JOINER HUB (your Hawkhost relay). Every egg is also sent here so the joiner
@@ -2592,6 +2597,20 @@ local function pickTargets(forceFresh)
 	return rotateToStart(candidates)
 end
 
+-- ---------------------------------------------------------------- spawn wave
+-- The map refreshes on 5-minute wall-clock boundaries (:00/:05/...).
+-- Cycle: keep hopping and posting all cycle, then stop from 4:30 and hold the
+-- current server through the wave, resuming at 5:05.
+-- (Defined HERE, above the hop code, so hop() / hopRound() can enforce it.)
+local SPAWN_PERIOD = 300
+local SPAWN_SETTLE = 5
+local SPAWN_HOLD_AT = 270 -- 4:30 into the cycle: stop hopping, hold for wave (use 240 for the last 60s)
+
+local function hoppingPaused()
+	local e = os.time() % SPAWN_PERIOD
+	return e >= SPAWN_HOLD_AT or e < SPAWN_SETTLE
+end
+
 local teleportFailures = 0
 
 -- Gap after a refused join. Flat 1s like the desktop hunter: the fresh
@@ -2606,7 +2625,8 @@ local function hopBackoff(failures)
 	end
 end
 
-local function hopRound()
+-- force = true ignores the wave hold (a server that cannot load must be escaped)
+local function hopRound(force)
 	if not CONFIG.HOP then
 		log("HOP is false - staying in this server")
 		return false
@@ -2632,6 +2652,10 @@ local function hopRound()
 			local t0 = os.clock()
 			while os.clock() - t0 < waitFor do
 				if stopped() then return false end
+				if not force and hoppingPaused() then
+					log("wave hold reached while pacing - not hopping")
+					return false
+				end
 				task.wait(0.5)
 			end
 		end
@@ -2709,6 +2733,14 @@ local function hopRound()
 	-- "Connection Failed (279)" dialog. Fresh data = far fewer dead targets.
 	log("refreshing server list before hop")
 	local targets, listWhy = pickTargets(true)
+
+	-- the list fetch can take seconds: re-check the wave hold before any join
+	if not force and hoppingPaused() then
+		log("wave hold reached while fetching the list - not hopping")
+		disconnect()
+		return false
+	end
+
 	if not targets and CONFIG.ALLOW_MATCHMAKER then
 		log("no candidates (" .. tostring(listWhy) .. ") - going to matchmaker for an available server")
 		verdict = nil
@@ -2753,6 +2785,13 @@ local function hopRound()
 	while teleportFailures < CONFIG.MAX_TELEPORT_RETRIES do
 		idx = idx + 1
 
+		-- WAVE HOLD: a hop that was already retrying when 4:30 arrived stops here,
+		-- before any further join is attempted.
+		if not force and hoppingPaused() then
+			log("wave hold reached mid-hop - stopping, staying put")
+			break
+		end
+
 		if os.clock() - hopStart > HOP_BUDGET then
 			log(("hop budget (%.0fs) exceeded - giving up this round"):format(HOP_BUDGET))
 			break
@@ -2766,6 +2805,12 @@ local function hopRound()
 				and not CONFIG.claimServer(cand.id) then
 				log("skipping " .. cand.id .. " - another of your accounts has it")
 				deadIds[cand.id] = true
+			end
+
+			-- the claim call can take up to ~2.5s: check the wave hold again
+			if not force and hoppingPaused() then
+				log("wave hold reached while claiming - stopping, staying put")
+				break
 			end
 
 			-- Skip servers that already failed this hop round (deadIds mirrors desktop hunter)
@@ -2933,8 +2978,12 @@ local function idleLog()
 	end
 end
 
--- force = true skips the idle gate (broken server that must be escaped)
+-- force = true skips the idle gate AND the wave hold (broken server that must be escaped)
 local function hop(force)
+	if not force and hoppingPaused() then
+		CONFIG.hbStatus = "Holding for wave"
+		return false
+	end
 	if not force and not huntActive() then
 		CONFIG.hbStatus = "Waiting for egg"
 		return false
@@ -2942,16 +2991,20 @@ local function hop(force)
 	CONFIG.hbStatus = "Hopping"
 	if CONFIG.sendBeat then task.spawn(CONFIG.sendBeat) end   -- tell the relay right now
 	if not CONFIG.HOP then
-		return hopRound()
+		return hopRound(force)
 	end
 
 	local round = 0
 	while true do
 		round += 1
-		if hopRound() then
+		if hopRound(force) then
 			return true
 		end
 		if stopped() then
+			return false
+		end
+		if not force and hoppingPaused() then
+			-- the hold started while we were retrying: stop, the main loop holds
 			return false
 		end
 
@@ -3082,18 +3135,8 @@ local function avgPingMs()
 	return vals[math.ceil(#vals / 2)]
 end
 
--- ---------------------------------------------------------------- spawn wave
--- The map refreshes on 5-minute wall-clock boundaries (:00/:05/...).
--- Cycle: keep hopping and posting all cycle, then stop from 4:30 and hold the
--- current server through the wave, resuming at 5:05.
-local SPAWN_PERIOD = 300
-local SPAWN_SETTLE = 5
-local SPAWN_HOLD_AT = 270 -- 4:30 into the cycle: stop hopping, hold for wave
-
-local function hoppingPaused()
-	local e = os.time() % SPAWN_PERIOD
-	return e >= SPAWN_HOLD_AT or e < SPAWN_SETTLE
-end
+-- (the spawn-wave block - SPAWN_PERIOD / SPAWN_HOLD_AT / hoppingPaused - now
+-- lives above the hop code so every hop path can see it)
 
 -- ------------------------------------------------------- 3D rendering off
 -- Roblox has no "stop drawing" switch, so this stacks four cheap layers:
@@ -3430,6 +3473,7 @@ local function main()
 	log(("landed on server %s (%d/%d)"):format(game.JobId, #Players:GetPlayers(), CONFIG.SERVER_CAPACITY))
 	notify(("landed %d/%d players"):format(#Players:GetPlayers(), CONFIG.SERVER_CAPACITY))
 	rememberVisit(game.JobId)
+	if CONFIG.reportLanding then task.spawn(CONFIG.reportLanding) end
 
 	local players = #Players:GetPlayers()
 	if players > CONFIG.MAX_POP_ON_LAND then
@@ -3589,9 +3633,9 @@ local function main()
 					if hoppingPaused() then
 						log("target egg reported - holding for spawn wave")
 					else
-					if hop() then
-						return
-					end
+						if hop() then
+							return
+						end
 					end
 					log("nowhere to go - staying here after all")
 				elseif #sent > 0 then
@@ -3626,6 +3670,11 @@ local function main()
 		task.wait(CONFIG.POLL)
 	end
 end
+
+-- -------------------------------------------------------------------- start
+
+-- NOTE: the old "only run in Steal An Egg's place id" check was removed on
+-- purpose - the script now starts in whatever place it is executed in.
 
 -- One instance per executor environment.
 local g = genv()
@@ -3729,12 +3778,30 @@ function CONFIG.claimServer(id)
 		if code == 200 then
 			local d = jsonDecode(res.Body)
 			if type(d) == "table" and d.granted == false then granted = false end
+		else
+			log("claim check failed (" .. tostring(code or res) .. ") - joining anyway")
 		end
 		done = true
 	end)
 	local t0 = os.clock()
 	while not done and os.clock() - t0 < 2.5 do task.wait(0.05) end
+	if not done then log("claim check timed out - joining anyway") end
 	return granted
+end
+
+-- tells the relay which server this account just landed in (logging only: the relay prints
+-- "[land] bot -> server" and a [DUPLICATE] line if two of your accounts share one). Never blocks.
+function CONFIG.reportLanding()
+	local url = (tostring(CONFIG.HUB_URL or ""):gsub("/publish/?$", "")) .. "/landed"
+	local key = CONFIG.hubKey()
+	if type(httpRequest) ~= "function" or key == "" or key:find("PUT_FINDER", 1, true) then return end
+	local body = jsonEncode({ bot = ACCT_TAG, id = game.JobId })
+	if not body then return end
+	pcall(httpRequest, {
+		Url = url, Method = "POST",
+		Headers = { ["Content-Type"] = "application/json", ["x-key"] = key },
+		Body = body,
+	})
 end
 
 task.spawn(function()
