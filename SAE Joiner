@@ -51,7 +51,19 @@ local CONFIG = {
 	WAIT_FOR_GAME      = true,
 	WAIT_FOR_CHARACTER = true,
 	DEBUG_LATENCY      = true,    -- shows how long each new alert took (on the card) and prints the breakdown
-	STAGGER            = false,   -- true = cards slide in one after another instead of all at once
+	-- CARDS ONE BY ONE: after you start the script or hop, the cards are built one at a time with this many seconds
+	-- between them (highest value first), instead of all in the same instant. Building 20+ cards at once is what
+	-- makes the game stutter. A single new alert still appears immediately. 0 = build them all at once.
+	CARD_DELAY         = 0.1,
+
+	-- PERFORMANCE: true = no endless animations (the travelling border shine, the pulsing glows, the light sweeps and
+	-- the flowing rainbow on every Golden / Silver / Rainbow card). Those never stop and are heavy on phones; with a
+	-- full list they are the usual reason the FPS drops. Set to false if you want the full shine back.
+	LOW_FX             = true,
+	-- two-variety eggs play the "clash" (one colour from the left, one from the right) when a NEW alert arrives.
+	-- Alerts that are already old when they appear (the list that loads when you start) just show the finished look,
+	-- so a long list does not start dozens of animations at once. true = animate those too.
+	CLASH_ON_OLD       = false,
 
 	-- extra seconds to wait after the game has loaded (0 = none; raise it only if your executor still runs too early)
 	LOAD_EXTRA_WAIT = 0,
@@ -187,6 +199,26 @@ local function readMutation(m)
 	local s = MUTATIONS[k]
 	if s then return s.name, s end
 	return m, { name = m, bg = Color3.fromRGB(90, 90, 100), fg = Color3.fromRGB(255, 255, 255) }
+end
+
+-- "Rainbow, Golden" / "Rainbow & Golden" / { "Rainbow", "Golden" } -> { {name=, style=}, ... }  (none -> empty list)
+local function readMutations(raw)
+	local parts = {}
+	if type(raw) == "table" then
+		for _, v in ipairs(raw) do parts[#parts + 1] = tostring(v) end
+	else
+		local str = tostring(raw or ""):gsub("%s+[Aa][Nn][Dd]%s+", ","):gsub("[/&+|;]", ",")
+		for piece in str:gmatch("[^,]+") do parts[#parts + 1] = piece end
+	end
+	local list, seen = {}, {}
+	for _, p in ipairs(parts) do
+		local name, style = readMutation(p)
+		if name and not seen[name:lower()] then
+			seen[name:lower()] = true
+			list[#list + 1] = { name = name, style = style }
+		end
+	end
+	return list
 end
 
 -- "Golden Stag" -> "Golden", "Stag"
@@ -1216,6 +1248,34 @@ local THEMES = {
 }
 local DARK_TILE = Color3.fromRGB(22, 22, 26)
 
+-- colour of a ColorSequence at position t (0..1)
+local function seqAt(cs, t)
+	local k = cs.Keypoints
+	if t <= k[1].Time then return k[1].Value end
+	for i = 2, #k do
+		if t <= k[i].Time then
+			local p, q = k[i - 1], k[i]
+			return p.Value:Lerp(q.Value, (t - p.Time) / math.max(q.Time - p.Time, 1e-6))
+		end
+	end
+	return k[#k].Value
+end
+
+-- theme for the two-variety card: the shiny theme when there is one, otherwise one made from the chip colour
+local function themeFor(name, style)
+	local t = THEMES[tostring(name):lower()]
+	if t then return t end
+	local b = (style and style.bg) or Color3.fromRGB(90, 90, 100)
+	return {
+		bg = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, b:Lerp(Color3.new(1, 1, 1), 0.55)),
+			ColorSequenceKeypoint.new(0.5, b),
+			ColorSequenceKeypoint.new(1, b:Lerp(Color3.new(0, 0, 0), 0.15)),
+		}),
+		glow = b, chipText = b,
+	}
+end
+
 local function metaText(a)
 	local parts = {}
 	if a.kg and a.kg ~= "" then parts[#parts + 1] = a.kg end
@@ -1238,8 +1298,18 @@ local function makeCard(a, delay)
 	}, wrap)
 	corner(c, 8)
 
-	local mutName, mut = readMutation(a.mutation)
-	local th = mutName and THEMES[mutName:lower()] or nil
+	-- one variety = the normal shiny card. TWO varieties = a dark card that the two colours rush into from the
+	-- left and the right, clash in the middle and merge (see "clash" below).
+	local mutList = a.mutList or {}
+	local dual = #mutList >= 2
+	local mutName, mut, th, thA, thB
+	if dual then
+		thA, thB = themeFor(mutList[1].name, mutList[1].style), themeFor(mutList[2].name, mutList[2].style)
+	elseif mutList[1] then
+		mutName, mut = mutList[1].name, mutList[1].style
+		th = THEMES[mutName:lower()]
+	end
+	local clash
 	a._valHex = th and th.valHex or nil
 	local txtMain = th and th.text or C.white
 	local txtSub  = th and th.sub or C.ash
@@ -1251,6 +1321,13 @@ local function makeCard(a, delay)
 	}, c)
 	if (mut and mut.rainbow) or (th and th.rainbow) then
 		mk("UIGradient", { Color = RAINBOW }, cardStroke)
+	end
+	if dual then   -- border runs from the left variety's colour to the right one's
+		cardStroke.Color = Color3.new(1, 1, 1)
+		cardStroke.Thickness = 2.5
+		mk("UIGradient", {
+			Color = ColorSequence.new(thA.glow or Color3.new(1, 1, 1), thB.glow or Color3.new(1, 1, 1)),
+		}, cardStroke)
 	end
 
 	local bgGrad, sweep, strokeGrad
@@ -1298,24 +1375,28 @@ local function makeCard(a, delay)
 
 	local textX = 10 + IMG_W
 
-	-- row 1: pet name (+ variety chip on the right)
-	local chipW = 0
-	if mutName then
-		chipW = TextService:GetTextSize(mutName:upper(), 9, Enum.Font.GothamBlack, Vector2.new(200, 16)).X + 14
+	-- row 1: pet name (+ variety chip(s) on the right; with two varieties the first one sits on the left)
+	local chipSpecs = dual and { mutList[1], mutList[2] } or (mutName and { { name = mutName, style = mut } } or {})
+	local chipW = 0   -- total width the chips take (gaps included)
+	for i = #chipSpecs, 1, -1 do
+		local m = chipSpecs[i]
+		local mth = dual and (i == 1 and thA or thB) or th
+		local w = TextService:GetTextSize(m.name:upper(), 9, Enum.Font.GothamBlack, Vector2.new(200, 16)).X + (dual and 10 or 14)
 		local chip = mk("Frame", {
-			Size = UDim2.new(0, chipW, 0, 16), Position = UDim2.new(1, -(88 + chipW), 0, 8),
-			BackgroundColor3 = th and DARK_TILE or mut.bg,
+			Size = UDim2.new(0, w, 0, 16), Position = UDim2.new(1, -(88 + chipW + w), 0, 8),
+			BackgroundColor3 = mth and DARK_TILE or m.style.bg,
 		}, c)
 		corner(chip, 4)
-		if not th and mut.rainbow then mk("UIGradient", { Color = RAINBOW }, chip) end
+		if not mth and m.style.rainbow then mk("UIGradient", { Color = RAINBOW }, chip) end
 		local chipLabel = mk("TextLabel", {
-			Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Text = mutName:upper(),
-			TextColor3 = th and th.chipText or mut.fg, Font = Enum.Font.GothamBlack, TextSize = 9,
+			Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Text = m.name:upper(),
+			TextColor3 = mth and mth.chipText or m.style.fg, Font = Enum.Font.GothamBlack, TextSize = 9,
 		}, chip)
-		if th and th.rainbow then mk("UIGradient", { Color = RAINBOW }, chipLabel) end
+		if mth and mth.rainbow then mk("UIGradient", { Color = RAINBOW }, chipLabel) end
+		chipW = chipW + w + 4
 	end
-	mk("TextLabel", {
-		Size = UDim2.new(1, -(textX + 88 + (chipW > 0 and chipW + 4 or 0)), 0, 20), Position = UDim2.new(0, textX, 0, 6),
+	local nameLbl = mk("TextLabel", {
+		Size = UDim2.new(1, -(textX + 88 + chipW), 0, 20), Position = UDim2.new(0, textX, 0, 6),
 		BackgroundTransparency = 1,
 		Text = a.egg or "Egg", TextColor3 = txtMain, Font = Enum.Font.GothamBlack, TextSize = 15,
 		TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
@@ -1334,7 +1415,7 @@ local function makeCard(a, delay)
 		Text = (a.tier ~= "" and a.tier or "?"):upper(), TextColor3 = badgeStyle and badgeStyle.fg or C.ashLite,
 		Font = Enum.Font.GothamBlack, TextSize = 9,
 	}, badge)
-	mk("TextLabel", {
+	local valLbl = mk("TextLabel", {
 		Size = UDim2.new(1, -(textX + 68 + 6 + 84), 0, 16), Position = UDim2.new(0, textX + 74, 0, 29), BackgroundTransparency = 1, RichText = true,
 		Text = valueText(a), Font = Enum.Font.GothamBlack, TextSize = 13, TextColor3 = txtMain,
 		TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
@@ -1361,6 +1442,14 @@ local function makeCard(a, delay)
 		joinServer(a)
 	end)
 
+	-- two varieties: everything normal sits above layer 1, where the colour panes will slide
+	if dual then
+		c.ClipsDescendants = true
+		for _, ch in ipairs(c:GetChildren()) do
+			if ch:IsA("GuiObject") then ch.ZIndex = 2 end
+		end
+	end
+
 	-- keep the shiny layers underneath the text and buttons
 	if th then
 		for _, ch in ipairs(c:GetChildren()) do
@@ -1377,6 +1466,92 @@ local function makeCard(a, delay)
 	cards[a] = entry
 	if isExpired(a) then styleExpired(entry) end
 
+	-- TWO VARIETIES: the first colour slides in from the left, the second from the right, they hit in the
+	-- middle (white flash, border pulse), then the colours merge with a blended glow where they met and the
+	-- text turns dark so it stays readable. It plays once and nothing keeps running afterwards.
+	if dual then
+		local dark, darkSub, darkHex = Color3.fromRGB(16, 16, 22), Color3.fromRGB(44, 48, 58), "#101016"
+		local mixCol = seqAt(thA.bg, 0.8):Lerp(seqAt(thB.bg, 0.2), 0.5)
+
+		local function recolor(instant)
+			a._valHex = darkHex
+			valLbl.Text = valueText(a)
+			if instant then
+				nameLbl.TextColor3, valLbl.TextColor3, sub.TextColor3 = dark, dark, darkSub
+			else
+				local ti = TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+				TweenService:Create(nameLbl, ti, { TextColor3 = dark }):Play()
+				TweenService:Create(valLbl, ti, { TextColor3 = dark }):Play()
+				TweenService:Create(sub, ti, { TextColor3 = darkSub }):Play()
+			end
+		end
+
+		local function pane(thm, pos)
+			local p = mk("Frame", {
+				Size = UDim2.new(0.52, 0, 1, 0), Position = pos, BackgroundColor3 = Color3.new(1, 1, 1),
+				BorderSizePixel = 0, ZIndex = 1,
+			}, c)
+			corner(p, 8)
+			mk("UIGradient", { Color = thm.bg, Rotation = 28 }, p)
+			return p
+		end
+
+		clash = function(e, instant)
+			if not wrap.Parent or stopped then return end
+			local left  = pane(thA, instant and UDim2.new(0, 0, 0, 0) or UDim2.new(-0.55, 0, 0, 0))
+			local right = pane(thB, instant and UDim2.new(0.48, 0, 0, 0) or UDim2.new(1.03, 0, 0, 0))
+			-- soft blended glow over the seam (invisible until the clash)
+			local mix = mk("Frame", {
+				Size = UDim2.new(0.6, 0, 1, 0), AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 0),
+				BackgroundColor3 = mixCol, BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 1,
+			}, c)
+			corner(mix, 8)
+			mk("UIGradient", {
+				Transparency = NumberSequence.new({
+					NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0.12), NumberSequenceKeypoint.new(1, 1),
+				}),
+			}, mix)
+			e.extra = { left, right, mix }
+
+			if instant then   -- already-old alert: just fade in the finished look
+				left.BackgroundTransparency, right.BackgroundTransparency = 1, 1
+				tween(left, 0.3, { BackgroundTransparency = 0 })
+				tween(right, 0.3, { BackgroundTransparency = 0 })
+				tween(mix, 0.3, { BackgroundTransparency = 0 })
+				recolor(true)
+				return
+			end
+
+			local slide = TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.In)   -- speeds up into the hit
+			TweenService:Create(left,  slide, { Position = UDim2.new(0, 0, 0, 0) }):Play()
+			TweenService:Create(right, slide, { Position = UDim2.new(0.48, 0, 0, 0) }):Play()
+			task.delay(0.45, function()
+				if not wrap.Parent or stopped then return end
+				local flash = mk("Frame", {
+					Size = UDim2.new(0.1, 0, 1, 0), AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 0),
+					BackgroundColor3 = Color3.new(1, 1, 1), BackgroundTransparency = 0.05, BorderSizePixel = 0, ZIndex = 3,
+				}, c)
+				mk("UIGradient", {
+					Transparency = NumberSequence.new({
+						NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0), NumberSequenceKeypoint.new(1, 1),
+					}),
+				}, flash)
+				tween(flash, 0.35, { Size = UDim2.new(0.9, 0, 1, 0), BackgroundTransparency = 1 })
+				tween(mix, 0.45, { BackgroundTransparency = 0 })
+				TweenService:Create(cardStroke, TweenInfo.new(0.18, Enum.EasingStyle.Sine, Enum.EasingDirection.Out, 0, true), { Thickness = 4.5 }):Play()
+				recolor(false)
+				task.delay(0.45, function() flash:Destroy() end)
+			end)
+		end
+
+		local old = (os.clock() - (a.born or os.clock())) >= 8
+		if old and not CONFIG.CLASH_ON_OLD then
+			task.delay((delay or 0) + 0.05, function() clash(entry, true) end)
+		else
+			task.delay((delay or 0) + 0.4, function() clash(entry, false) end)   -- after the card has slid in
+		end
+	end
+
 	task.delay(delay or 0, function()
 		if not wrap.Parent then return end
 		tween(wrap, 0.22, { Size = UDim2.new(1, -6, 0, CARD_H) })
@@ -1384,8 +1559,9 @@ local function makeCard(a, delay)
 		tween(c, 0.3, { Position = UDim2.new(0, 0, 0, 0) }, Enum.EasingStyle.Back)
 	end)
 
-	-- shine animations (only themed cards): pulsing glow, gliding sweep, flowing rainbow
-	if th then
+	-- shine animations (only themed cards): pulsing glow, gliding sweep, flowing rainbow.
+	-- These never stop, so they are skipped when CONFIG.LOW_FX is on.
+	if th and not CONFIG.LOW_FX then
 		task.delay((delay or 0) + 0.7, function()
 			if not wrap.Parent then return end
 			local pulse = TweenInfo.new(0.9, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true)
@@ -1414,36 +1590,80 @@ local function removeCard(a)
 	if not e then return end
 	cards[a] = nil
 	fadeItems(e.items, 0.18, true, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+	for _, o in ipairs(e.extra or {}) do
+		if o.Parent then tween(o, 0.18, { BackgroundTransparency = 1 }) end
+	end
 	tween(e.card, 0.18, { Position = UDim2.new(0, -36, 0, 0) }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 	tween(e.wrap, 0.22, { Size = UDim2.new(1, -6, 0, 0) })
 	task.delay(0.26, function() e.wrap:Destroy() end)
 end
 
+-- list order: highest value first (ties: newest first), or newest first
+local function sortAlerts(list)
+	if (filters.sort or CONFIG.SORT) ~= "newest" then
+		table.sort(list, function(x, y)
+			local vx, vy = x.valueNum or 0, y.valueNum or 0
+			if vx ~= vy then return vx > vy end
+			return (x.seq or 0) > (y.seq or 0)
+		end)
+	else
+		table.sort(list, function(x, y) return (x.seq or 0) > (y.seq or 0) end)
+	end
+end
+
+local function reorderCards()
+	local order = {}
+	for _, a in ipairs(alerts) do if cards[a] then order[#order + 1] = a end end
+	sortAlerts(order)
+	for i, a in ipairs(order) do cards[a].wrap.LayoutOrder = i end
+end
+
+-- card queue: alerts that still need a card wait here and are built one every CONFIG.CARD_DELAY seconds
+local pendingCards, queuedCards, pumping = {}, {}, false
+local function pumpCards()
+	if pumping then return end
+	pumping = true
+	task.spawn(function()
+		while not stopped and #pendingCards > 0 do
+			local a = table.remove(pendingCards, 1)
+			queuedCards[a] = nil
+			-- skip it if it expired, was filtered out or already has a card in the meantime
+			if not cards[a] and passes(a) and table.find(alerts, a) then
+				local ok, err = pcall(makeCard, a, 0)
+				if not ok then warn("[egg-finder] card error: " .. tostring(err)) end
+				reorderCards()
+				task.wait(tonumber(CONFIG.CARD_DELAY) or 0.1)
+			end
+		end
+		pumping = false
+	end)
+end
+
 syncCards = function()
 	local shown = 0
+	local gap = tonumber(CONFIG.CARD_DELAY) or 0
 	for _, a in ipairs(alerts) do
 		if passes(a) then
 			shown = shown + 1
-			if not cards[a] then makeCard(a, CONFIG.STAGGER and math.min(0.4, (shown - 1) * 0.04) or 0) end
+			if not cards[a] then
+				if gap > 0 then
+					if not queuedCards[a] then
+						queuedCards[a] = true
+						pendingCards[#pendingCards + 1] = a
+					end
+				else
+					makeCard(a, 0)
+				end
+			end
 		else
 			removeCard(a)
 		end
 	end
-	-- order the list: highest value first (ties: newest first), or newest first
-	do
-		local order = {}
-		for _, a in ipairs(alerts) do if cards[a] then order[#order + 1] = a end end
-		if (filters.sort or CONFIG.SORT) ~= "newest" then
-			table.sort(order, function(x, y)
-				local vx, vy = x.valueNum or 0, y.valueNum or 0
-				if vx ~= vy then return vx > vy end
-				return (x.seq or 0) > (y.seq or 0)
-			end)
-		else
-			table.sort(order, function(x, y) return (x.seq or 0) > (y.seq or 0) end)
-		end
-		for i, a in ipairs(order) do cards[a].wrap.LayoutOrder = i end
+	if #pendingCards > 0 then
+		sortAlerts(pendingCards)   -- most valuable first, so the top of the list fills in first
+		pumpCards()
 	end
+	reorderCards()
 	emptyLabel.Visible = shown == 0
 	emptyLabel.Text = ACC.checking and "Checking login..."
 		or (not ACC.session) and "Log in to see eggs. Tap STATUS."
@@ -1504,13 +1724,19 @@ local function addAlert(a, skipSync)
 
 	-- clean the name and pin the tier from the table so it can never be mislabelled
 	a.egg = tostring(a.egg or "Egg"):gsub("%s+[Ee]gg$", "")
-	local mutRaw = a.mutation or a.variety or a.variant or a.mut
+	local mutRaw = a.mutation or a.mutations or a.variety or a.variant or a.mut
 	local prefix, rest = splitMutationPrefix(a.egg)
+	local mlist = readMutations(mutRaw)
 	if prefix then
 		a.egg = rest
-		if readMutation(mutRaw) == nil then mutRaw = prefix end
+		if #mlist == 0 then mlist = readMutations(prefix) end
 	end
-	a.mutation = readMutation(mutRaw)   -- nil when none
+	a.mutList = mlist   -- every variety, in order (two = the clash card)
+	do
+		local names = {}
+		for _, m in ipairs(mlist) do names[#names + 1] = m.name end
+		a.mutation = #names > 0 and table.concat(names, ", ") or nil   -- nil when none
+	end
 	a.tier = PET_TIER[norm(a.egg)] or tostring(a.tier or "")
 
 	table.insert(alerts, 1, a)
@@ -1733,7 +1959,7 @@ local function runDemo()
 	for tier, names in pairs(PET_LISTS) do
 		for _, n in ipairs(names) do pool[#pool + 1] = { n, tier } end
 	end
-	local muts = { "Golden", "Silver", "Rainbow", "Diamond", "None", "None" }
+	local muts = { "Golden", "Silver", "Rainbow", "Diamond", "Rainbow, Golden", "Silver, Diamond", "None", "None" }
 	local id = 0
 	while not stopped do
 		id = id + 1
@@ -1779,7 +2005,7 @@ end
 -- looping animations (started once the window has faded in): travelling border shine, pulsing live dot,
 -- sliding shimmer under the title, breathing "waiting" text, glowing minimised box
 task.delay(0.7, function()
-	if stopped then return end
+	if stopped or CONFIG.LOW_FX then return end
 	pcall(function()
 		local spin  = TweenInfo.new(4, Enum.EasingStyle.Linear, Enum.EasingDirection.Out, -1, false)
 		local pulse = TweenInfo.new(0.9, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true)
