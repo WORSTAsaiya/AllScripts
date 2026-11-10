@@ -292,6 +292,21 @@ cat ~/config.sh
 
 [ -n "$DRY_RUN" ] && { echo "(dry run: not starting)"; exit 0; }
 
+# ---- copy every file from Delta/Scripts into Delta/Autoexecute ----
+SRC=/sdcard/Delta/Scripts
+DST=/sdcard/Delta/Autoexecute
+if su -c "[ -d \"$SRC\" ]" </dev/null 2>/dev/null; then
+  su -c "mkdir -p \"$DST\"" </dev/null 2>/dev/null || true
+  copied=0
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    su -c "cp -f \"$SRC/$f\" \"$DST/$f\"" </dev/null 2>/dev/null && copied=$((copied+1))
+  done < <(su -c "ls -1 \"$SRC\"" </dev/null 2>/dev/null | tr -d '\r')
+  echo "Copied $copied file(s) from Scripts to Autoexecute."
+else
+  echo "Delta Scripts folder not found ($SRC), skipping copy."
+fi
+
 # ---- start ----
 termux-wake-lock
 tmux kill-server 2>/dev/null || true
