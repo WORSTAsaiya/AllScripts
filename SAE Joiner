@@ -31,8 +31,11 @@ local CONFIG = {
 	-- optional: raw link to THIS script so it reloads itself after each teleport
 	SCRIPT_URL = "https://raw.githubusercontent.com/WORSTAsaiya/AllScripts/refs/heads/main/SAE%20Joiner",
 
-	-- 0 = no limit on how many eggs are listed. (A number, e.g. 60, keeps only that many and drops the oldest.)
+	-- 0 = no limit. A number, e.g. 60, keeps only that many Cosmic..Common cards and drops the oldest of THOSE.
+	-- Secret / Eternal / Divine cards are never dropped by this: they only leave when their cycle ends.
 	MAX_CARDS  = 0,
+	-- LIST ORDER: "value" = the highest-value eggs are always at the top, "newest" = newest egg first.
+	SORT = "value",
 	-- true = an egg's card disappears the moment its cycle ends (the next 5-minute mark), instead of staying greyed out.
 	REMOVE_ON_EXPIRE = true,
 	TITLE      = "WORST - EGG FINDER",
@@ -95,6 +98,9 @@ local PET_LISTS = {
 		"Nebuloth Kraken", "Xenorath", "Obsidian Rex", "Prismare",
 	},
 }
+
+-- tiers that may be dropped early by MAX_CARDS. Everything else (Secret / Eternal / Divine / unknown) is protected.
+local LOW_TIER = { Cosmic = true, Mythic = true, Legendary = true, Epic = true, Rare = true, Uncommon = true, Common = true }
 
 local function norm(s)
 	return (tostring(s or ""):lower():gsub("[^%w]", ""))
@@ -454,7 +460,7 @@ local SETTINGS_FILE = "WorstEggFinder_settings.json"
 
 local function saveSettings()
 	if type(writefile) ~= "function" then return end
-	pcall(writefile, SETTINGS_FILE, HttpService:JSONEncode({ autoOn = auto.on, autoMin = auto.minValue, showMin = filters.minValue, rarity = filters.rarity }))
+	pcall(writefile, SETTINGS_FILE, HttpService:JSONEncode({ autoOn = auto.on, autoMin = auto.minValue, showMin = filters.minValue, rarity = filters.rarity, sort = filters.sort }))
 end
 
 local function loadSettings()
@@ -474,6 +480,7 @@ local function loadSettings()
 		auto.minValue = tonumber(t.autoMin) or 0
 		filters.minValue = tonumber(t.showMin) or 0
 		if type(t.rarity) == "string" then filters.rarity = t.rarity end
+		if t.sort == "value" or t.sort == "newest" then filters.sort = t.sort end
 	end
 	-- these settings were carried over by a hop: Auto Join turns itself off so it
 	-- cannot hop away while you are stealing the egg
@@ -978,6 +985,25 @@ for i, o in ipairs(RARITY.options) do
 end
 dropPop.items = collect(dropFrame)
 
+-- SORT toggle inside the SHOW MIN VALUE popup: strongest eggs first, or newest first
+local sortBtn = mk("TextButton", {
+	Size = UDim2.new(1, -28, 0, 28), Position = UDim2.new(0, 14, 0, 90), BackgroundColor3 = C.select,
+	Text = "", TextColor3 = C.white, Font = Enum.Font.GothamBlack, TextSize = 12, ZIndex = 21,
+}, sliderPop.frame)
+corner(sortBtn, 7)
+sliderPop.frame.Size = UDim2.new(1, -16, 0, 130)
+local function refreshSortUI()
+	sortBtn.Text = "SHOW:  " .. ((filters.sort or CONFIG.SORT) == "newest" and "NEWEST FIRST" or "STRONGEST FIRST")
+end
+sortBtn.MouseButton1Click:Connect(function()
+	filters.sort = ((filters.sort or CONFIG.SORT) == "newest") and "value" or "newest"
+	refreshSortUI()
+	saveSettings()
+	syncCards()
+end)
+sliderPop.items = collect(sliderPop.frame)
+refreshSortUI()
+
 minVal.MouseButton1Click:Connect(function() showPopup(sliderPop) end)
 minJoinVal.MouseButton1Click:Connect(function() showPopup(joinPop) end)
 rarityVal.MouseButton1Click:Connect(function() showPopup(dropPop) end)
@@ -1007,6 +1033,7 @@ autoVal.MouseButton1Click:Connect(toggleAuto)
 loadSettings()
 setJoinSlider(valueToPos(auto.minValue))
 setShowSlider(valueToPos(filters.minValue))   -- SHOW MIN VALUE keeps its value after re-execute
+refreshSortUI()
 -- RARITY keeps its choice too (UI only here; the list itself is built right after startup)
 do
 	local known = false
@@ -1119,7 +1146,7 @@ local function joinServer(a)
 	local reloadUrl = (CONFIG.SCRIPT_URL ~= "" and CONFIG.SCRIPT_URL) or (type(env.EGG_SCRIPT_URL) == "string" and env.EGG_SCRIPT_URL) or ""
 	if q and reloadUrl ~= "" then
 		local tjson = HttpService:JSONEncode({ egg = a.egg, jobId = a.jobId, tier = a.tier })
-		local sjson = HttpService:JSONEncode({ autoOn = auto.on, autoMin = auto.minValue, showMin = filters.minValue, rarity = filters.rarity })
+		local sjson = HttpService:JSONEncode({ autoOn = auto.on, autoMin = auto.minValue, showMin = filters.minValue, rarity = filters.rarity, sort = filters.sort })
 		pcall(q, ('getgenv().EGG_SCRIPT_URL="%s"; getgenv().EGG_HUB_RUNNING=nil; getgenv().EGG_JOIN_TARGET=game:GetService("HttpService"):JSONDecode([==[%s]==]); getgenv().EGG_JOIN_SETTINGS=game:GetService("HttpService"):JSONDecode([==[%s]==]); loadstring(game:HttpGet("%s"))()'):format(reloadUrl, tjson, sjson, reloadUrl))
 	end
 
@@ -1402,6 +1429,21 @@ syncCards = function()
 			removeCard(a)
 		end
 	end
+	-- order the list: highest value first (ties: newest first), or newest first
+	do
+		local order = {}
+		for _, a in ipairs(alerts) do if cards[a] then order[#order + 1] = a end end
+		if (filters.sort or CONFIG.SORT) ~= "newest" then
+			table.sort(order, function(x, y)
+				local vx, vy = x.valueNum or 0, y.valueNum or 0
+				if vx ~= vy then return vx > vy end
+				return (x.seq or 0) > (y.seq or 0)
+			end)
+		else
+			table.sort(order, function(x, y) return (x.seq or 0) > (y.seq or 0) end)
+		end
+		for i, a in ipairs(order) do cards[a].wrap.LayoutOrder = i end
+	end
 	emptyLabel.Visible = shown == 0
 	emptyLabel.Text = ACC.checking and "Checking login..."
 		or (not ACC.session) and "Log in to see eggs. Tap STATUS."
@@ -1441,7 +1483,8 @@ local function addAlert(a, skipSync)
 		local period = tonumber(CONFIG.CYCLE_SECS) or 300
 		local tsMs   = tonumber(a.ts)
 		if tsMs then
-			local expiry   = (math.floor(tsMs / 1000 / period) + 1) * period
+			local foundMs  = tonumber(a.found) or tsMs   -- when the egg was SEEN (a slow hopper post must not make an old egg look new)
+			local expiry   = (math.floor(foundMs / 1000 / period) + 1) * period
 			local relayNow = (tsMs + (tonumber(a.age) or 0)) / 1000
 			a.expireAt = os.clock() + (expiry - relayNow)
 		else
@@ -1472,8 +1515,19 @@ local function addAlert(a, skipSync)
 
 	table.insert(alerts, 1, a)
 	if FX.min and FX.bump and passes(a) and (tonumber(a.age) or 0) < 8000 then FX.bump() end
-	while (tonumber(CONFIG.MAX_CARDS) or 0) > 0 and #alerts > CONFIG.MAX_CARDS do
-		removeCard(table.remove(alerts))
+	do
+		local cap = tonumber(CONFIG.MAX_CARDS) or 0
+		if cap > 0 then
+			local lowCount = 0
+			for _, x in ipairs(alerts) do if LOW_TIER[x.tier] then lowCount = lowCount + 1 end end
+			for i = #alerts, 1, -1 do   -- oldest first; top tiers are skipped
+				if lowCount <= cap then break end
+				if LOW_TIER[alerts[i].tier] then
+					removeCard(table.remove(alerts, i))
+					lowCount = lowCount - 1
+				end
+			end
+		end
 	end
 	if not skipSync then syncCards() end
 	return a
@@ -1575,8 +1629,10 @@ local function handleMessage(raw)
 		if d.freeMax and ACC.session.free then ACC.session.freeMax = tonumber(d.freeMax) end
 		ACC.setLeft(d.secondsLeft, d.bots, d.label)
 	elseif d.type == "history" and type(d.alerts) == "table" then
+		local before = #alerts
 		for i = #d.alerts, 1, -1 do addAlert(d.alerts[i], true) end
 		syncCards()
+		if CONFIG.DEBUG_LATENCY then print(("[history] relay sent %d alert(s), %d are still live and listed"):format(#d.alerts, #alerts - before)) end
 	elseif d.type == "alert" then
 		local a = addAlert(d.alert)
 		if a then tryAutoJoin(a) end
