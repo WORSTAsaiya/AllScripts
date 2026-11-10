@@ -29,9 +29,12 @@ local CONFIG = {
 	FREE       = true,
 
 	-- optional: raw link to THIS script so it reloads itself after each teleport
-	SCRIPT_URL = "",
+	SCRIPT_URL = "https://raw.githubusercontent.com/WORSTAsaiya/AllScripts/refs/heads/main/SAE%20Joiner",
 
-	MAX_CARDS  = 60,
+	-- 0 = no limit on how many eggs are listed. (A number, e.g. 60, keeps only that many and drops the oldest.)
+	MAX_CARDS  = 0,
+	-- true = an egg's card disappears the moment its cycle ends (the next 5-minute mark), instead of staying greyed out.
+	REMOVE_ON_EXPIRE = true,
 	TITLE      = "WORST - EGG FINDER",
 
 	-- MINIMISED BOX: the "-" button turns the window into a small icon box; tap it to open the window again.
@@ -1101,10 +1104,12 @@ local function joinServer(a)
 	setHub("JOINING", true)
 
 	local q = queue_on_teleport or queueonteleport
-	if q and CONFIG.SCRIPT_URL ~= "" then
+	-- the link is passed along through every hop, so it keeps working even if the hosted copy has SCRIPT_URL empty
+	local reloadUrl = (CONFIG.SCRIPT_URL ~= "" and CONFIG.SCRIPT_URL) or (type(env.EGG_SCRIPT_URL) == "string" and env.EGG_SCRIPT_URL) or ""
+	if q and reloadUrl ~= "" then
 		local tjson = HttpService:JSONEncode({ egg = a.egg, jobId = a.jobId, tier = a.tier })
 		local sjson = HttpService:JSONEncode({ autoOn = auto.on, autoMin = auto.minValue, showMin = filters.minValue })
-		pcall(q, ('getgenv().EGG_HUB_RUNNING=nil; getgenv().EGG_JOIN_TARGET=game:GetService("HttpService"):JSONDecode([==[%s]==]); getgenv().EGG_JOIN_SETTINGS=game:GetService("HttpService"):JSONDecode([==[%s]==]); loadstring(game:HttpGet("%s"))()'):format(tjson, sjson, CONFIG.SCRIPT_URL))
+		pcall(q, ('getgenv().EGG_SCRIPT_URL="%s"; getgenv().EGG_HUB_RUNNING=nil; getgenv().EGG_JOIN_TARGET=game:GetService("HttpService"):JSONDecode([==[%s]==]); getgenv().EGG_JOIN_SETTINGS=game:GetService("HttpService"):JSONDecode([==[%s]==]); loadstring(game:HttpGet("%s"))()'):format(reloadUrl, tjson, sjson, reloadUrl))
 	end
 
 	local ok, err = pcall(function()
@@ -1440,6 +1445,9 @@ local function addAlert(a, skipSync)
 		a.expireAt = sessionEnd
 	end
 
+	-- an egg from an earlier cycle (already over) is never listed at all
+	if CONFIG.REMOVE_ON_EXPIRE and isExpired(a) then return nil end
+
 	-- clean the name and pin the tier from the table so it can never be mislabelled
 	a.egg = tostring(a.egg or "Egg"):gsub("%s+[Ee]gg$", "")
 	local mutRaw = a.mutation or a.variety or a.variant or a.mut
@@ -1453,7 +1461,7 @@ local function addAlert(a, skipSync)
 
 	table.insert(alerts, 1, a)
 	if FX.min and FX.bump and passes(a) and (tonumber(a.age) or 0) < 8000 then FX.bump() end
-	while #alerts > CONFIG.MAX_CARDS do
+	while (tonumber(CONFIG.MAX_CARDS) or 0) > 0 and #alerts > CONFIG.MAX_CARDS do
 		removeCard(table.remove(alerts))
 	end
 	if not skipSync then syncCards() end
@@ -1508,6 +1516,15 @@ end)
 -- live "x ago" refresh
 task.spawn(function()
 	while not stopped do
+		if CONFIG.REMOVE_ON_EXPIRE then
+			for i = #alerts, 1, -1 do   -- cycle over: the card slides out and the egg is forgotten
+				local a = alerts[i]
+				if isExpired(a) then
+					removeCard(a)
+					table.remove(alerts, i)
+				end
+			end
+		end
 		for a, e in pairs(cards) do
 			if e.sub and e.sub.Parent then e.sub.Text = metaText(a) end
 			if not e.expired and isExpired(a) then styleExpired(e) end
