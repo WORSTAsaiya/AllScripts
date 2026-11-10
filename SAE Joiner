@@ -55,6 +55,8 @@ local CONFIG = {
 	-- between them (highest value first), instead of all in the same instant. Building 20+ cards at once is what
 	-- makes the game stutter. A single new alert still appears immediately. 0 = build them all at once.
 	CARD_DELAY         = 0.1,
+	-- when a cycle ends, the old cards leave one by one with this many seconds between them (0 = all at once)
+	REMOVE_DELAY       = 0.04,
 
 	-- PERFORMANCE: true = no endless animations (the travelling border shine, the pulsing glows, the light sweeps and
 	-- the flowing rainbow on every Golden / Silver / Rainbow card). Those never stop and are heavy on phones; with a
@@ -80,6 +82,11 @@ local CONFIG = {
 	-- above is then ignored). false = the old timer counted from the first egg.
 	CYCLE_SYNC = true,
 	CYCLE_SECS = 300,
+
+	-- AUTO JOIN never starts a join when fewer than this many seconds are left in the cycle.
+	-- The game blocks stealing in the last ~10s, and the teleport itself takes a few seconds,
+	-- so the default is higher than 10. Raise it if you still arrive too late.
+	JOIN_CUTOFF = 20,
 
 	-- pictures on the cards (needs an executor with request + writefile + getcustomasset)
 	IMAGES     = true,
@@ -473,7 +480,24 @@ local joining  = false
 local lastId   = 0
 local seqCount = 0
 local cards    = {}     -- [alert] = { wrap=, card=, sub=, items= }
-local auto       = { on = false, minValue = 0 }   -- auto join
+-- auto join.  on = armed (will join the next egg).  mode = nil | "once" | "farm".
+-- farm + not on = WAITING for the next cycle's Secret/Eternal/Divine egg.
+-- farmCycle = cycle number of the egg we last joined for (a new cycle must be LATER than this).
+local auto       = { on = false, minValue = 0, mode = nil, farmCycle = nil }
+-- cycle number of an alert, on the relay's clock when it has one (this device's clock can be off)
+auto.cycleOf = function(a)
+	local period = tonumber(CONFIG.CYCLE_SECS) or 300
+	local ms = tonumber(a.found) or tonumber(a.ts)
+	if ms then return math.floor(ms / 1000 / period) end
+	if a.expireUnix then return math.floor(a.expireUnix / period) - 1 end
+	return math.floor(os.time() / period)
+end
+-- seconds left until this alert's cycle ends (same source as isExpired)
+auto.secsLeft = function(a)
+	if a.expireUnix ~= nil then return a.expireUnix - os.time() end
+	if a.expireAt ~= nil then return a.expireAt - os.clock() end
+	return math.huge
+end
 local sessionEnd = nil                            -- shared "eggs disappear" deadline (os.clock)
 -- account / login state (a single table on purpose: keeps this script under Lua's 200-locals limit)
 local ACC = { session = nil, gen = 0, busy = false, checking = true, device = "", connBad = false }
@@ -492,7 +516,7 @@ local SETTINGS_FILE = "WorstEggFinder_settings.json"
 
 local function saveSettings()
 	if type(writefile) ~= "function" then return end
-	pcall(writefile, SETTINGS_FILE, HttpService:JSONEncode({ autoOn = auto.on, autoMin = auto.minValue, showMin = filters.minValue, rarity = filters.rarity, sort = filters.sort }))
+	pcall(writefile, SETTINGS_FILE, HttpService:JSONEncode({ autoOn = auto.on, autoMode = auto.mode, farmCycle = auto.farmCycle, autoMin = auto.minValue, showMin = filters.minValue, rarity = filters.rarity, sort = filters.sort }))
 end
 
 local function loadSettings()
@@ -509,6 +533,8 @@ local function loadSettings()
 	end
 	if t then
 		auto.on = t.autoOn == true
+		auto.mode = (t.autoMode == "once" or t.autoMode == "farm") and t.autoMode or (auto.on and "once" or nil)
+		auto.farmCycle = tonumber(t.farmCycle)
 		auto.minValue = tonumber(t.autoMin) or 0
 		filters.minValue = tonumber(t.showMin) or 0
 		if type(t.rarity) == "string" then filters.rarity = t.rarity end
@@ -516,8 +542,10 @@ local function loadSettings()
 	end
 	-- these settings were carried over by a hop: Auto Join turns itself off so it
 	-- cannot hop away while you are stealing the egg
+	-- ONCE: done after this join (mode cleared). FARM: stays in farm mode but WAITING for the next cycle.
 	if fromHop and auto.on then
 		auto.on = false
+		if auto.mode == "once" then auto.mode = nil end
 		saveSettings()
 	end
 end
@@ -973,12 +1001,12 @@ local RARITY = {
 }
 
 local dropFrame = mk("Frame", {
-	Size = UDim2.new(0, 124, 0, 8 + RARITY.visible * RARITY.row), Position = UDim2.new(0, 116, 0, 122), BackgroundColor3 = C.popup,
+	Size = UDim2.new(1 / 3, 12, 0, 8 + RARITY.visible * RARITY.row), Position = UDim2.new(1 / 3, 4, 0, 122), BackgroundColor3 = C.popup,
 	Visible = false, ZIndex = 20,
 }, body)
 corner(dropFrame, 10)
 stroke(dropFrame, C.ash, 2)
-local dropPop = { frame = dropFrame, pos = UDim2.new(0, 116, 0, 122) }
+local dropPop = { frame = dropFrame, pos = UDim2.new(1 / 3, 4, 0, 122) }
 
 -- the list scrolls: only the first rows show until you drag/scroll down
 local dropScroll = mk("ScrollingFrame", {
@@ -1040,12 +1068,12 @@ minVal.MouseButton1Click:Connect(function() showPopup(sliderPop) end)
 minJoinVal.MouseButton1Click:Connect(function() showPopup(joinPop) end)
 rarityVal.MouseButton1Click:Connect(function() showPopup(dropPop) end)
 
--- AUTO JOIN box: fades smoothly between OFF and ON
+-- AUTO JOIN box: OFF / ONCE / FARM / WAIT (farm is waiting for the next cycle's S/E/D egg)
 local function refreshAutoUI(animate)
-	local on = auto.on
-	autoVal.Text = on and "ON" or "OFF"
+	local on, farm = auto.on, auto.mode == "farm"
+	autoVal.Text = on and (farm and "FARM" or "ONCE") or (farm and "WAIT" or "OFF")
 	local box  = on and C.select or C.box
-	local text = on and C.white or C.ash
+	local text = on and C.white or (farm and C.ashLite or C.ash)
 	if animate then
 		tween(autoBox, 0.22, { BackgroundColor3 = box })
 		tween(autoVal, 0.22, { TextColor3 = text })
@@ -1053,13 +1081,71 @@ local function refreshAutoUI(animate)
 		autoBox.BackgroundColor3 = box
 		autoVal.TextColor3 = text
 	end
+	if auto.ui then   -- highlight the chosen mode inside the popup
+		auto.ui.once.BackgroundColor3 = (auto.mode == "once") and C.select or C.card
+		auto.ui.farm.BackgroundColor3 = (auto.mode == "farm") and C.select or C.card
+	end
 end
-local function toggleAuto()
-	auto.on = not auto.on
-	refreshAutoUI(true)
-	saveSettings()
+
+-- AUTO JOIN popup (same slide/fade animation as the other popups): pick a mode
+--   JOIN ONCE : joins one egg, turns itself off and stays off
+--   JOIN FARM : joins one egg, turns off while you steal, then arms itself again when the NEXT cycle's
+--               Secret / Eternal / Divine egg shows up (that egg does not need to reach MIN JOIN to re-arm;
+--               an egg still has to reach MIN JOIN to actually be joined)
+do
+	local frame = mk("Frame", {
+		Size = UDim2.new(1, -16, 0, 158), Position = UDim2.new(0, 8, 0, POPUP_Y), BackgroundColor3 = C.popup,
+		Visible = false, ZIndex = 20,
+	}, body)
+	corner(frame, 10)
+	stroke(frame, C.ash, 2)
+	auto.pop = { frame = frame, pos = UDim2.new(0, 8, 0, POPUP_Y) }
+
+	mk("TextLabel", {
+		Size = UDim2.new(1, -24, 0, 18), Position = UDim2.new(0, 12, 0, 8), BackgroundTransparency = 1,
+		Text = "AUTO JOIN", TextColor3 = C.ashLite, Font = Enum.Font.GothamBold, TextSize = 13,
+		TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 21,
+	}, frame)
+
+	local function modeButton(x, title, desc)
+		local b = mk("TextButton", {
+			Size = UDim2.new(0.5, -17, 0, 38), Position = UDim2.new(x, x == 0 and 12 or 5, 0, 32), BackgroundColor3 = C.card,
+			Text = title, TextColor3 = C.white, Font = Enum.Font.GothamBlack, TextSize = 15, ZIndex = 21,
+		}, frame)
+		corner(b, 8)
+		mk("TextLabel", {
+			Size = UDim2.new(0.5, -17, 0, 46), Position = UDim2.new(x, x == 0 and 12 or 5, 0, 74), BackgroundTransparency = 1,
+			Text = desc, TextColor3 = C.light, Font = Enum.Font.GothamMedium, TextSize = 12, TextWrapped = true,
+			TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 21,
+		}, frame)
+		return b
+	end
+	local onceBtn = modeButton(0,   "JOIN ONCE", "Joins one egg, then turns off for good.")
+	local farmBtn = modeButton(0.5, "JOIN FARM", "Re-arms itself when the next cycle's S/E/D egg spawns.")
+	local offBtn = mk("TextButton", {
+		Size = UDim2.new(1, -24, 0, 28), Position = UDim2.new(0, 12, 0, 124), BackgroundColor3 = C.card,
+		Text = "TURN OFF", TextColor3 = C.ashLite, Font = Enum.Font.GothamBlack, TextSize = 13, ZIndex = 21,
+	}, frame)
+	corner(offBtn, 7)
+	auto.ui = { once = onceBtn, farm = farmBtn }
+	auto.pop.items = collect(frame)
+
+	local function pick(mode)
+		if mode then
+			auto.mode, auto.on = mode, true
+			auto.farmCycle = nil
+		else
+			auto.mode, auto.on, auto.farmCycle = nil, false, nil
+		end
+		refreshAutoUI(true)
+		saveSettings()
+		hidePopup(auto.pop)
+	end
+	onceBtn.MouseButton1Click:Connect(function() pick("once") end)
+	farmBtn.MouseButton1Click:Connect(function() pick("farm") end)
+	offBtn.MouseButton1Click:Connect(function() pick(nil) end)
 end
-autoVal.MouseButton1Click:Connect(toggleAuto)
+autoVal.MouseButton1Click:Connect(function() showPopup(auto.pop) end)
 
 -- restore the saved auto join settings (they survive teleports)
 loadSettings()
@@ -1170,6 +1256,7 @@ local function joinServer(a)
 		return
 	end
 	saveTarget(a)
+	if auto.mode == "farm" then auto.farmCycle = math.max(auto.farmCycle or 0, auto.cycleOf(a)) end
 	joining = true
 	setHub("JOINING", true)
 
@@ -1178,7 +1265,7 @@ local function joinServer(a)
 	local reloadUrl = (CONFIG.SCRIPT_URL ~= "" and CONFIG.SCRIPT_URL) or (type(env.EGG_SCRIPT_URL) == "string" and env.EGG_SCRIPT_URL) or ""
 	if q and reloadUrl ~= "" then
 		local tjson = HttpService:JSONEncode({ egg = a.egg, jobId = a.jobId, tier = a.tier })
-		local sjson = HttpService:JSONEncode({ autoOn = auto.on, autoMin = auto.minValue, showMin = filters.minValue, rarity = filters.rarity, sort = filters.sort })
+		local sjson = HttpService:JSONEncode({ autoOn = auto.on, autoMode = auto.mode, farmCycle = auto.farmCycle, autoMin = auto.minValue, showMin = filters.minValue, rarity = filters.rarity, sort = filters.sort })
 		pcall(q, ('getgenv().EGG_SCRIPT_URL="%s"; getgenv().EGG_HUB_RUNNING=nil; getgenv().EGG_JOIN_TARGET=game:GetService("HttpService"):JSONDecode([==[%s]==]); getgenv().EGG_JOIN_SETTINGS=game:GetService("HttpService"):JSONDecode([==[%s]==]); loadstring(game:HttpGet("%s"))()'):format(reloadUrl, tjson, sjson, reloadUrl))
 	end
 
@@ -1207,10 +1294,23 @@ local function tryAutoJoin(a)
 	if not auto.on or joining or stopped then return end
 	if not a or isExpired(a) or autoDone[a.jobId] then return end
 	if a.jobId == game.JobId then return end
+	if auto.secsLeft(a) < (tonumber(CONFIG.JOIN_CUTOFF) or 20) then return end   -- too late to steal anything
 	if (a.valueNum or 0) < auto.minValue then return end
 	if not passes(a) then return end
 	autoDone[a.jobId] = true
 	joinServer(a)
+end
+
+-- FARM re-arm: every alert that is added (live OR history) passes through here. While farm is WAITING,
+-- a Secret / Eternal / Divine egg from a LATER cycle than the one we joined for switches auto join back on.
+-- MIN JOIN and the list filters are ignored on purpose; they still apply to the actual join.
+auto.observe = function(a)
+	if auto.mode ~= "farm" or auto.on or stopped then return end
+	if not RARITY.top[a.tier] or isExpired(a) then return end
+	if auto.farmCycle and auto.cycleOf(a) <= auto.farmCycle then return end
+	auto.on = true
+	saveSettings()
+	refreshAutoUI(true)
 end
 
 local function valueText(a)
@@ -1589,13 +1689,28 @@ local function removeCard(a)
 	local e = cards[a]
 	if not e then return end
 	cards[a] = nil
-	fadeItems(e.items, 0.18, true, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
-	for _, o in ipairs(e.extra or {}) do
-		if o.Parent then tween(o, 0.18, { BackgroundTransparency = 1 }) end
-	end
-	tween(e.card, 0.18, { Position = UDim2.new(0, -36, 0, 0) }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+	-- no per-element fades (that was ~20 tweens per card): the card just slides out and the slot collapses
+	tween(e.card, 0.18, { Position = UDim2.new(-1, 0, 0, 0) }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 	tween(e.wrap, 0.22, { Size = UDim2.new(1, -6, 0, 0) })
 	task.delay(0.26, function() e.wrap:Destroy() end)
+end
+
+-- staggered removal: expired cards leave one at a time instead of all in the same frame
+FX.rmQueue, FX.rmBusy = {}, false
+FX.queueRemove = function(a)
+	FX.rmQueue[#FX.rmQueue + 1] = a
+	if FX.rmBusy then return end
+	FX.rmBusy = true
+	task.spawn(function()
+		while not stopped and #FX.rmQueue > 0 do
+			local x = table.remove(FX.rmQueue, 1)
+			if cards[x] then
+				removeCard(x)
+				task.wait(tonumber(CONFIG.REMOVE_DELAY) or 0.04)
+			end
+		end
+		FX.rmBusy = false
+	end)
 end
 
 -- list order: highest value first (ties: newest first), or newest first
@@ -1738,6 +1853,7 @@ local function addAlert(a, skipSync)
 		a.mutation = #names > 0 and table.concat(names, ", ") or nil   -- nil when none
 	end
 	a.tier = PET_TIER[norm(a.egg)] or tostring(a.tier or "")
+	auto.observe(a)
 
 	table.insert(alerts, 1, a)
 	if FX.min and FX.bump and passes(a) and (tonumber(a.age) or 0) < 8000 then FX.bump() end
@@ -1794,6 +1910,63 @@ FX.restore = function()
 	mainScale.Scale = 0.6
 	tween(mainScale, 0.3, { Scale = 1 }, Enum.EasingStyle.Back)
 end
+-- RESIZE: drag the grip (dots) in the bottom-right corner of the window. The size is remembered.
+do
+	local SIZE_FILE = "WorstEggFinder_size.json"
+	local MIN_W, MIN_H, MAX_W, MAX_H = 300, 340, 640, 900
+	local function setSize(w, h)
+		local cam = workspace.CurrentCamera
+		local vp = cam and cam.ViewportSize or Vector2.new(1280, 720)
+		local maxW = math.max(MIN_W, math.min(MAX_W, vp.X - 10))
+		local maxH = math.max(MIN_H, math.min(MAX_H, vp.Y - 10))
+		main.Size = UDim2.new(0, math.clamp(w, MIN_W, maxW), 0, math.clamp(h, MIN_H, maxH))
+	end
+	local function saveSize()
+		if type(writefile) ~= "function" then return end
+		pcall(writefile, SIZE_FILE, HttpService:JSONEncode({ main.Size.X.Offset, main.Size.Y.Offset }))
+	end
+	pcall(function()   -- restore the last size
+		if type(isfile) == "function" and type(readfile) == "function" and isfile(SIZE_FILE) then
+			local d = HttpService:JSONDecode(readfile(SIZE_FILE))
+			if type(d) == "table" and tonumber(d[1]) and tonumber(d[2]) then setSize(tonumber(d[1]), tonumber(d[2])) end
+		end
+	end)
+
+	local grip = mk("TextButton", {
+		Name = "ResizeGrip", Size = UDim2.new(0, 36, 0, 36), AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, 0, 1, 0),
+		BackgroundTransparency = 1, Text = "", AutoButtonColor = false, ZIndex = 60,
+	}, main)
+	for r = 0, 2 do
+		for c = 0, 2 do
+			if c + r >= 2 then   -- 6 dots in a triangle
+				local dot = mk("Frame", {
+					Size = UDim2.new(0, 3, 0, 3), AnchorPoint = Vector2.new(1, 1), BackgroundColor3 = C.ashLite, BorderSizePixel = 0,
+					Position = UDim2.new(1, -(8 + (2 - c) * 5), 1, -(8 + (2 - r) * 5)), ZIndex = 61,
+				}, grip)
+				corner(dot, 2)
+			end
+		end
+	end
+
+	local sizing, startIn, startW, startH
+	grip.InputBegan:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+			sizing, startIn = true, i.Position
+			startW, startH = main.Size.X.Offset, main.Size.Y.Offset
+			hidePopup(openPopup)
+			i.Changed:Connect(function()
+				if i.UserInputState == Enum.UserInputState.End then sizing = false saveSize() end
+			end)
+		end
+	end)
+	UIS.InputChanged:Connect(function(i)
+		if sizing and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+			local d = (i.Position - startIn) / math.max(mainScale.Scale, 0.1)
+			setSize(startW + d.X, startH + d.Y)
+		end
+	end)
+end
+
 btnMin.MouseButton1Click:Connect(FX.minimize)
 btnClose.MouseButton1Click:Connect(function()
 	stopped = true
@@ -1808,10 +1981,10 @@ end)
 task.spawn(function()
 	while not stopped do
 		if CONFIG.REMOVE_ON_EXPIRE then
-			for i = #alerts, 1, -1 do   -- cycle over: the card slides out and the egg is forgotten
+			for i = #alerts, 1, -1 do   -- cycle over: the card slides out (one at a time) and the egg is forgotten
 				local a = alerts[i]
 				if isExpired(a) then
-					removeCard(a)
+					FX.queueRemove(a)
 					table.remove(alerts, i)
 				end
 			end
@@ -1984,6 +2157,7 @@ do
 		-- arrived in the egg's server: Auto Join switches off (re-enable it when you are done)
 		if auto.on then
 			auto.on = false
+			if auto.mode == "once" then auto.mode = nil end
 			saveSettings()
 			refreshAutoUI(false)
 		end
