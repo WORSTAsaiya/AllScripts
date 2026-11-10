@@ -454,7 +454,7 @@ local SETTINGS_FILE = "WorstEggFinder_settings.json"
 
 local function saveSettings()
 	if type(writefile) ~= "function" then return end
-	pcall(writefile, SETTINGS_FILE, HttpService:JSONEncode({ autoOn = auto.on, autoMin = auto.minValue, showMin = filters.minValue }))
+	pcall(writefile, SETTINGS_FILE, HttpService:JSONEncode({ autoOn = auto.on, autoMin = auto.minValue, showMin = filters.minValue, rarity = filters.rarity }))
 end
 
 local function loadSettings()
@@ -473,6 +473,7 @@ local function loadSettings()
 		auto.on = t.autoOn == true
 		auto.minValue = tonumber(t.autoMin) or 0
 		filters.minValue = tonumber(t.showMin) or 0
+		if type(t.rarity) == "string" then filters.rarity = t.rarity end
 	end
 	-- these settings were carried over by a hop: Auto Join turns itself off so it
 	-- cannot hop away while you are stealing the egg
@@ -954,6 +955,7 @@ local syncCards  -- forward declaration
 
 local function setRarity(id)
 	filters.rarity = id
+	saveSettings()
 	for _, o in ipairs(RARITY.options) do
 		if o.id == id then rarityVal.Text = o.short end
 	end
@@ -1005,6 +1007,15 @@ autoVal.MouseButton1Click:Connect(toggleAuto)
 loadSettings()
 setJoinSlider(valueToPos(auto.minValue))
 setShowSlider(valueToPos(filters.minValue))   -- SHOW MIN VALUE keeps its value after re-execute
+-- RARITY keeps its choice too (UI only here; the list itself is built right after startup)
+do
+	local known = false
+	for _, o in ipairs(RARITY.options) do
+		if o.id == filters.rarity then known = true; rarityVal.Text = o.short end
+	end
+	if not known then filters.rarity = "All"; rarityVal.Text = "All" end
+	for k, b in pairs(optButtons) do b.BackgroundColor3 = (k == filters.rarity) and C.select or C.card end
+end
 refreshAutoUI(false)
 
 -- ------------------------------------------------------------------ logic
@@ -1108,7 +1119,7 @@ local function joinServer(a)
 	local reloadUrl = (CONFIG.SCRIPT_URL ~= "" and CONFIG.SCRIPT_URL) or (type(env.EGG_SCRIPT_URL) == "string" and env.EGG_SCRIPT_URL) or ""
 	if q and reloadUrl ~= "" then
 		local tjson = HttpService:JSONEncode({ egg = a.egg, jobId = a.jobId, tier = a.tier })
-		local sjson = HttpService:JSONEncode({ autoOn = auto.on, autoMin = auto.minValue, showMin = filters.minValue })
+		local sjson = HttpService:JSONEncode({ autoOn = auto.on, autoMin = auto.minValue, showMin = filters.minValue, rarity = filters.rarity })
 		pcall(q, ('getgenv().EGG_SCRIPT_URL="%s"; getgenv().EGG_HUB_RUNNING=nil; getgenv().EGG_JOIN_TARGET=game:GetService("HttpService"):JSONDecode([==[%s]==]); getgenv().EGG_JOIN_SETTINGS=game:GetService("HttpService"):JSONDecode([==[%s]==]); loadstring(game:HttpGet("%s"))()'):format(reloadUrl, tjson, sjson, reloadUrl))
 	end
 
