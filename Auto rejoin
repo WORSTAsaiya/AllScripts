@@ -148,6 +148,12 @@ done
 TERMUX_SLOT="${SLOTS[0]}"
 [ "$LAYOUT" = "split" ] || echo "Screen ${SW}x${SH}: ${COLS}x${ROWS} grid, windows ${CW}x${CH}"
 
+# ---- keep Termux's on-screen keyboard hidden ----
+mkdir -p ~/.termux
+touch ~/.termux/termux.properties
+grep -q '^hide-soft-keyboard-on-startup' ~/.termux/termux.properties || echo 'hide-soft-keyboard-on-startup = true' >> ~/.termux/termux.properties
+termux-reload-settings >/dev/null 2>&1 || true
+
 # ---- config.sh ----
 {
   echo "PLACE=107778070777162"
@@ -191,8 +197,11 @@ cat > ~/fix.sh << 'EOF'
 #!/data/data/com.termux/files/usr/bin/bash
 source ~/config.sh
 [ "$LAYOUT" = split ] && exit 0
-su -c "am start --windowingMode 5 -n com.termux/com.termux.app.TermuxActivity" >/dev/null 2>&1
-sleep 1
+# only relaunch Termux if it is really gone (relaunching every loop pops up the keyboard)
+if ! su -c "am stack list" </dev/null 2>/dev/null | grep -q "^ *taskId=[0-9]*: com.termux/"; then
+  su -c "am start --windowingMode 5 -n com.termux/com.termux.app.TermuxActivity" >/dev/null 2>&1
+  sleep 1
+fi
 bash ~/place.sh >/dev/null 2>&1
 EOF
 
