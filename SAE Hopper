@@ -3627,16 +3627,6 @@ local function main()
 	end
 end
 
--- -------------------------------------------------------------------- start
-
--- Only run in the target experience. This makes the script safe to keep in
--- AutoExec: in every other game it just exits.
-if tostring(game.PlaceId) ~= tostring(CONFIG.PLACE_ID) then
-	print("[egg-grabber] wrong place (" .. tostring(game.PlaceId) .. ") - not starting")
-	notifyForce("wrong game - join Steal An Egg first")
-	return
-end
-
 -- One instance per executor environment.
 local g = genv()
 if g ~= nil and g.EGG_GRABBER_RUNNING then
