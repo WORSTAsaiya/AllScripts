@@ -145,6 +145,15 @@ for ((i=0; i<TOTAL; i++)); do
   l=$(( (i%COLS)*CW )); t=$(( TOP + (i/COLS)*CH ))
   SLOTS+=("$l $t $((l+CW)) $((t+CH))")
 done
+
+# only 1 account: center the Roblox window, Termux fills the screen behind it
+if [ "$N" -eq 1 ] && [ "$LAYOUT" != "split" ]; then
+  CW=$((SW/2)); CH=$((BOT-TOP))
+  l=$(( (SW-CW)/2 ))
+  SLOTS=("0 $TOP $SW $BOT" "$l $TOP $((l+CW)) $((TOP+CH))")
+  COLS=1; ROWS=1
+fi
+
 TERMUX_SLOT="${SLOTS[0]}"
 [ "$LAYOUT" = "split" ] || echo "Screen ${SW}x${SH}: ${COLS}x${ROWS} grid, windows ${CW}x${CH}"
 
