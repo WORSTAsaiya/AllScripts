@@ -147,7 +147,7 @@ source ~/config.sh
 for pkg in "${PACKAGES[@]}"; do su -c "am force-stop $pkg"; done
 sleep 2
 for pkg in "${PACKAGES[@]}"; do
-  su -c "am start -a android.intent.action.VIEW -d 'roblox://placeID=$PLACE' -p $pkg"
+  su -c "am start --windowingMode 5 -a android.intent.action.VIEW -d 'roblox://placeID=$PLACE' -p $pkg"
   sleep 20
 done
 sleep 10
@@ -177,7 +177,7 @@ launch() {
   echo "[$(date +%T)] launching $pkg (${USER_OF[$pkg]})"
   su -c "am force-stop $pkg"
   sleep 2
-  su -c "am start -a android.intent.action.VIEW -d 'roblox://placeID=$PLACE' -p $pkg"
+  su -c "am start --windowingMode 5 -a android.intent.action.VIEW -d 'roblox://placeID=$PLACE' -p $pkg"
   LAUNCHED[$pkg]=$(date +%s)
   FAILS[$pkg]=0
   sleep $LOAD_WAIT
