@@ -166,7 +166,17 @@ local CONFIG = {
 	-- LEGACY HOP: read exactly ONE page (50 servers) of the quietest-first
 	-- list. One request per fetch barely trips 429s, which is what makes
 	-- hopping reliable on slow mobile data.
-	LIST_PAGES = 1,
+	LIST_PAGES = 4,
+
+	-- listed-player range a server may have to become a hop target (was exactly 1-2).
+	-- 6 is the ceiling: the game holds 7 and full servers are always skipped.
+	LIST_MIN_PLAYING = 1,
+	LIST_MAX_PLAYING = 6,
+
+	-- true = only Secret / Eternal / Divine eggs are scanned, posted and sent to the hub
+	-- (everything else is skipped before any work is done, which saves CPU / fps).
+	-- false = back to scanning and sending every rarity.
+	RARE_ONLY = true,
 	LIST_LIMIT = 75,
 
 	-- Seconds between the pages of one scrape (only used when LIST_PAGES > 1).
@@ -1078,6 +1088,7 @@ local function scan(assets, eggState)
 	for _, rec in ipairs(data.Records) do
 		local cfg    = directory and directory[rec.AssetCategory]
 		local rarity = rarityOf(cfg)
+		if rarity and CONFIG.RARE_ONLY and CONFIG.TARGET[tostring(rarity)] ~= true then rarity = nil end
 		if rarity then
 			local earnFinal, earnBase = earningPerSec(cfg, rec)
 			hits[#hits + 1] = {
@@ -2256,7 +2267,7 @@ end
 -- v1, NOT v2: v1 is the only one that returns a per-server `ping`, and
 -- sortOrder=Asc still gives the least-populated servers first - so one fetch
 -- buys both the emptiest candidates and the laggy ones we should never join.
-local SERVER_LIST_URL = "https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=50&excludeFullGames=true"
+local SERVER_LIST_URL = "https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100&excludeFullGames=true"
 
 -- Single-account mobile build: on-disk cache + circuit breaker to stay
 -- under Roblox's rate limit. Cache survives hops so 429s are impossible
@@ -2531,7 +2542,7 @@ local function pickTargets(forceFresh)
 				-- another of your accounts owns this server
 				local notMine = not mySlice(s.id)
 				-- Strict 2/7-3/7 only: listed playing 1-2, nothing else aimed at.
-				local band   = s.playing ~= 1 and s.playing ~= 2
+				local band   = s.playing < (tonumber(CONFIG.LIST_MIN_PLAYING) or 1) or s.playing > (tonumber(CONFIG.LIST_MAX_PLAYING) or 2)
 
 				if bounce or full or empty or over or seen or band or isLaggy or dead or notMine then
 					skipped = skipped + 1
