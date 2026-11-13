@@ -1409,7 +1409,6 @@ local function metaText(a)
 	local parts = {}
 	if a.kg and a.kg ~= "" then parts[#parts + 1] = a.kg end
 	if a.players and a.players ~= "" then parts[#parts + 1] = a.players end
-	if a.lat then parts[#parts + 1] = ("%.1fs delay"):format(a.lat / 1000) end
 	parts[#parts + 1] = timeAgo(a.born)
 	if ACC.srvMode == "All" and ACC.srvOf(a) ~= "Other" then parts[#parts + 1] = ACC.srvOf(a) end   -- which kind of server
 	return table.concat(parts, "  •  ")
