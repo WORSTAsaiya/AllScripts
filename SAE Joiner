@@ -1969,6 +1969,11 @@ end
 
 btnMin.MouseButton1Click:Connect(FX.minimize)
 btnClose.MouseButton1Click:Connect(function()
+	if ACC.ban and ACC.ban.kind == "expired" then   -- closing the joiner ends the "expired" message
+		local last = ACC.readLastKey()
+		last.expired = false
+		ACC.writeLastKey(last)
+	end
 	stopped = true
 	env.EGG_HUB_RUNNING = nil
 	env.EGG_HUB_SYNC = nil
@@ -2193,6 +2198,193 @@ task.delay(0.7, function()
 	end)
 end)
 
+-- ------------------------------------------------------------- status banner (top middle)
+-- Every start (so also after every hop): "Verifying...", then ONE of:
+--   key accepted         -> "Verified! Hello [key name]"                 (3 seconds)
+--   key expired          -> "[key name] your key has expired..."        (stays until a new key or the joiner is closed)
+--   no key, first run    -> welcome + what Free mode shows              (5 minutes, or until the next server)
+--   no key               -> "You are on Free mode, visit ..."           (stays)
+-- Roblox can't open a browser, so tapping the link copies it.
+-- Everything lives in ACC so this script stays under Lua's 200-locals limit.
+ACC.SHOP_URL    = "https://worst.homes/#shop"
+ACC.welcomeFile = "WorstEggFinder_welcomed_" .. tostring(LocalPlayer.UserId) .. ".txt"
+ACC.lastKeyFile = "WorstEggFinder_lastkey.json"
+ACC.readLastKey = function()
+	local ok, d = pcall(function()
+		if isfile and readfile and isfile(ACC.lastKeyFile) then return HttpService:JSONDecode(readfile(ACC.lastKeyFile)) end
+	end)
+	return (ok and type(d) == "table") and d or {}
+end
+ACC.writeLastKey = function(t) pcall(function() if writefile then writefile(ACC.lastKeyFile, HttpService:JSONEncode(t)) end end) end
+-- true only the very first time this Roblox account runs the joiner on this device (with or without a key)
+ACC.firstRun = function()
+	if not (isfile and writefile) then return false end
+	local ok, seen = pcall(isfile, ACC.welcomeFile)
+	if not ok or seen then return false end
+	pcall(writefile, ACC.welcomeFile, tostring(os.time()))
+	return true
+end
+ACC.rt = function(s) return (tostring(s or ""):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"):gsub('"', "&quot;")) end
+
+ACC.banBuild = function()
+	if ACC.ban then return ACC.ban end
+	local b = {}
+	b.frame = mk("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, -160), Size = UDim2.new(0, 460, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = Color3.new(1, 1, 1), Visible = false, ZIndex = 50,
+	}, gui)
+	corner(b.frame, 12)
+	mk("UIGradient", { Rotation = 90, Color = ColorSequence.new(Color3.fromRGB(30, 30, 34), Color3.fromRGB(11, 11, 13)) }, b.frame)
+	local st = mk("UIStroke", { Color = Color3.new(1, 1, 1), Thickness = 2 }, b.frame)
+	mk("UIGradient", { Color = FX.shine }, st)
+	mk("UIPadding", { PaddingTop = UDim.new(0, 14), PaddingBottom = UDim.new(0, 14), PaddingLeft = UDim.new(0, 20), PaddingRight = UDim.new(0, 20) }, b.frame)
+	mk("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, b.frame)
+	b.scale = mk("UIScale", { Scale = 1 }, b.frame)   -- grows on big (PC) screens, see ACC.banner
+	local function line(order, font, size, color, class)
+		return mk(class or "TextLabel", {
+			LayoutOrder = order, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1,
+			Text = "", RichText = true, TextWrapped = true, Font = font, TextSize = size, TextColor3 = color, ZIndex = 51,
+		}, b.frame)
+	end
+	b.title = line(1, Enum.Font.GothamBlack, 19, C.white)
+	b.body  = line(2, Enum.Font.GothamMedium, 15, C.light)
+	b.link  = line(3, Enum.Font.GothamBold, 15, C.white, "TextButton")
+	b.link.AutoButtonColor = false
+	b.note  = line(4, Enum.Font.GothamMedium, 12, C.ashLite)
+	b.link.MouseButton1Click:Connect(function()
+		local ok = pcall(function() (setclipboard or toclipboard or set_clipboard)(ACC.SHOP_URL) end)
+		b.note.Text = ok and "Link copied! Paste it in your browser." or ("Type " .. ACC.SHOP_URL .. " in your browser.")
+		b.note.TextColor3 = C.white
+		b.note.Visible = true
+		b.copyGen = (b.copyGen or 0) + 1
+		local g = b.copyGen
+		task.delay(3, function()
+			if b.copyGen ~= g or not b.frame.Parent then return end
+			b.note.Text, b.note.TextColor3 = b.noteText or "", C.ashLite
+			b.note.Visible = b.note.Text ~= ""
+		end)
+	end)
+	ACC.ban = b
+	return b
+end
+
+-- moves the joiner window down while the banner would cover it, and back up afterwards
+ACC.banShift = function(want)
+	local b = ACC.ban
+	if not b then return end
+	local cur = b.shift or 0
+	local need = 0
+	if want and main.Visible and b.frame.Visible then
+		local cam = workspace.CurrentCamera
+		local vp = cam and cam.ViewportSize or Vector2.new(1280, 720)
+		local bw, bh = b.frame.AbsoluteSize.X, b.frame.AbsoluteSize.Y
+		local bLeft, bBottom = vp.X / 2 - bw / 2, 10 + bh + 8
+		local mPos, mSize = main.AbsolutePosition, main.AbsoluteSize
+		local top = mPos.Y - cur
+		if mPos.X < bLeft + bw and mPos.X + mSize.X > bLeft and top < bBottom then need = math.ceil(bBottom - top) end
+	end
+	if need == cur then return end
+	b.shift = need
+	tween(main, 0.25, { Position = main.Position + UDim2.new(0, 0, 0, need - cur) })
+end
+
+ACC.banner = function(kind, opts)
+	if stopped or CONFIG.DEMO then return end
+	opts = opts or {}
+	local b = ACC.banBuild()
+	b.gen = (b.gen or 0) + 1
+	local gen = b.gen
+	b.kind = kind
+	local link, body, note = nil, "", ""
+	if kind == "verifying" then
+		b.title.Text = "Verifying..."
+	elseif kind == "verified" then
+		b.title.Text = "Verified!"
+		body = (opts.name and opts.name ~= "") and ("Hello <b>" .. ACC.rt(opts.name) .. "</b>") or "Welcome back"
+	elseif kind == "expired" then
+		b.title.Text = "Key expired"
+		body = ((opts.name and opts.name ~= "") and ("<b>" .. ACC.rt(opts.name) .. "</b> your key has expired.") or "Your key has expired.")
+			.. " Renew or keep using the free version."
+		link = "Renew at <u>" .. ACC.SHOP_URL .. "</u>"
+		note = "Tap the link to copy it."
+	elseif kind == "welcome" then
+		local S = ACC.session or {}
+		local max = tonumber(S.freeMax) or 0
+		local delay = (tonumber(S.delayMs) or 0) / 1000
+		local delayText = delay > 0 and (("%g"):format(math.floor(delay * 10 + 0.5) / 10) .. "s") or "no delay"
+		b.title.Text = "Hello <b>" .. ACC.rt(LocalPlayer.Name) .. "</b> and thank you for running WORST - Egg Finder"
+		body = (max >= 1e18)
+			and ("You are currently on <b>Free Mode</b> and can see every egg with a delay of <b>" .. delayText .. "</b>.")
+			or ("You are currently on <b>Free Mode</b> and can only see up to <b>$" .. fmt(max) .. "/s</b> with a delay of <b>" .. delayText .. "</b>.")
+		link = "If you wish to purchase premium, visit <u>" .. ACC.SHOP_URL .. "</u>"
+		note = "Tap the link to copy it."
+	else -- "free"
+		b.title.Text = "You are on Free mode"
+		link = "Visit <u>" .. ACC.SHOP_URL .. "</u> to purchase one"
+		note = "Tap the link to copy it."
+	end
+	b.body.Text, b.body.Visible = body, body ~= ""
+	b.link.Text, b.link.Visible = link or "", link ~= nil
+	b.noteText = note
+	b.note.Text, b.note.TextColor3, b.note.Visible = note, C.ashLite, note ~= ""
+
+	-- size: phones keep the normal size, bigger screens (PC) scale it up so it is easy to read
+	local cam = workspace.CurrentCamera
+	local vp = cam and cam.ViewportSize or Vector2.new(1280, 720)
+	local sc = math.clamp(vp.Y / 720, 1, 1.45)
+	b.scale.Scale = sc
+	b.frame.Size = UDim2.new(0, math.min(520, (vp.X - 24) / sc), 0, 0)
+	if not b.frame.Visible then
+		b.frame.Position = UDim2.new(0.5, 0, 0, -160)
+		b.frame.Visible = true
+		tween(b.frame, 0.35, { Position = UDim2.new(0.5, 0, 0, 10) }, Enum.EasingStyle.Back)
+	end
+	task.delay(0.05, function() if b.gen == gen then ACC.banShift(true) end end)
+
+	if kind == "verifying" then   -- animated dots while the relay answers
+		task.spawn(function()
+			local n = 0
+			while b.gen == gen and not stopped do
+				n = n % 3 + 1
+				b.title.Text = "Verifying" .. string.rep(".", n)
+				task.wait(0.35)
+			end
+		end)
+	end
+	if opts.hideAfter then
+		task.delay(opts.hideAfter, function() if b.gen == gen then ACC.bannerHide() end end)
+	end
+end
+
+ACC.bannerHide = function()
+	local b = ACC.ban
+	if not b or not b.frame.Visible then return end
+	b.gen = (b.gen or 0) + 1
+	b.kind = nil
+	local gen = b.gen
+	ACC.banShift(false)
+	tween(b.frame, 0.25, { Position = UDim2.new(0.5, 0, 0, -(b.frame.AbsoluteSize.Y + 30)) }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+	task.delay(0.27, function() if b.gen == gen then b.frame.Visible = false end end)
+end
+
+-- a key was accepted: remember its name (for the "expired" message later) and say hello for 3 seconds
+ACC.afterKey = function()
+	local S = ACC.session
+	if not S or S.free then return end
+	ACC.writeLastKey({ label = S.name, expired = false })
+	ACC.banner("verified", { name = S.name, hideAfter = 3 })
+end
+
+-- no key (free version, or nothing): pick the right message
+ACC.bannerForFree = function(allowWelcome)
+	local last = ACC.readLastKey()
+	if last.expired then return ACC.banner("expired", { name = last.label }) end
+	local S = ACC.session
+	if not (S and S.free) then return ACC.bannerHide() end   -- free version off / relay unreachable: the login window explains
+	if allowWelcome then return ACC.banner("welcome", { hideAfter = 300 }) end
+	ACC.banner("free")
+end
+
 -- ------------------------------------------------------------------ login
 -- Nothing is fetched and no egg is listed until a key has been accepted by the relay.
 ACC.tokenFile  = "WorstEggFinder_token.txt"
@@ -2286,7 +2478,7 @@ ACC.login = function(token, isFree)
 		return false, tostring(d.error or "Login failed."), (tonumber(res.StatusCode or res.status) == 401)
 	end
 	if ACC.session then ACC.resetFeed() end   -- a key replacing the free version: start from a clean list
-	ACC.session = { token = token, free = isFree == true, unlimited = d.unlimited == true or isFree == true, expireClock = os.clock() + (tonumber(d.secondsLeft) or 0), bots = d.bots, name = (type(d.label) == "string") and d.label or nil, freeMax = tonumber(d.freeMax) }
+	ACC.session = { token = token, free = isFree == true, unlimited = d.unlimited == true or isFree == true, expireClock = os.clock() + (tonumber(d.secondsLeft) or 0), bots = d.bots, name = (type(d.label) == "string") and d.label or nil, freeMax = tonumber(d.freeMax), delayMs = tonumber(d.delayMs) }
 	ACC.checking = false
 	if not isFree then ACC.saveToken(token) end
 	ACC.refreshStatus()
@@ -2296,6 +2488,12 @@ ACC.login = function(token, isFree)
 end
 
 ACC.logout = function(reason, keepToken, noFree)
+	do   -- an expired key is remembered, so the "expired" message shows (also on the next servers)
+		local S, r = ACC.session, tostring(reason or ""):lower()
+		if r:find("time has run out", 1, true) or r:find("expired", 1, true) then
+			ACC.writeLastKey({ label = (S and not S.free and S.name) or ACC.readLastKey().label, expired = true })
+		end
+	end
 	ACC.session = nil
 	ACC.checking = false
 	ACC.resetFeed()                -- stops the running feed and clears the list
@@ -2305,8 +2503,9 @@ ACC.logout = function(reason, keepToken, noFree)
 	ACC.refreshStatus()
 	if CONFIG.FREE and not noFree then
 		-- back to the free version, with the login window open so they can enter another key
-		task.spawn(function() ACC.startFree(); ACC.notifyLogin(reason) end)
+		task.spawn(function() ACC.startFree(); ACC.bannerForFree(false); ACC.notifyLogin(reason) end)
 	else
+		ACC.bannerForFree(false)
 		ACC.showLogin(reason)   -- no free version to fall back to: the login window opens
 	end
 end
@@ -2384,6 +2583,7 @@ ACC.build = function()
 			if ok then
 				ui.input.Text = ""
 				ACC.hideLogin()
+				ACC.afterKey()
 			else
 				ACC.say(err or "Login failed.", true)
 			end
@@ -2499,21 +2699,30 @@ task.spawn(function()
 		syncCards()
 		return runDemo()
 	end
+	local first = ACC.firstRun()
+	ACC.banner("verifying")
 	local saved = ACC.readToken()
 	if saved then
 		local ok, err, rejected = ACC.login(saved)
-		if ok then return end
+		if ok then ACC.afterKey() return end
 		if rejected then ACC.clearToken() end
+		if rejected and tostring(err):lower():find("expired", 1, true) then
+			local last = ACC.readLastKey()
+			last.expired = true
+			ACC.writeLastKey(last)
+		end
 		ACC.startFree()   -- a bad or expired key falls back to the free version
 		ACC.checking = false
 		ACC.refreshStatus()
 		syncCards()
+		ACC.bannerForFree(false)
 		ACC.notifyLogin(err, (not rejected) and saved or nil)   -- no pop up on execute: waits for the Login button
 	else
 		local okF, errF = ACC.startFree()
 		ACC.checking = false
 		ACC.refreshStatus()
 		syncCards()
+		ACC.bannerForFree(first)
 		if not okF then ACC.showLogin(errF) end   -- the login window only pops up if free is off or unreachable
 	end
 end)
