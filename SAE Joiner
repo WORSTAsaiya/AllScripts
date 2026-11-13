@@ -783,14 +783,29 @@ local function statBox(parent, cols, order, name)
 	return btn, box
 end
 
-local minJoinVal         = statBox(autoRow, 2, 1, "MIN JOIN")
-local autoVal, autoBox   = statBox(autoRow, 2, 2, "AUTO JOIN")
+local minJoinVal         = statBox(autoRow, 3, 1, "MIN JOIN")
+local autoVal, autoBox   = statBox(autoRow, 3, 2, "AUTO JOIN")
+ACC.srvVal               = statBox(autoRow, 3, 3, "SERVERS")
 local minVal             = statBox(statRow, 3, 1, "SHOW MIN VALUE")
 local rarityVal          = statBox(statRow, 3, 2, "RARITY")
 local hubVal, hubBox = statBox(statRow, 3, 3, "STATUS")
 minJoinVal.Text, autoVal.Text = "0", "OFF"
 autoVal.TextColor3 = C.ash
 minVal.Text, rarityVal.Text, hubVal.Text = "0", "All", "..."
+
+-- SERVERS: which game servers are listed. Whitelist = the normal game, Blacklist = the place the game
+-- sends blacklisted accounts to. Whitelist players can join both, Blacklist players only Blacklist servers.
+-- Picked automatically from the place you are in (every server): blacklist place -> Blacklist, otherwise All.
+ACC.PLACE_WL, ACC.PLACE_BL = "107778070777162", "80978566387592"
+ACC.srvOf = function(a)
+	local p = tostring(a and a.placeId or "")
+	if p == ACC.PLACE_BL then return "Blacklist" end
+	if p == ACC.PLACE_WL then return "Whitelist" end
+	return "Other"
+end
+ACC.meBlack = tostring(game.PlaceId) == ACC.PLACE_BL   -- blacklisted players can't join Whitelist servers
+ACC.srvMode = ACC.meBlack and "Blacklist" or "All"   -- whitelisted players can join both kinds, so they see everything
+ACC.srvVal.Text = ACC.srvMode
 
 -- STATUS box: shows "Login" until a key is accepted, then the TIME LEFT on that key
 ACC.fmtLeft = function(sec)
@@ -810,7 +825,7 @@ ACC.refreshStatus = function()
 	end
 	if ACC.session.free then
 		if lbl then lbl.Text = "STATUS" end
-		hubVal.Text = "Free"
+		hubVal.Text = "Login"   -- free version: tap STATUS to enter a key
 		hubVal.TextColor3 = ACC.connBad and C.ash or C.white
 		return
 	end
@@ -821,7 +836,7 @@ end
 
 mk("TextLabel", {
 	Size = UDim2.new(1, -16, 0, 16), Position = UDim2.new(0, 8, 0, 122), BackgroundTransparency = 1,
-	Text = "Tap SHOW MIN VALUE or RARITY to filter the list.",
+	Text = "Tap SHOW MIN VALUE, RARITY or SERVERS to filter the list.",
 	TextColor3 = C.ash, Font = Enum.Font.Gotham, TextSize = 10,
 }, body)
 
@@ -1163,6 +1178,14 @@ do
 end
 refreshAutoUI(false)
 
+-- SERVERS box: tap to go Whitelist -> Blacklist -> All
+ACC.srvVal.MouseButton1Click:Connect(function()
+	local nextMode = { Whitelist = "Blacklist", Blacklist = "All", All = "Whitelist" }
+	ACC.srvMode = nextMode[ACC.srvMode] or "All"
+	ACC.srvVal.Text = ACC.srvMode
+	syncCards()
+end)
+
 -- ------------------------------------------------------------------ logic
 local function setHub(text, bright)
 	ACC.connBad = (text == "RECONNECT" or text == "OFFLINE")
@@ -1188,6 +1211,7 @@ end
 
 local function passes(a)
 	if (a.valueNum or 0) < filters.minValue then return false end
+	if ACC.srvMode ~= "All" and ACC.srvOf(a) ~= ACC.srvMode then return false end
 	local r = filters.rarity
 	if r == "RareTop" then
 		if not RARITY.top[a.tier] then return false end
@@ -1248,6 +1272,10 @@ end
 
 local function joinServer(a)
 	if joining or stopped then return end
+	if ACC.meBlack and ACC.srvOf(a) == "Whitelist" then   -- the game would refuse it anyway
+		ACC.banner("blocked", { hideAfter = 5, back = true })
+		return
+	end
 	if a.jobId == game.JobId then
 		setHub("HERE", false)
 		target = { egg = a.egg, jobId = a.jobId, tier = a.tier }
@@ -1297,6 +1325,7 @@ local function tryAutoJoin(a)
 	if auto.secsLeft(a) < (tonumber(CONFIG.JOIN_CUTOFF) or 20) then return end   -- too late to steal anything
 	if (a.valueNum or 0) < auto.minValue then return end
 	if not passes(a) then return end
+	if ACC.meBlack and ACC.srvOf(a) == "Whitelist" then return end   -- can't join it: never auto-join
 	autoDone[a.jobId] = true
 	joinServer(a)
 end
@@ -1382,6 +1411,7 @@ local function metaText(a)
 	if a.players and a.players ~= "" then parts[#parts + 1] = a.players end
 	if a.lat then parts[#parts + 1] = ("%.1fs delay"):format(a.lat / 1000) end
 	parts[#parts + 1] = timeAgo(a.born)
+	if ACC.srvMode == "All" and ACC.srvOf(a) ~= "Other" then parts[#parts + 1] = ACC.srvOf(a) end   -- which kind of server
 	return table.concat(parts, "  •  ")
 end
 
@@ -2318,6 +2348,9 @@ ACC.banner = function(kind, opts)
 			or ("You are currently on <b>Free Mode</b> and can only see up to <b>$" .. fmt(max) .. "/s</b> with a delay of <b>" .. delayText .. "</b>.")
 		link = "If you wish to purchase premium, visit <u>" .. ACC.SHOP_URL .. "</u>"
 		note = "Tap the link to copy it."
+	elseif kind == "blocked" then
+		b.title.Text = "Can't join this server"
+		body = "You have been blacklisted by the game, this server is only for Whitelist users."
 	else -- "free"
 		b.title.Text = "You are on Free mode"
 		link = "Visit <u>" .. ACC.SHOP_URL .. "</u> to purchase one"
@@ -2352,7 +2385,10 @@ ACC.banner = function(kind, opts)
 		end)
 	end
 	if opts.hideAfter then
-		task.delay(opts.hideAfter, function() if b.gen == gen then ACC.bannerHide() end end)
+		task.delay(opts.hideAfter, function()
+			if b.gen ~= gen then return end
+			if opts.back then ACC.bannerBack() else ACC.bannerHide() end
+		end)
 	end
 end
 
@@ -2365,6 +2401,13 @@ ACC.bannerHide = function()
 	ACC.banShift(false)
 	tween(b.frame, 0.25, { Position = UDim2.new(0.5, 0, 0, -(b.frame.AbsoluteSize.Y + 30)) }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 	task.delay(0.27, function() if b.gen == gen then b.frame.Visible = false end end)
+end
+
+-- after a short message: show whatever belongs on screen again (free / expired reminder), or nothing
+ACC.bannerBack = function()
+	local S = ACC.session
+	if S and not S.free then return ACC.bannerHide() end
+	ACC.bannerForFree(false)
 end
 
 -- a key was accepted: remember its name (for the "expired" message later) and say hello for 3 seconds
