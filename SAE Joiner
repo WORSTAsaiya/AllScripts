@@ -28,6 +28,10 @@ local CONFIG = {
 	-- Set to false if you want a key to be required again.
 	FREE       = true,
 
+	-- VALUE CAP: eggs worth MORE than this per second never show and are never auto-joined,
+	-- for everyone (key or free). 140e9 = 140B/s. Set to 0 to turn the cap off.
+	MAX_VALUE  = 140e9,
+
 	-- optional: raw link to THIS script so it reloads itself after each teleport
 	SCRIPT_URL = "https://raw.githubusercontent.com/WORSTAsaiya/AllScripts/refs/heads/main/SAE%20Joiner",
 
@@ -1835,6 +1839,8 @@ local function addAlert(a, skipSync)
 	seqCount = seqCount + 1
 	a.seq = seqCount
 	a.valueNum = tonumber(a.value) or 0
+	local maxValue = tonumber(CONFIG.MAX_VALUE) or 0
+	if maxValue > 0 and a.valueNum > maxValue then return nil end   -- over the value cap: never listed
 	a.born = os.clock() - ((tonumber(a.age) or 0) / 1000)
 
 	-- all eggs of a wave disappear together: one deadline per session, counted from
@@ -2339,6 +2345,8 @@ ACC.banner = function(kind, opts)
 	elseif kind == "welcome" then
 		local S = ACC.session or {}
 		local max = tonumber(S.freeMax) or 0
+		local cap = tonumber(CONFIG.MAX_VALUE) or 0
+		if cap > 0 and max > cap then max = cap end   -- the value cap also limits Free Mode
 		local delay = (tonumber(S.delayMs) or 0) / 1000
 		local delayText = delay > 0 and (("%g"):format(math.floor(delay * 10 + 0.5) / 10) .. "s") or "no delay"
 		b.title.Text = "Hello <b>" .. ACC.rt(LocalPlayer.Name) .. "</b> and thank you for running WORST - Egg Finder"
