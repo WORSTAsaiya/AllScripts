@@ -29,8 +29,8 @@ local CONFIG = {
 	FREE       = true,
 
 	-- VALUE CAP: eggs worth MORE than this per second never show and are never auto-joined,
-	-- for everyone (key or free). 140e9 = 140B/s. Set to 0 to turn the cap off.
-	MAX_VALUE  = 140e9,
+	-- for everyone (key or free). 0 = no cap (free users are still limited by the free-version slider on the site).
+	MAX_VALUE  = 0,
 
 	-- optional: raw link to THIS script so it reloads itself after each teleport
 	SCRIPT_URL = "https://raw.githubusercontent.com/WORSTAsaiya/AllScripts/refs/heads/main/SAE%20Joiner",
@@ -1531,7 +1531,7 @@ local function makeCard(a, delay)
 	local nameLbl = mk("TextLabel", {
 		Size = UDim2.new(1, -(textX + 88 + chipW), 0, 20), Position = UDim2.new(0, textX, 0, 6),
 		BackgroundTransparency = 1,
-		Text = a.egg or "Egg", TextColor3 = txtMain, Font = Enum.Font.GothamBlack, TextSize = 15,
+		Text = (a.held and "HELD - " or "") .. (a.egg or "Egg"), TextColor3 = txtMain, Font = Enum.Font.GothamBlack, TextSize = 15,
 		TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
 	}, c)
 
@@ -2075,6 +2075,15 @@ local function handleMessage(raw)
 	elseif d.type == "alert" then
 		local a = addAlert(d.alert)
 		if a then tryAutoJoin(a) end
+	elseif d.type == "drop" and type(d.ids) == "table" then
+		-- OWNER HOLD: the owner joined a held server, so its eggs are gone from the list
+		local gone = {}
+		for _, id in ipairs(d.ids) do gone[id] = true end
+		for i = #alerts, 1, -1 do
+			local a = alerts[i]
+			if a.id and gone[a.id] then table.remove(alerts, i) removeCard(a) end
+		end
+		syncCards()
 	end
 end
 
