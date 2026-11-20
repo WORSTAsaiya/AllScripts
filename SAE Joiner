@@ -787,9 +787,8 @@ local function statBox(parent, cols, order, name)
 	return btn, box
 end
 
-local minJoinVal         = statBox(autoRow, 3, 1, "MIN JOIN")
-local autoVal, autoBox   = statBox(autoRow, 3, 2, "AUTO JOIN")
-ACC.srvVal               = statBox(autoRow, 3, 3, "SERVERS")
+local minJoinVal         = statBox(autoRow, 2, 1, "MIN JOIN")
+local autoVal, autoBox   = statBox(autoRow, 2, 2, "AUTO JOIN")
 local minVal             = statBox(statRow, 3, 1, "SHOW MIN VALUE")
 local rarityVal          = statBox(statRow, 3, 2, "RARITY")
 local hubVal, hubBox = statBox(statRow, 3, 3, "STATUS")
@@ -797,9 +796,8 @@ minJoinVal.Text, autoVal.Text = "0", "OFF"
 autoVal.TextColor3 = C.ash
 minVal.Text, rarityVal.Text, hubVal.Text = "0", "All", "..."
 
--- SERVERS: which game servers are listed. Whitelist = the normal game, Blacklist = the place the game
--- sends blacklisted accounts to. Whitelist players can join both, Blacklist players only Blacklist servers.
--- Picked automatically from the place you are in (every server): blacklist place -> Blacklist, otherwise All.
+-- SERVER KIND: Whitelist = the normal game, Blacklist = the place the game sends blacklisted accounts to.
+-- Every server is always listed for everyone (no filter). The kind is only shown as a word on each card.
 ACC.PLACE_WL, ACC.PLACE_BL = "107778070777162", "80978566387592"
 ACC.srvOf = function(a)
 	local p = tostring(a and a.placeId or "")
@@ -808,8 +806,6 @@ ACC.srvOf = function(a)
 	return "Other"
 end
 ACC.meBlack = tostring(game.PlaceId) == ACC.PLACE_BL   -- blacklisted players can't join Whitelist servers
-ACC.srvMode = ACC.meBlack and "Blacklist" or "All"   -- whitelisted players can join both kinds, so they see everything
-ACC.srvVal.Text = ACC.srvMode
 
 -- STATUS box: shows "Login" until a key is accepted, then the TIME LEFT on that key
 ACC.fmtLeft = function(sec)
@@ -840,7 +836,7 @@ end
 
 mk("TextLabel", {
 	Size = UDim2.new(1, -16, 0, 16), Position = UDim2.new(0, 8, 0, 122), BackgroundTransparency = 1,
-	Text = "Tap SHOW MIN VALUE, RARITY or SERVERS to filter the list.",
+	Text = "Tap SHOW MIN VALUE or RARITY to filter the list.",
 	TextColor3 = C.ash, Font = Enum.Font.Gotham, TextSize = 10,
 }, body)
 
@@ -1182,14 +1178,6 @@ do
 end
 refreshAutoUI(false)
 
--- SERVERS box: tap to go Whitelist -> Blacklist -> All
-ACC.srvVal.MouseButton1Click:Connect(function()
-	local nextMode = { Whitelist = "Blacklist", Blacklist = "All", All = "Whitelist" }
-	ACC.srvMode = nextMode[ACC.srvMode] or "All"
-	ACC.srvVal.Text = ACC.srvMode
-	syncCards()
-end)
-
 -- ------------------------------------------------------------------ logic
 local function setHub(text, bright)
 	ACC.connBad = (text == "RECONNECT" or text == "OFFLINE")
@@ -1215,7 +1203,6 @@ end
 
 local function passes(a)
 	if (a.valueNum or 0) < filters.minValue then return false end
-	if ACC.srvMode ~= "All" and ACC.srvOf(a) ~= ACC.srvMode then return false end
 	local r = filters.rarity
 	if r == "RareTop" then
 		if not RARITY.top[a.tier] then return false end
@@ -1414,7 +1401,7 @@ local function metaText(a)
 	if a.kg and a.kg ~= "" then parts[#parts + 1] = a.kg end
 	if a.players and a.players ~= "" then parts[#parts + 1] = a.players end
 	parts[#parts + 1] = timeAgo(a.born)
-	if ACC.srvMode == "All" and ACC.srvOf(a) ~= "Other" then parts[#parts + 1] = ACC.srvOf(a) end   -- which kind of server
+	if ACC.srvOf(a) ~= "Other" then parts[#parts + 1] = ACC.srvOf(a) end   -- which kind of server
 	return table.concat(parts, "  •  ")
 end
 
