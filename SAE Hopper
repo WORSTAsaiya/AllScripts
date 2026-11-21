@@ -1,1 +1,2 @@
 loadstring(game:HttpGet("https://raw.githubusercontent.com/WORST-Collab/Mix/refs/heads/main/Hopper%20Rejoin%20Redfinger"))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/WORSTAsaiya/AllScripts/refs/heads/main/Steal%20An%20Egg"))()
